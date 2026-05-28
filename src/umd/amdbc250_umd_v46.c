@@ -500,10 +500,263 @@ __declspec(dllexport) HRESULT APIENTRY OpenAdapter12(_Inout_ D3D12DDIARG_OPENADA
 __declspec(dllexport) HRESULT APIENTRY OpenAdapter10(_Inout_ D3D10DDIARG_OPENADAPTER* p) { UNREFERENCED_PARAMETER(p); return S_OK; }
 __declspec(dllexport) HRESULT APIENTRY OpenAdapter10_2(_Inout_ D3D10DDIARG_OPENADAPTER* p) { UNREFERENCED_PARAMETER(p); return S_OK; }
 
+/* ============================================================================
+   D3D9 DDI Support — DrawPrimitive with PM4 packets
+   Based on ZEROAESQUERDA/BC250-windowsDriverTest approach
+   ============================================================================ */
+
+#include <d3dumddi.h>
+#include <d3dkmthk.h>
+
+/* PM4 opcodes (from amdbc250_hw.h) */
+#define PM4_TYPE3_HDR_D3D9(opcode, cnt) ((3u << 30) | (((cnt) - 1) << 16) | ((opcode) << 8))
+#define IT_DRAW_INDEX_AUTO_D3D9  0x2D
+#define IT_SET_CONTEXT_REG_D3D9  0x69
+#define IT_EVENT_WRITE_EOP_D3D9  0x47
+
+/* UMD D3D9 context */
+typedef struct _BC250_D3D9_DEVICE {
+    HANDLE              hDevice;
+    HANDLE              hAdapter;
+    HANDLE              hSwapChain;
+    UINT                BackBufferWidth;
+    UINT                BackBufferHeight;
+    D3DDDIFORMAT        BackBufferFormat;
+    PVOID               CommandBuffer;
+    UINT                CommandBufferSize;
+    UINT                CmdBufferUsed;
+    UINT64              FenceValue;
+    CRITICAL_SECTION    Lock;
+} BC250_D3D9_DEVICE, *PBC250_D3D9_DEVICE;
+
+static BC250_D3D9_DEVICE g_D3D9Device = {0};
+
+/* D3D9 DDI: OpenAdapter */
+static HRESULT APIENTRY D3D9_CreateDevice(HANDLE, D3DDDIARG_CREATEDEVICE*);
+static HRESULT APIENTRY D3D9_CloseAdapter(HANDLE);
+static HRESULT APIENTRY D3D9_CreateResource(HANDLE, D3DDDIARG_CREATERESOURCE*);
+static HRESULT APIENTRY D3D9_DestroyResource(HANDLE, HANDLE);
+static HRESULT APIENTRY D3D9_SetRenderState(HANDLE, CONST D3DDDIARG_RENDERSTATE*);
+static HRESULT APIENTRY D3D9_SetStreamSource(HANDLE, CONST D3DDDIARG_SETSTREAMSOURCE*);
+static HRESULT APIENTRY D3D9_SetIndices(HANDLE, CONST D3DDDIARG_SETINDICES*);
+static HRESULT APIENTRY D3D9_DrawPrimitive(HANDLE, CONST D3DDDIARG_DRAWPRIMITIVE*, CONST UINT*);
+static HRESULT APIENTRY D3D9_DrawIndexedPrimitive(HANDLE hDev, CONST D3DDDIARG_DRAWINDEXEDPRIMITIVE* pArgs);
+static HRESULT APIENTRY D3D9_Present(HANDLE, CONST D3DDDIARG_PRESENT*);
+static HRESULT APIENTRY D3D9_Flush(HANDLE);
+static HRESULT APIENTRY D3D9_Lock(HANDLE, D3DDDIARG_LOCK*);
+static HRESULT APIENTRY D3D9_Unlock(HANDLE, CONST D3DDDIARG_UNLOCK*);
+static HRESULT APIENTRY D3D9_CreateVertexShaderDecl(HANDLE, D3DDDIARG_CREATEVERTEXSHADERDECL*, CONST D3DDDIVERTEXELEMENT*);
+static HRESULT APIENTRY D3D9_SetVertexShaderDecl(HANDLE, HANDLE);
+static HRESULT APIENTRY D3D9_DeleteVertexShaderDecl(HANDLE, HANDLE);
+static HRESULT APIENTRY D3D9_CreateVertexShaderFunc(HANDLE, D3DDDIARG_CREATEVERTEXSHADERFUNC*, CONST UINT*);
+static HRESULT APIENTRY D3D9_SetVertexShaderFunc(HANDLE, HANDLE);
+static HRESULT APIENTRY D3D9_DeleteVertexShaderFunc(HANDLE, HANDLE);
+static HRESULT APIENTRY D3D9_CreatePixelShader(HANDLE, D3DDDIARG_CREATEPIXELSHADER*, CONST UINT*);
+static HRESULT APIENTRY D3D9_SetPixelShader(HANDLE, HANDLE);
+static HRESULT APIENTRY D3D9_DeletePixelShader(HANDLE, HANDLE);
+static HRESULT APIENTRY D3D9_SetTexture(HANDLE, UINT, HANDLE);
+static HRESULT APIENTRY D3D9_SetViewport(HANDLE, CONST D3DDDIARG_VIEWPORTINFO*);
+static HRESULT APIENTRY D3D9_SetScissorRect(HANDLE, CONST RECT*);
+static HRESULT APIENTRY D3D9_SetRenderTarget(HANDLE, CONST D3DDDIARG_SETRENDERTARGET*);
+static HRESULT APIENTRY D3D9_Clear(HANDLE, CONST D3DDDIARG_CLEAR*, UINT, CONST RECT*);
+static HRESULT APIENTRY D3D9_CreateQuery(HANDLE, D3DDDIARG_CREATEQUERY*);
+static HRESULT APIENTRY D3D9_DestroyQuery(HANDLE, HANDLE);
+static HRESULT APIENTRY D3D9_IssueQuery(HANDLE, CONST D3DDDIARG_ISSUEQUERY*);
+
+static HRESULT APIENTRY D3D9_OpenAdapter(D3DDDIARG_OPENADAPTER* pArgs)
+{
+    if (!pArgs) return E_INVALIDARG;
+    OutputDebugStringA("BC-250 UMD: D3D9 OpenAdapter\n");
+    pArgs->pAdapterFuncs->pfnCreateDevice = D3D9_CreateDevice;
+    pArgs->pAdapterFuncs->pfnCloseAdapter = D3D9_CloseAdapter;
+    return S_OK;
+}
+
+static HRESULT APIENTRY D3D9_CloseAdapter(HANDLE hAdapter) { UNREFERENCED_PARAMETER(hAdapter); return S_OK; }
+
+/* D3D9 DDI: CreateDevice */
+static HRESULT APIENTRY D3D9_CreateDevice(HANDLE hAdapter, D3DDDIARG_CREATEDEVICE* pArgs)
+{
+    UNREFERENCED_PARAMETER(hAdapter);
+    PBC250_D3D9_DEVICE dev = &g_D3D9Device;
+    RtlZeroMemory(dev, sizeof(BC250_D3D9_DEVICE));
+    InitializeCriticalSection(&dev->Lock);
+    dev->hDevice = pArgs->hDevice;
+    dev->FenceValue = 1;
+
+    /* Fill D3D9 DDI function table */
+    D3DDDI_DEVICEFUNCS* f = pArgs->pDeviceFuncs;
+    f->pfnCreateResource        = D3D9_CreateResource;
+    f->pfnDestroyResource       = D3D9_DestroyResource;
+    f->pfnSetRenderState        = D3D9_SetRenderState;
+    f->pfnSetStreamSource       = D3D9_SetStreamSource;
+    f->pfnSetIndices            = D3D9_SetIndices;
+    f->pfnDrawPrimitive         = D3D9_DrawPrimitive;
+    f->pfnDrawIndexedPrimitive  = D3D9_DrawIndexedPrimitive;
+    f->pfnPresent               = D3D9_Present;
+    f->pfnFlush                 = D3D9_Flush;
+    f->pfnLock                  = D3D9_Lock;
+    f->pfnUnlock                = D3D9_Unlock;
+    f->pfnCreateVertexShaderDecl = D3D9_CreateVertexShaderDecl;
+    f->pfnSetVertexShaderDecl   = D3D9_SetVertexShaderDecl;
+    f->pfnDeleteVertexShaderDecl = D3D9_DeleteVertexShaderDecl;
+    f->pfnCreateVertexShaderFunc = D3D9_CreateVertexShaderFunc;
+    f->pfnSetVertexShaderFunc   = D3D9_SetVertexShaderFunc;
+    f->pfnDeleteVertexShaderFunc = D3D9_DeleteVertexShaderFunc;
+    f->pfnCreatePixelShader     = D3D9_CreatePixelShader;
+    f->pfnSetPixelShader        = D3D9_SetPixelShader;
+    f->pfnDeletePixelShader     = D3D9_DeletePixelShader;
+    f->pfnSetTexture            = D3D9_SetTexture;
+    f->pfnSetViewport           = D3D9_SetViewport;
+    f->pfnSetScissorRect        = D3D9_SetScissorRect;
+    f->pfnSetRenderTarget       = D3D9_SetRenderTarget;
+    f->pfnClear                 = D3D9_Clear;
+    f->pfnCreateQuery           = D3D9_CreateQuery;
+    f->pfnDestroyQuery          = D3D9_DestroyQuery;
+    f->pfnIssueQuery            = D3D9_IssueQuery;
+
+    OutputDebugStringA("BC-250 UMD: D3D9 CreateDevice OK\n");
+    return S_OK;
+}
+
+static HRESULT APIENTRY D3D9_DestroyDevice(HANDLE hDev) { UNREFERENCED_PARAMETER(hDev); DeleteCriticalSection(&g_D3D9Device.Lock); return S_OK; }
+
+/* D3D9 DDI: CreateResource */
+static HRESULT APIENTRY D3D9_CreateResource(HANDLE hDev, D3DDDIARG_CREATERESOURCE* pArgs)
+{
+    UNREFERENCED_PARAMETER(hDev);
+    if (!pArgs) return E_INVALIDARG;
+    pArgs->hResource = (HANDLE)(ULONG_PTR)0x1;
+    return S_OK;
+}
+
+static HRESULT APIENTRY D3D9_DestroyResource(HANDLE hDev, HANDLE hRes) { UNREFERENCED_PARAMETER(hDev); UNREFERENCED_PARAMETER(hRes); return S_OK; }
+
+/* D3D9 DDI: DrawPrimitive — PM4 DRAW_INDEX_AUTO */
+static HRESULT APIENTRY D3D9_DrawPrimitive(HANDLE hDev, CONST D3DDDIARG_DRAWPRIMITIVE* pArgs, CONST UINT* pFlagBuffer)
+{
+    PBC250_D3D9_DEVICE dev = &g_D3D9Device;
+    UNREFERENCED_PARAMETER(hDev);
+    UNREFERENCED_PARAMETER(pFlagBuffer);
+
+    if (!pArgs || !dev->CommandBuffer) return E_FAIL;
+
+    EnterCriticalSection(&dev->Lock);
+
+    PULONG cmd = (PULONG)((PUCHAR)dev->CommandBuffer + dev->CmdBufferUsed);
+
+    /* PM4 DRAW_INDEX_AUTO packet: vertex count = PrimitiveCount * 3 (for triangles) */
+    cmd[0] = PM4_TYPE3_HDR_D3D9(IT_DRAW_INDEX_AUTO_D3D9, 3);
+    cmd[1] = pArgs->PrimitiveCount * 3;
+    cmd[2] = (ULONG)pArgs->PrimitiveType | (1 << 8);
+
+    dev->CmdBufferUsed += 3 * sizeof(ULONG);
+
+    LeaveCriticalSection(&dev->Lock);
+    return S_OK;
+}
+
+static HRESULT APIENTRY D3D9_DrawIndexedPrimitive(HANDLE hDev, CONST D3DDDIARG_DRAWINDEXEDPRIMITIVE* pArgs)
+{
+    UNREFERENCED_PARAMETER(hDev); UNREFERENCED_PARAMETER(pArgs);
+    return S_OK;
+}
+
+/* D3D9 DDI: Present — D3DKMTPresent */
+static HRESULT APIENTRY D3D9_Present(HANDLE hDev, CONST D3DDDIARG_PRESENT* pArgs)
+{
+    PBC250_D3D9_DEVICE dev = &g_D3D9Device;
+    UNREFERENCED_PARAMETER(hDev); UNREFERENCED_PARAMETER(pArgs);
+
+    /* Flush pending commands first */
+    D3D9_Flush(hDev);
+
+    dev->FenceValue++;
+    return S_OK;
+}
+
+/* D3D9 DDI: Flush — submit command buffer */
+static HRESULT APIENTRY D3D9_Flush(HANDLE hDev)
+{
+    PBC250_D3D9_DEVICE dev = &g_D3D9Device;
+    UNREFERENCED_PARAMETER(hDev);
+
+    if (dev->CmdBufferUsed == 0) return S_OK;
+
+    /* Submit command buffer via IOCTL to KMD */
+    ULONG submitData[4] = {0};
+    submitData[0] = (ULONG)(ULONG_PTR)dev->CommandBuffer;
+    submitData[1] = dev->CmdBufferUsed;
+    submitData[2] = (ULONG)dev->FenceValue;
+    submitData[3] = 0; /* GFX queue */
+
+    HANDLE hKmd = CreateFileW(L"\\\\.\\AMDBC250DreamV43", GENERIC_READ | GENERIC_WRITE,
+                              0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hKmd != INVALID_HANDLE_VALUE) {
+        DWORD ret = 0;
+        DeviceIoControl(hKmd, 0x80000880, submitData, sizeof(submitData), NULL, 0, &ret, NULL);
+        CloseHandle(hKmd);
+    }
+
+    dev->CmdBufferUsed = 0;
+    return S_OK;
+}
+
+/* D3D9 DDI: Lock/Unlock */
+static HRESULT APIENTRY D3D9_Lock(HANDLE hDev, D3DDDIARG_LOCK* pArgs)
+{
+    UNREFERENCED_PARAMETER(hDev);
+    UNREFERENCED_PARAMETER(pArgs);
+    return S_OK;
+}
+
+static HRESULT APIENTRY D3D9_Unlock(HANDLE hDev, CONST D3DDDIARG_UNLOCK* pArgs)
+{
+    UNREFERENCED_PARAMETER(hDev); UNREFERENCED_PARAMETER(pArgs);
+    return S_OK;
+}
+
+/* D3D9 DDI: Shader stubs */
+static HRESULT APIENTRY D3D9_CreateVertexShaderDecl(HANDLE h, D3DDDIARG_CREATEVERTEXSHADERDECL* p, CONST D3DDDIVERTEXELEMENT* e)
+{ UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(e); p->ShaderHandle = (HANDLE)1; return S_OK; }
+static HRESULT APIENTRY D3D9_SetVertexShaderDecl(HANDLE h, HANDLE s) { UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(s); return S_OK; }
+static HRESULT APIENTRY D3D9_DeleteVertexShaderDecl(HANDLE h, HANDLE s) { UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(s); return S_OK; }
+static HRESULT APIENTRY D3D9_CreateVertexShaderFunc(HANDLE h, D3DDDIARG_CREATEVERTEXSHADERFUNC* p, CONST UINT* c)
+{ UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(c); p->ShaderHandle = (HANDLE)1; return S_OK; }
+static HRESULT APIENTRY D3D9_SetVertexShaderFunc(HANDLE h, HANDLE s) { UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(s); return S_OK; }
+static HRESULT APIENTRY D3D9_DeleteVertexShaderFunc(HANDLE h, HANDLE s) { UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(s); return S_OK; }
+static HRESULT APIENTRY D3D9_CreatePixelShader(HANDLE h, D3DDDIARG_CREATEPIXELSHADER* p, CONST UINT* c)
+{ UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(c); p->ShaderHandle = (HANDLE)1; return S_OK; }
+static HRESULT APIENTRY D3D9_SetPixelShader(HANDLE h, HANDLE s) { UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(s); return S_OK; }
+static HRESULT APIENTRY D3D9_DeletePixelShader(HANDLE h, HANDLE s) { UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(s); return S_OK; }
+
+/* D3D9 DDI: State stubs */
+static HRESULT APIENTRY D3D9_SetRenderState(HANDLE h, CONST D3DDDIARG_RENDERSTATE* p) { UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(p); return S_OK; }
+static HRESULT APIENTRY D3D9_SetStreamSource(HANDLE h, CONST D3DDDIARG_SETSTREAMSOURCE* p) { UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(p); return S_OK; }
+static HRESULT APIENTRY D3D9_SetIndices(HANDLE h, CONST D3DDDIARG_SETINDICES* p) { UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(p); return S_OK; }
+static HRESULT APIENTRY D3D9_SetTexture(HANDLE h, UINT s, HANDLE t) { UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(s); UNREFERENCED_PARAMETER(t); return S_OK; }
+static HRESULT APIENTRY D3D9_SetViewport(HANDLE h, CONST D3DDDIARG_VIEWPORTINFO* p) { UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(p); return S_OK; }
+static HRESULT APIENTRY D3D9_SetScissorRect(HANDLE h, CONST RECT* r) { UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(r); return S_OK; }
+static HRESULT APIENTRY D3D9_SetRenderTarget(HANDLE h, CONST D3DDDIARG_SETRENDERTARGET* p) { UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(p); return S_OK; }
+static HRESULT APIENTRY D3D9_Clear(HANDLE h, CONST D3DDDIARG_CLEAR* p, UINT n, CONST RECT* r) { UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(p); UNREFERENCED_PARAMETER(n); UNREFERENCED_PARAMETER(r); return S_OK; }
+static HRESULT APIENTRY D3D9_CreateQuery(HANDLE h, D3DDDIARG_CREATEQUERY* p) { UNREFERENCED_PARAMETER(h); p->hQuery = (HANDLE)1; return S_OK; }
+static HRESULT APIENTRY D3D9_DestroyQuery(HANDLE h, HANDLE q) { UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(q); return S_OK; }
+static HRESULT APIENTRY D3D9_IssueQuery(HANDLE h, CONST D3DDDIARG_ISSUEQUERY* p) { UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(p); return S_OK; }
+
+/* D3D9 entry point */
+__declspec(dllexport) HRESULT APIENTRY OpenAdapter(D3DDDIARG_OPENADAPTER* pArgs)
+{
+    if (!pArgs) return E_INVALIDARG;
+    OutputDebugStringA("BC-250 UMD: D3D9 OpenAdapter\n");
+    pArgs->pAdapterFuncs->pfnCreateDevice = D3D9_CreateDevice;
+    pArgs->pAdapterFuncs->pfnCloseAdapter = D3D9_CloseAdapter;
+    return S_OK;
+}
+
 BOOL APIENTRY DllMain(HMODULE h, DWORD r, LPVOID v)
 {
     UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(v);
-    if (r == DLL_PROCESS_ATTACH) OutputDebugStringA("BC-250 UMD: Loaded\n");
+    if (r == DLL_PROCESS_ATTACH) OutputDebugStringA("BC-250 UMD: Loaded (D3D9+D3D12)\n");
     if (r == DLL_PROCESS_DETACH) OutputDebugStringA("BC-250 UMD: Unloaded\n");
     return TRUE;
 }

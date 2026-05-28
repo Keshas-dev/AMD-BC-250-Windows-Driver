@@ -41,6 +41,12 @@ amdbc250umd64.dll = 1
 
 [AMD.NTamd64]
 %BC250.DeviceDesc% = DreamV3_Install, PCI\VEN_1002&DEV_13FE
+%BC250.DeviceDesc% = DreamV3_Install, PCI\VEN_1002&DEV_143F
+%BC250.DeviceDesc% = DreamV3_Install, PCI\VEN_1002&DEV_13DB
+%BC250.DeviceDesc% = DreamV3_Install, PCI\VEN_1002&DEV_13F9
+%BC250.DeviceDesc% = DreamV3_Install, PCI\VEN_1002&DEV_13FA
+%BC250.DeviceDesc% = DreamV3_Install, PCI\VEN_1002&DEV_13FB
+%BC250.DeviceDesc% = DreamV3_Install, PCI\VEN_1002&DEV_13FC
 
 ;-----------------------------------------------------------------------
 ; Installation
