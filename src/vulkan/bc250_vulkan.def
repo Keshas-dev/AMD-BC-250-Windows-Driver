@@ -1,0 +1,5 @@
+LIBRARY amdbc250vulkan
+EXPORTS
+    vk_icdGetInstanceProcAddr
+    vk_icdGetDeviceProcAddr
+    DllMain
