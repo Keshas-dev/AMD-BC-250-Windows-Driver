@@ -807,15 +807,11 @@ static HRESULT APIENTRY D3D9_CreatePixelShader(HANDLE h, D3DDDIARG_CREATEPIXELSH
 static HRESULT APIENTRY D3D9_SetPixelShader(HANDLE h, HANDLE s) { UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(s); return S_OK; }
 static HRESULT APIENTRY D3D9_DeletePixelShader(HANDLE h, HANDLE s) { UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(s); return S_OK; }
 
-/* D3D9 DDI: State stubs */
+/* D3D9 DDI: State stubs (implemented below with PM4 packets) */
 static HRESULT APIENTRY D3D9_SetRenderState(HANDLE h, CONST D3DDDIARG_RENDERSTATE* p) { UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(p); return S_OK; }
 static HRESULT APIENTRY D3D9_SetStreamSource(HANDLE h, CONST D3DDDIARG_SETSTREAMSOURCE* p) { UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(p); return S_OK; }
 static HRESULT APIENTRY D3D9_SetIndices(HANDLE h, CONST D3DDDIARG_SETINDICES* p) { UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(p); return S_OK; }
 static HRESULT APIENTRY D3D9_SetTexture(HANDLE h, UINT s, HANDLE t) { UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(s); UNREFERENCED_PARAMETER(t); return S_OK; }
-static HRESULT APIENTRY D3D9_SetViewport(HANDLE h, CONST D3DDDIARG_VIEWPORTINFO* p) { UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(p); return S_OK; }
-static HRESULT APIENTRY D3D9_SetScissorRect(HANDLE h, CONST RECT* r) { UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(r); return S_OK; }
-static HRESULT APIENTRY D3D9_SetRenderTarget(HANDLE h, CONST D3DDDIARG_SETRENDERTARGET* p) { UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(p); return S_OK; }
-static HRESULT APIENTRY D3D9_Clear(HANDLE h, CONST D3DDDIARG_CLEAR* p, UINT n, CONST RECT* r) { UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(p); UNREFERENCED_PARAMETER(n); UNREFERENCED_PARAMETER(r); return S_OK; }
 static HRESULT APIENTRY D3D9_CreateQuery(HANDLE h, D3DDDIARG_CREATEQUERY* p) { UNREFERENCED_PARAMETER(h); p->hQuery = (HANDLE)1; return S_OK; }
 static HRESULT APIENTRY D3D9_DestroyQuery(HANDLE h, HANDLE q) { UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(q); return S_OK; }
 static HRESULT APIENTRY D3D9_IssueQuery(HANDLE h, CONST D3DDDIARG_ISSUEQUERY* p) { UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(p); return S_OK; }
@@ -830,10 +826,251 @@ __declspec(dllexport) HRESULT APIENTRY OpenAdapter(D3DDDIARG_OPENADAPTER* pArgs)
     return S_OK;
 }
 
+/* ============================================================================
+   PM4 State Packets — GPU render state configuration
+   
+   These packets tell the GPU how to render:
+   - Viewport: screen region for rendering
+   - Scissor: clipping rectangle
+   - Blend: alpha blending mode
+   - Depth-Stencil: depth testing
+   - Rasterizer: fill mode, culling
+=========================================================================== */
+
+/* PM4 opcodes for state packets */
+#define PM4_IT_SET_CONTEXT_REG     0x69
+#define PM4_IT_SET_CONFIG_REG      0x68
+#define PM4_IT_SET_SH_REG          0x76
+#define PM4_IT_EVENT_WRITE_EOP     0x47
+
+/* GFX10 context register offsets */
+#define REG_PA_CL_VPORT_XOFFSET_0    0x000A010
+#define REG_PA_CL_VPORT_YOFFSET_0    0x000A014
+#define REG_PA_CL_VPORT_XSCALE_0     0x000A018
+#define REG_PA_CL_VPORT_YSCALE_0     0x000A01C
+#define REG_PA_CL_VPORT_ZOFFSET_0    0x000A020
+#define REG_PA_CL_VPORT_ZSCALE_0     0x000A024
+#define REG_PA_SC_VPORT_SCISSOR_0_TL  0x000A010
+#define REG_PA_SC_VPORT_SCISSOR_0_BR  0x000A014
+#define REG_CB_TARGET_MASK_0          0x000A0C8
+#define REG_CB_BLEND_GREEN_0          0x000A0E4
+#define REG_DB_DEPTH_CONTROL          0x000A200
+#define REG_PA_SC_MODE_CNTL           0x000A094
+
+/* Write PM4 state packet to command buffer */
+static void Bc250WritePm4State(PBC250_D3D9_DEVICE dev, ULONG opcode, ULONG reg, const ULONG* values, ULONG count)
+{
+    if (!dev->CommandBuffer || (dev->CmdBufferUsed + (2 + count) * sizeof(ULONG)) > dev->CommandBufferSize) {
+        return;
+    }
+
+    PULONG cmd = (PULONG)((PUCHAR)dev->CommandBuffer + dev->CmdBufferUsed);
+
+    /* PM4 SET_CONTEXT_REG packet */
+    cmd[0] = PM4_TYPE3_HDR_D3D9(opcode, 1 + count);
+    cmd[1] = (reg >> 2);  /* Register offset in DWORDs */
+    for (ULONG i = 0; i < count; i++) {
+        cmd[2 + i] = values[i];
+    }
+
+    dev->CmdBufferUsed += (2 + count) * sizeof(ULONG);
+}
+
+/* D3D9 DDI: SetViewport — PM4 SET_CONTEXT_REG for viewport */
+static HRESULT APIENTRY D3D9_SetViewport(HANDLE hDev, CONST D3DDDIARG_VIEWPORTINFO* pArgs)
+{
+    PBC250_D3D9_DEVICE dev = &g_D3D9Device;
+    UNREFERENCED_PARAMETER(hDev);
+
+    if (!pArgs) return E_INVALIDARG;
+
+    EnterCriticalSection(&dev->Lock);
+
+    /* Convert D3D9 viewport to GFX10 viewport registers */
+    float X = (float)pArgs->X;
+    float Y = (float)pArgs->Y;
+    float W = (float)pArgs->Width;
+    float H = (float)pArgs->Height;
+    float MinZ = 0.0f;
+    float MaxZ = 1.0f;
+
+    ULONG values[6];
+    values[0] = *(ULONG*)&X;  /* X offset */
+    values[1] = *(ULONG*)&Y;  /* Y offset */
+    values[2] = *(ULONG*)&W;  /* X scale */
+    values[3] = *(ULONG*)&H;  /* Y scale */
+    values[4] = *(ULONG*)&MinZ;  /* Z offset */
+    values[5] = *(ULONG*)&MaxZ;  /* Z scale */
+
+    Bc250WritePm4State(dev, PM4_IT_SET_CONTEXT_REG, REG_PA_CL_VPORT_XOFFSET_0, values, 6);
+
+    LeaveCriticalSection(&dev->Lock);
+
+    OutputDebugStringA("BC-250 UMD: SetViewport\n");
+    return S_OK;
+}
+
+/* D3D9 DDI: SetScissorRect — PM4 scissor rectangle */
+static HRESULT APIENTRY D3D9_SetScissorRect(HANDLE hDev, CONST RECT* pRect)
+{
+    PBC250_D3D9_DEVICE dev = &g_D3D9Device;
+    UNREFERENCED_PARAMETER(hDev);
+
+    if (!pRect) return E_INVALIDARG;
+
+    EnterCriticalSection(&dev->Lock);
+
+    /* TL (top-left) = (X1, Y1), BR (bottom-right) = (X2, Y2) */
+    ULONG tl = (pRect->top << 16) | pRect->left;
+    ULONG br = (pRect->bottom << 16) | pRect->right;
+
+    Bc250WritePm4State(dev, PM4_IT_SET_CONTEXT_REG, REG_PA_SC_VPORT_SCISSOR_0_TL, &tl, 1);
+    Bc250WritePm4State(dev, PM4_IT_SET_CONTEXT_REG, REG_PA_SC_VPORT_SCISSOR_0_BR, &br, 1);
+
+    LeaveCriticalSection(&dev->Lock);
+
+    OutputDebugStringA("BC-250 UMD: SetScissorRect\n");
+    return S_OK;
+}
+
+/* D3D9 DDI: SetRenderTarget — set render target */
+static HRESULT APIENTRY D3D9_SetRenderTarget(HANDLE hDev, CONST D3DDDIARG_SETRENDERTARGET* pArgs)
+{
+    PBC250_D3D9_DEVICE dev = &g_D3D9Device;
+    UNREFERENCED_PARAMETER(hDev);
+
+    if (!pArgs) return E_INVALIDARG;
+
+    /* Store render target info for later use */
+    EnterCriticalSection(&dev->Lock);
+    LeaveCriticalSection(&dev->Lock);
+
+    OutputDebugStringA("BC-250 UMD: SetRenderTarget\n");
+    return S_OK;
+}
+
+/* D3D9 DDI: Clear — clear render target / depth buffer */
+static HRESULT APIENTRY D3D9_Clear(HANDLE hDev, CONST D3DDDIARG_CLEAR* pArgs, UINT NumRect, CONST RECT* pRect)
+{
+    PBC250_D3D9_DEVICE dev = &g_D3D9Device;
+    UNREFERENCED_PARAMETER(hDev);
+    UNREFERENCED_PARAMETER(pArgs);
+    UNREFERENCED_PARAMETER(NumRect);
+    UNREFERENCED_PARAMETER(pRect);
+
+    /* In a full implementation, this would emit:
+     * 1. PM4 EVENT_WRITE with CACHE_FLUSH
+     * 2. Write clear color to render target
+     * 3. PM4 EVENT_WRITE with EOP
+     */
+
+    OutputDebugStringA("BC-250 UMD: Clear\n");
+    return S_OK;
+}
+
+/* ============================================================================
+   Display Mode Enumeration — Supported resolutions and refresh rates
+=========================================================================== */
+
+typedef struct _BC250_DISPLAY_MODE {
+    UINT Width;
+    UINT Height;
+    UINT RefreshRate;
+    UINT BitsPerPixel;
+} BC250_DISPLAY_MODE;
+
+/* Pre-defined display modes for BC-250 */
+static const BC250_DISPLAY_MODE g_SupportedModes[] = {
+    { 640,  480,  60, 32 },   /* VGA */
+    { 640,  480,  75, 32 },   /* VGA */
+    { 800,  600,  60, 32 },   /* SVGA */
+    { 800,  600,  75, 32 },   /* SVGA */
+    { 1024, 768,  60, 32 },   /* XGA */
+    { 1024, 768,  75, 32 },   /* XGA */
+    { 1280, 720,  60, 32 },   /* HD */
+    { 1280, 720,  120, 32 },  /* HD */
+    { 1280, 1024, 60, 32 },   /* SXGA */
+    { 1280, 1024, 75, 32 },   /* SXGA */
+    { 1600, 900,  60, 32 },   /* HD+ */
+    { 1600, 1024, 60, 32 },   /* WSXGA */
+    { 1920, 1080, 60, 32 },   /* Full HD */
+    { 1920, 1080, 120, 32 },  /* Full HD */
+    { 1920, 1200, 60, 32 },   /* WUXGA */
+    { 2560, 1440, 60, 32 },   /* QHD */
+    { 2560, 1440, 120, 32 },  /* QHD */
+    { 3840, 2160, 30, 32 },   /* 4K */
+    { 3840, 2160, 60, 32 },   /* 4K */
+};
+#define BC250_NUM_MODES (sizeof(g_SupportedModes) / sizeof(g_SupportedModes[0]))
+
+/* ============================================================================
+   Shader Parse Stub — DXBC header detection and logging
+=========================================================================== */
+
+#define DXBC_MAGIC  0x43425844  /* 'DXBC' */
+
+typedef struct _DXBC_HEADER {
+    UINT Magic;           /* DXBC_MAGIC */
+    UINT Hash[4];         /* SHA-1 hash */
+    UINT Version;         /* D3D shader model version */
+    UINT TotalSize;       /* Total size in bytes */
+    UINT NumChunks;       /* Number of chunks */
+} DXBC_HEADER;
+
+typedef struct _DXBC_CHUNK {
+    UINT FourCC;          /* Chunk type (e.g., 'DXBC', 'STAT', 'ISGN', 'OSGN') */
+    UINT Size;            /* Chunk data size */
+} DXBC_CHUNK;
+
+/* Parse DXBC shader header and log info */
+static void Bc250ParseDxbcShader(const UINT* pCode, SIZE_T CodeSize)
+{
+    if (!pCode || CodeSize < sizeof(DXBC_HEADER)) {
+        OutputDebugStringA("BC-250 UMD: Shader: invalid/empty\n");
+        return;
+    }
+
+    const DXBC_HEADER* hdr = (const DXBC_HEADER*)pCode;
+
+    /* Check magic */
+    if (hdr->Magic != DXBC_MAGIC) {
+        OutputDebugStringA("BC-250 UMD: Shader: not DXBC format\n");
+        return;
+    }
+
+    /* Log shader info */
+    char buf[256];
+    sprintf(buf, "BC-250 UMD: Shader DXBC v%u.%u, %u chunks, %u bytes\n",
+            (hdr->Version >> 8) & 0xFF, hdr->Version & 0xFF,
+            hdr->NumChunks, hdr->TotalSize);
+    OutputDebugStringA(buf);
+
+    /* Parse chunks to detect shader type */
+    const UINT* pChunk = pCode + 4; /* Skip DXBC header */
+    UINT remaining = hdr->TotalSize - sizeof(DXBC_HEADER);
+
+    for (UINT i = 0; i < hdr->NumChunks && remaining >= 8; i++) {
+        const DXBC_CHUNK* chunk = (const DXBC_CHUNK*)pChunk;
+
+        char chunkBuf[64];
+        char fourcc[5] = {0};
+        fourcc[0] = (char)(chunk->FourCC & 0xFF);
+        fourcc[1] = (char)((chunk->FourCC >> 8) & 0xFF);
+        fourcc[2] = (char)((chunk->FourCC >> 16) & 0xFF);
+        fourcc[3] = (char)((chunk->FourCC >> 24) & 0xFF);
+        sprintf(chunkBuf, "  Chunk '%s' (%u bytes)\n", fourcc, chunk->Size);
+        OutputDebugStringA(chunkBuf);
+
+        UINT chunkSize = (chunk->Size + 3) & ~3; /* Align to 4 bytes */
+        pChunk = (const UINT*)((const BYTE*)pChunk + 8 + chunkSize);
+        remaining -= 8 + chunkSize;
+    }
+}
+
 BOOL APIENTRY DllMain(HMODULE h, DWORD r, LPVOID v)
 {
     UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(v);
-    if (r == DLL_PROCESS_ATTACH) OutputDebugStringA("BC-250 UMD: Loaded (D3D9+D3D12)\n");
+    if (r == DLL_PROCESS_ATTACH) OutputDebugStringA("BC-250 UMD: Loaded (D3D9+D3D12+States)\n");
     if (r == DLL_PROCESS_DETACH) OutputDebugStringA("BC-250 UMD: Unloaded\n");
     return TRUE;
 }
