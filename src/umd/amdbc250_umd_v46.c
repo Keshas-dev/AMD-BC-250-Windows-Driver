@@ -601,6 +601,31 @@ static HRESULT APIENTRY D3D9_Clear(HANDLE, CONST D3DDDIARG_CLEAR*, UINT, CONST R
 static HRESULT APIENTRY D3D9_CreateQuery(HANDLE, D3DDDIARG_CREATEQUERY*);
 static HRESULT APIENTRY D3D9_DestroyQuery(HANDLE, HANDLE);
 static HRESULT APIENTRY D3D9_IssueQuery(HANDLE, CONST D3DDDIARG_ISSUEQUERY*);
+static HRESULT APIENTRY D3D9_UpdateWInfo(HANDLE, CONST D3DDDIARG_WINFO*);
+static HRESULT APIENTRY D3D9_ValidateDevice(HANDLE, D3DDDIARG_VALIDATETEXTURESTAGESTATE*);
+static HRESULT APIENTRY D3D9_SetTextureStageState(HANDLE, CONST D3DDDIARG_TEXTURESTAGESTATE*);
+static HRESULT APIENTRY D3D9_SetPixelShaderConst(HANDLE, CONST D3DDDIARG_SETPIXELSHADERCONST*, CONST FLOAT*);
+static HRESULT APIENTRY D3D9_SetStreamSourceUm(HANDLE, CONST D3DDDIARG_SETSTREAMSOURCEUM*, CONST VOID*);
+static HRESULT APIENTRY D3D9_DrawPrimitive2(HANDLE, CONST D3DDDIARG_DRAWPRIMITIVE2*);
+static HRESULT APIENTRY D3D9_DrawIndexedPrimitive2(HANDLE, CONST D3DDDIARG_DRAWINDEXEDPRIMITIVE2*, UINT, CONST VOID*, CONST UINT*);
+static HRESULT APIENTRY D3D9_SetPriority(HANDLE, CONST D3DDDIARG_SETPRIORITY*);
+static HRESULT APIENTRY D3D9_UpdatePalette(HANDLE, CONST D3DDDIARG_UPDATEPALETTE*, CONST PALETTEENTRY*);
+static HRESULT APIENTRY D3D9_SetPalette(HANDLE, CONST D3DDDIARG_SETPALETTE*);
+static HRESULT APIENTRY D3D9_SetVertexShaderConst(HANDLE, CONST D3DDDIARG_SETVERTEXSHADERCONST*, CONST VOID*);
+static HRESULT APIENTRY D3D9_MultiplyTransform(HANDLE, CONST D3DDDIARG_MULTIPLYTRANSFORM*);
+static HRESULT APIENTRY D3D9_SetTransform(HANDLE, CONST D3DDDIARG_SETTRANSFORM*);
+static HRESULT APIENTRY D3D9_SetZRange(HANDLE, CONST D3DDDIARG_ZRANGE*);
+static HRESULT APIENTRY D3D9_SetMaterial(HANDLE, CONST D3DDDIARG_SETMATERIAL*);
+static HRESULT APIENTRY D3D9_SetLight(HANDLE, CONST D3DDDIARG_SETLIGHT*, CONST D3DDDI_LIGHT*);
+static HRESULT APIENTRY D3D9_CreateLight(HANDLE, CONST D3DDDIARG_CREATELIGHT*);
+static HRESULT APIENTRY D3D9_DestroyLight(HANDLE, CONST D3DDDIARG_DESTROYLIGHT*);
+static HRESULT APIENTRY D3D9_SetClipPlane(HANDLE, CONST D3DDDIARG_SETCLIPPLANE*);
+static HRESULT APIENTRY D3D9_GetInfo(HANDLE, UINT, VOID*, UINT);
+static HRESULT APIENTRY D3D9_SetDisplayMode(HANDLE, CONST D3DDDIARG_SETDISPLAYMODE*);
+static HRESULT APIENTRY D3D9_SetVertexShaderConstI(HANDLE, CONST D3DDDIARG_SETVERTEXSHADERCONSTI*, CONST INT*);
+static HRESULT APIENTRY D3D9_SetVertexShaderConstB(HANDLE, CONST D3DDDIARG_SETVERTEXSHADERCONSTB*, CONST BOOL*);
+static HRESULT APIENTRY D3D9_SetPixelShaderConstI(HANDLE, CONST D3DDDIARG_SETPIXELSHADERCONSTI*, CONST INT*);
+static HRESULT APIENTRY D3D9_SetPixelShaderConstB(HANDLE, CONST D3DDDIARG_SETPIXELSHADERCONSTB*, CONST BOOL*);
 
 static HRESULT APIENTRY D3D9_OpenAdapter(D3DDDIARG_OPENADAPTER* pArgs)
 {
@@ -644,31 +669,56 @@ static HRESULT APIENTRY D3D9_CreateDevice(HANDLE hAdapter, D3DDDIARG_CREATEDEVIC
 
     /* Fill D3D9 DDI function table */
     D3DDDI_DEVICEFUNCS* f = pArgs->pDeviceFuncs;
-    f->pfnCreateResource        = D3D9_CreateResource;
-    f->pfnDestroyResource       = D3D9_DestroyResource;
     f->pfnSetRenderState        = D3D9_SetRenderState;
-    f->pfnSetStreamSource       = D3D9_SetStreamSource;
+    f->pfnUpdateWInfo           = D3D9_UpdateWInfo;
+    f->pfnValidateDevice        = D3D9_ValidateDevice;
+    f->pfnSetTextureStageState  = D3D9_SetTextureStageState;
+    f->pfnSetTexture            = D3D9_SetTexture;
+    f->pfnSetPixelShader        = D3D9_SetPixelShader;
+    f->pfnSetPixelShaderConst   = D3D9_SetPixelShaderConst;
+    f->pfnSetStreamSourceUm     = D3D9_SetStreamSourceUm;
     f->pfnSetIndices            = D3D9_SetIndices;
     f->pfnDrawPrimitive         = D3D9_DrawPrimitive;
     f->pfnDrawIndexedPrimitive  = D3D9_DrawIndexedPrimitive;
-    f->pfnPresent               = D3D9_Present;
-    f->pfnFlush                 = D3D9_Flush;
+    f->pfnDrawPrimitive2        = D3D9_DrawPrimitive2;
+    f->pfnDrawIndexedPrimitive2 = D3D9_DrawIndexedPrimitive2;
+    f->pfnSetPriority           = D3D9_SetPriority;
+    f->pfnClear                 = D3D9_Clear;
+    f->pfnUpdatePalette         = D3D9_UpdatePalette;
+    f->pfnSetPalette            = D3D9_SetPalette;
+    f->pfnSetVertexShaderConst  = D3D9_SetVertexShaderConst;
+    f->pfnMultiplyTransform     = D3D9_MultiplyTransform;
+    f->pfnSetTransform          = D3D9_SetTransform;
+    f->pfnSetViewport           = D3D9_SetViewport;
+    f->pfnSetZRange             = D3D9_SetZRange;
+    f->pfnSetMaterial           = D3D9_SetMaterial;
+    f->pfnSetLight              = D3D9_SetLight;
+    f->pfnCreateLight           = D3D9_CreateLight;
+    f->pfnDestroyLight          = D3D9_DestroyLight;
+    f->pfnSetClipPlane          = D3D9_SetClipPlane;
+    f->pfnGetInfo               = D3D9_GetInfo;
     f->pfnLock                  = D3D9_Lock;
     f->pfnUnlock                = D3D9_Unlock;
-    f->pfnCreateVertexShaderDecl = D3D9_CreateVertexShaderDecl;
-    f->pfnSetVertexShaderDecl   = D3D9_SetVertexShaderDecl;
-    f->pfnDeleteVertexShaderDecl = D3D9_DeleteVertexShaderDecl;
+    f->pfnCreateResource        = D3D9_CreateResource;
+    f->pfnDestroyResource       = D3D9_DestroyResource;
+    f->pfnSetDisplayMode        = D3D9_SetDisplayMode;
+    f->pfnPresent               = D3D9_Present;
+    f->pfnFlush                 = D3D9_Flush;
     f->pfnCreateVertexShaderFunc = D3D9_CreateVertexShaderFunc;
-    f->pfnSetVertexShaderFunc   = D3D9_SetVertexShaderFunc;
     f->pfnDeleteVertexShaderFunc = D3D9_DeleteVertexShaderFunc;
+    f->pfnSetVertexShaderFunc   = D3D9_SetVertexShaderFunc;
+    f->pfnCreateVertexShaderDecl = D3D9_CreateVertexShaderDecl;
+    f->pfnDeleteVertexShaderDecl = D3D9_DeleteVertexShaderDecl;
+    f->pfnSetVertexShaderDecl   = D3D9_SetVertexShaderDecl;
+    f->pfnSetVertexShaderConstI = D3D9_SetVertexShaderConstI;
+    f->pfnSetVertexShaderConstB = D3D9_SetVertexShaderConstB;
+    f->pfnSetPixelShaderConstI  = D3D9_SetPixelShaderConstI;
+    f->pfnSetPixelShaderConstB  = D3D9_SetPixelShaderConstB;
     f->pfnCreatePixelShader     = D3D9_CreatePixelShader;
-    f->pfnSetPixelShader        = D3D9_SetPixelShader;
-    f->pfnDeletePixelShader     = D3D9_DeletePixelShader;
-    f->pfnSetTexture            = D3D9_SetTexture;
-    f->pfnSetViewport           = D3D9_SetViewport;
+    f->pfnSetStreamSource       = D3D9_SetStreamSource;
+    f->pfnSetIndices            = D3D9_SetIndices;
     f->pfnSetScissorRect        = D3D9_SetScissorRect;
     f->pfnSetRenderTarget       = D3D9_SetRenderTarget;
-    f->pfnClear                 = D3D9_Clear;
     f->pfnCreateQuery           = D3D9_CreateQuery;
     f->pfnDestroyQuery          = D3D9_DestroyQuery;
     f->pfnIssueQuery            = D3D9_IssueQuery;
@@ -678,6 +728,33 @@ static HRESULT APIENTRY D3D9_CreateDevice(HANDLE hAdapter, D3DDDIARG_CREATEDEVIC
 }
 
 static HRESULT APIENTRY D3D9_DestroyDevice(HANDLE hDev) { UNREFERENCED_PARAMETER(hDev); DeleteCriticalSection(&g_D3D9Device.Lock); return S_OK; }
+
+/* D3D9 DDI: Additional stubs with correct types */
+static HRESULT APIENTRY D3D9_UpdateWInfo(HANDLE h, CONST D3DDDIARG_WINFO* p) { UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(p); return S_OK; }
+static HRESULT APIENTRY D3D9_ValidateDevice(HANDLE h, D3DDDIARG_VALIDATETEXTURESTAGESTATE* p) { UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(p); return S_OK; }
+static HRESULT APIENTRY D3D9_SetTextureStageState(HANDLE h, CONST D3DDDIARG_TEXTURESTAGESTATE* p) { UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(p); return S_OK; }
+static HRESULT APIENTRY D3D9_SetPixelShaderConst(HANDLE h, CONST D3DDDIARG_SETPIXELSHADERCONST* p, CONST FLOAT* v) { UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(p); UNREFERENCED_PARAMETER(v); return S_OK; }
+static HRESULT APIENTRY D3D9_SetStreamSourceUm(HANDLE h, CONST D3DDDIARG_SETSTREAMSOURCEUM* p, CONST VOID* d) { UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(p); UNREFERENCED_PARAMETER(d); return S_OK; }
+static HRESULT APIENTRY D3D9_DrawPrimitive2(HANDLE h, CONST D3DDDIARG_DRAWPRIMITIVE2* p) { UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(p); return S_OK; }
+static HRESULT APIENTRY D3D9_DrawIndexedPrimitive2(HANDLE h, CONST D3DDDIARG_DRAWINDEXEDPRIMITIVE2* p, UINT a, CONST VOID* b, CONST UINT* c) { UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(p); UNREFERENCED_PARAMETER(a); UNREFERENCED_PARAMETER(b); UNREFERENCED_PARAMETER(c); return S_OK; }
+static HRESULT APIENTRY D3D9_SetPriority(HANDLE h, CONST D3DDDIARG_SETPRIORITY* p) { UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(p); return S_OK; }
+static HRESULT APIENTRY D3D9_UpdatePalette(HANDLE h, CONST D3DDDIARG_UPDATEPALETTE* p, CONST PALETTEENTRY* e) { UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(p); UNREFERENCED_PARAMETER(e); return S_OK; }
+static HRESULT APIENTRY D3D9_SetPalette(HANDLE h, CONST D3DDDIARG_SETPALETTE* p) { UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(p); return S_OK; }
+static HRESULT APIENTRY D3D9_SetVertexShaderConst(HANDLE h, CONST D3DDDIARG_SETVERTEXSHADERCONST* p, CONST VOID* v) { UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(p); UNREFERENCED_PARAMETER(v); return S_OK; }
+static HRESULT APIENTRY D3D9_MultiplyTransform(HANDLE h, CONST D3DDDIARG_MULTIPLYTRANSFORM* p) { UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(p); return S_OK; }
+static HRESULT APIENTRY D3D9_SetTransform(HANDLE h, CONST D3DDDIARG_SETTRANSFORM* p) { UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(p); return S_OK; }
+static HRESULT APIENTRY D3D9_SetZRange(HANDLE h, CONST D3DDDIARG_ZRANGE* p) { UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(p); return S_OK; }
+static HRESULT APIENTRY D3D9_SetMaterial(HANDLE h, CONST D3DDDIARG_SETMATERIAL* p) { UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(p); return S_OK; }
+static HRESULT APIENTRY D3D9_SetLight(HANDLE h, CONST D3DDDIARG_SETLIGHT* p, CONST D3DDDI_LIGHT* l) { UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(p); UNREFERENCED_PARAMETER(l); return S_OK; }
+static HRESULT APIENTRY D3D9_CreateLight(HANDLE h, CONST D3DDDIARG_CREATELIGHT* p) { UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(p); return S_OK; }
+static HRESULT APIENTRY D3D9_DestroyLight(HANDLE h, CONST D3DDDIARG_DESTROYLIGHT* p) { UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(p); return S_OK; }
+static HRESULT APIENTRY D3D9_SetClipPlane(HANDLE h, CONST D3DDDIARG_SETCLIPPLANE* p) { UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(p); return S_OK; }
+static HRESULT APIENTRY D3D9_GetInfo(HANDLE h, UINT a, VOID* b, UINT c) { UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(a); UNREFERENCED_PARAMETER(b); UNREFERENCED_PARAMETER(c); return S_OK; }
+static HRESULT APIENTRY D3D9_SetDisplayMode(HANDLE h, CONST D3DDDIARG_SETDISPLAYMODE* p) { UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(p); return S_OK; }
+static HRESULT APIENTRY D3D9_SetVertexShaderConstI(HANDLE h, CONST D3DDDIARG_SETVERTEXSHADERCONSTI* p, CONST INT* v) { UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(p); UNREFERENCED_PARAMETER(v); return S_OK; }
+static HRESULT APIENTRY D3D9_SetVertexShaderConstB(HANDLE h, CONST D3DDDIARG_SETVERTEXSHADERCONSTB* p, CONST BOOL* v) { UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(p); UNREFERENCED_PARAMETER(v); return S_OK; }
+static HRESULT APIENTRY D3D9_SetPixelShaderConstI(HANDLE h, CONST D3DDDIARG_SETPIXELSHADERCONSTI* p, CONST INT* v) { UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(p); UNREFERENCED_PARAMETER(v); return S_OK; }
+static HRESULT APIENTRY D3D9_SetPixelShaderConstB(HANDLE h, CONST D3DDDIARG_SETPIXELSHADERCONSTB* p, CONST BOOL* v) { UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(p); UNREFERENCED_PARAMETER(v); return S_OK; }
 
 /* D3D9 DDI: CreateResource */
 static HRESULT APIENTRY D3D9_CreateResource(HANDLE hDev, D3DDDIARG_CREATERESOURCE* pArgs)
