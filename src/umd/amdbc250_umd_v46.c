@@ -22,7 +22,7 @@ Environment:
 
 #define UMD_PAGE_SIZE       4096
 #define UMD_VRAM_BASE       0x100000000ULL
-#define UMD_DEFAULT_VRAM    10ULL * 1024 * 1024 * 1024
+#define UMD_DEFAULT_VRAM    4ULL * 1024 * 1024 * 1024  /* 4GB default (BIOS configurable) */
 
 /* ============================================================================
    Internal Structures

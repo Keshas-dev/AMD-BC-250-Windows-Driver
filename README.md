@@ -8,7 +8,7 @@ Windows GPU driver for AMD BC-250 (Cyan Skillfish / RDNA2 / GFX1013).
 |------|-------|
 | Architecture | RDNA 2 (GFX1013) |
 | Compute Units | 24 (1536 shaders) |
-| Memory | 16GB GDDR6 |
+| Memory | 16GB GDDR6 (shared UMA, BIOS configurable) |
 | Ray Tracing | Early gen RT cores |
 | Display Engine | DCN 2.1 (4 pipes) |
 | TDP | 220W |
@@ -144,9 +144,9 @@ Based on Linux `amdgpu` driver:
 
 ## Known Limitations
 
+- **Memory**: 16GB shared UMA, VRAM split must be configured in BIOS (512MB-15.5GB)
 - **Compute queue**: Disabled (hardware quirk)
 - **VCN firmware**: Blocked by Sony
-- **VRAM**: ~10GB visible limit (hardware quirk)
 - **UMD**: D3D12 DDI stubs, no full rendering pipeline
 - **No OpenGL/Vulkan**: Needs Mesa RADV or AMDVLK
 - **Display**: VGA fallback works, 1080p needs tuning

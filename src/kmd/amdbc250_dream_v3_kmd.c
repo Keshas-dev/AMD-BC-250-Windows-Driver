@@ -248,7 +248,8 @@ DreamV3DdiAddDevice(
     DevExt->PhysicalDeviceObject = PhysicalDeviceObject;
 
     /* Initialize hardware quirks from Linux driver knowledge */
-    DevExt->VisibleVramBytes = 10ULL * 1024 * 1024 * 1024; /* ~10GB quirk */
+    /* BC-250 is UMA: 16GB shared, VRAM split configurable in BIOS */
+    DevExt->VisibleVramBytes = 4ULL * 1024 * 1024 * 1024; /* 4GB default (BIOS configurable) */
     DevExt->NumDisplayPipes = 4;  /* DCN 2.1: 4 pipes */
     DevExt->CurrentTemperatureC = 0;
     DevExt->NextGpuVa = 0x100000000ULL; /* GPU VA starts at 4GB */

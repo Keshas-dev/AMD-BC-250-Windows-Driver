@@ -129,17 +129,33 @@ Environment:
 #define AMDBC250_L2_CACHE_SIZE_KB       2048    /* L2 (2 MB total)         */
 #define AMDBC250_CACHE_LINE_SIZE        128     /* RDNA2: 128B lines       */
 
-/* --- Memory Configuration (GDDR6) --- */
+/* --- Memory Configuration (GDDR6 — Shared UMA) ---
+  
+  IMPORTANT: BC-250 uses Unified Memory Architecture (UMA).
+  The 16GB GDDR6 is SHARED between CPU and GPU.
+  VRAM allocation is configurable in BIOS:
+  - Minimum: 512 MB (default for mining boards)
+  - Recommended: 4-8 GB (for gaming/Linux desktop)
+  - Maximum: ~15.5 GB (CPU gets minimal RAM)
+  
+  Typical BIOS splits:
+  - Mining config: 512 MB GPU / 15.5 GB CPU
+  - Balanced:      8 GB GPU / 8 GB CPU
+  - GPU-heavy:     12 GB GPU / 4 GB CPU
+  
+  Bandwidth: 256-bit bus × 14 Gbps = ~448 GB/s
+============================================================================*/
+
 #define AMDBC250_MEMORY_TYPE            "GDDR6"
-#define AMDBC250_TOTAL_MEMORY_MB        16384   /* 16 GB total             */
-#define AMDBC250_MEMORY_BUS_WIDTH       256     /* 256-bit bus (PS5: 256)  */
+#define AMDBC250_TOTAL_MEMORY_MB        16384   /* 16 GB total (shared)    */
+#define AMDBC250_MEMORY_BUS_WIDTH       256     /* 256-bit bus             */
 #define AMDBC250_MEMORY_CLOCK_MHZ       1750    /* GDDR6 effective 14 Gbps */
 #define AMDBC250_MEMORY_BANDWIDTH_GBPS  448     /* ~448 GB/s theoretical   */
 
 /* --- VRAM Allocation (BIOS configurable) --- */
-#define AMDBC250_VRAM_ALLOC_MIN_MB      512     /* Minimum dynamic VRAM    */
-#define AMDBC250_VRAM_ALLOC_DEFAULT_MB  2048    /* Default 2GB             */
-#define AMDBC250_VRAM_ALLOC_MAX_MB      15872   /* Max ~15.5GB (CPU: 512MB)*/
+#define AMDBC250_VRAM_ALLOC_MIN_MB      512     /* Mining default          */
+#define AMDBC250_VRAM_ALLOC_DEFAULT_MB  4096    /* 4GB balanced            */
+#define AMDBC250_VRAM_ALLOC_MAX_MB      15872   /* Max (~15.5GB, CPU: 512MB)*/
 
 /* --- Clock Speeds --- */
 #define AMDBC250_BASE_CLOCK_MHZ         1000    /* Base GPU clock          */
@@ -543,7 +559,7 @@ Environment:
 /* BC-250 specific workarounds */
 #define AMDBC250_QUIRK_BROKEN_COMPUTE_QUEUE       TRUE    /* HW flaw, disable  */
 #define AMDBC250_QUIRK_NEEDS_NOHIZ                TRUE    /* Fixes Z-buffer    */
-#define AMDBC250_QUIRK_VRAM_VISIBLE_LIMIT         10240   /* ~10GB visible     */
+#define AMDBC250_QUIRK_VRAM_BIOS_CONFIGURABLE     TRUE    /* VRAM split in BIOS */
 #define AMDBC250_QUIRK_VCN_FIRMWARE_BLOCKED       TRUE    /* Sony blocks VCN   */
 #define AMDBC250_QUIRK_STATIC_CLOCK_WITHOUT_GOV   1500    /* MHz w/o governor  */
 

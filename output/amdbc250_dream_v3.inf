@@ -98,7 +98,7 @@ HKR,, HardwareInformation.ChipType,     %REG_SZ%, "AMD RDNA2 GFX1013 (Cyan Skill
 HKR,, HardwareInformation.DacType,      %REG_SZ%, "GDDR6 Memory Controller"
 HKR,, HardwareInformation.AdapterString, %REG_SZ%, "AMD Radeon BC-250 Graphics"
 HKR,, HardwareInformation.BiosString,   %REG_SZ%, "BC-250 vBIOS RDNA2 16GB GDDR6"
-HKR,, HardwareInformation.MemorySize,   %REG_QWORD%,    0x0000000400000000  ; 16GB GDDR6
+HKR,, HardwareInformation.MemorySize,   %REG_QWORD%,    0x0000000100000000  ; 4GB VRAM (16GB shared UMA, BIOS configurable)
 
 ; D3D12 Feature support (minimal)
 HKR,, D3D12SupportedFeatureLevel, %REG_DWORD%, 0xC000 ; 12_0
