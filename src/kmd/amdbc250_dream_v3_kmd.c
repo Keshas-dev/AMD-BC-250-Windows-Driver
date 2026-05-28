@@ -1591,9 +1591,24 @@ DreamV3DdiQueryChildStatus(
     _In_ BOOLEAN NonDestructiveOnly
     )
 {
-    UNREFERENCED_PARAMETER(MiniportDeviceContext);
-    UNREFERENCED_PARAMETER(ChildStatus);
+    PDREAM_V3_DEVICE_EXTENSION DevExt = (PDREAM_V3_DEVICE_EXTENSION)MiniportDeviceContext;
+
     UNREFERENCED_PARAMETER(NonDestructiveOnly);
+
+    if (DevExt == NULL || ChildStatus == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    /* Hotplug detection: report display connected */
+    if (ChildStatus->Type == StatusConnection) {
+        /* Assume display is connected for all pipes */
+        ChildStatus->HotPlug.Connected = TRUE;
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_TRACE_LEVEL,
+            "AMDBC250-DREAM-V4.3: Child %u connected\n", ChildStatus->ChildUid));
+    } else if (ChildStatus->Type == StatusRotation) {
+        ChildStatus->Rotation.Angle = 0; /* No rotation */
+    }
+
     return STATUS_SUCCESS;
 }
 
@@ -2055,6 +2070,54 @@ DreamV3DeviceControl(
             bytesReturned = sizeof(ULONG) * 9;
         } else {
             status = STATUS_BUFFER_TOO_SMALL;
+        }
+        break;
+    }
+
+    /* --- Allocate DMA Buffer (for command submission) --- */
+    case 0x80000930: { /* IOCTL_AMDBC250_ALLOC_DMA_BUFFER */
+        if (inputLen >= sizeof(ULONG) && outputLen >= sizeof(ULONG64) * 2) {
+            PULONG InData = (PULONG)inputBuffer;
+            SIZE_T bufSize = (SIZE_T)InData[0];
+            bufSize = (bufSize + 0xFFF) & ~0xFFFULL; /* Align to 4KB */
+
+            PHYSICAL_ADDRESS low, high, skip;
+            low.QuadPart = 0;
+            high.QuadPart = 0xFFFFFFFFFFULL;
+            skip.QuadPart = 0;
+
+            PVOID virtAddr = MmAllocateContiguousMemorySpecifyCache(
+                bufSize, low, high, skip, MmCached);
+
+            if (virtAddr != NULL) {
+                PHYSICAL_ADDRESS physAddr = MmGetPhysicalAddress(virtAddr);
+                PULONG64 OutData = (PULONG64)outputBuffer;
+                OutData[0] = physAddr.QuadPart;
+                OutData[1] = (ULONG64)(UINT_PTR)virtAddr;
+                bytesReturned = sizeof(ULONG64) * 2;
+
+                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                    "AMDBC250-DREAM-V4.3: AllocDmaBuffer: %llu bytes, PA=0x%llX\n",
+                    (ULONG64)bufSize, physAddr.QuadPart));
+            } else {
+                status = STATUS_INSUFFICIENT_RESOURCES;
+            }
+        } else {
+            status = STATUS_BUFFER_TOO_SMALL;
+        }
+        break;
+    }
+
+    /* --- Free DMA Buffer --- */
+    case 0x80000934: { /* IOCTL_AMDBC250_FREE_DMA_BUFFER */
+        if (inputLen >= sizeof(ULONG64)) {
+            PULONG64 InData = (PULONG64)inputBuffer;
+            PVOID handle = (PVOID)(UINT_PTR)InData[0];
+            if (handle != NULL) {
+                MmFreeContiguousMemory(handle);
+                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                    "AMDBC250-DREAM-V4.3: FreeDmaBuffer OK\n"));
+            }
         }
         break;
     }

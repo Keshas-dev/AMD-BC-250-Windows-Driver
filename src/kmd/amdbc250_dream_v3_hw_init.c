@@ -561,28 +561,55 @@ DreamV3HwInitDisplay(_In_ PDREAM_V3_DEVICE_EXTENSION DevExt)
     OtgCntl |= OTG_CNTL__ENABLE;
     DreamV3WriteRegister(DevExt, AMDBC250_REG_OTG0_OTG_CONTROL, OtgCntl);
 
-    /* Set default mode: 1920x1080 @ 60Hz */
-    DevExt->CurrentMode.Width = 1920;
-    DevExt->CurrentMode.Height = 1080;
-    DevExt->CurrentMode.RefreshRate = 60;
-    DevExt->CurrentMode.BitsPerPixel = 32;
-    DevExt->CurrentMode.PixelClockKhz = 148500;
-    DevExt->CurrentMode.Format = D3DDDIFMT_A8R8G8B8;
+    /* VGA fallback: 640x480 @ 60Hz (safe mode for first boot) */
+    if (DevExt->CurrentMode.Width == 0 || DevExt->CurrentMode.Height == 0) {
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+                   "AMDBC250-DREAM-V4.3: VGA fallback — 640x480@60Hz\n"));
+        DevExt->CurrentMode.Width = 640;
+        DevExt->CurrentMode.Height = 480;
+        DevExt->CurrentMode.RefreshRate = 60;
+        DevExt->CurrentMode.BitsPerPixel = 32;
+        DevExt->CurrentMode.PixelClockKhz = 25175;
+        DevExt->CurrentMode.Format = D3DDDIFMT_A8R8G8B8;
+    }
 
-    /* Program VESA 1920x1080@60Hz timing */
-    DreamV3WriteRegister(DevExt, AMDBC250_REG_OTG0_OTG_CRTC_H_TOTAL, 2200 - 1);
-    DreamV3WriteRegister(DevExt, AMDBC250_REG_OTG0_OTG_CRTC_V_TOTAL, 1125 - 1);
-    DreamV3WriteRegister(DevExt, AMDBC250_REG_OTG0_OTG_CRTC_H_BLANK_START_END,
-                         (1920 << 16) | 2200);
-    DreamV3WriteRegister(DevExt, AMDBC250_REG_OTG0_OTG_CRTC_V_BLANK_START_END,
-                         (1080 << 16) | 1125);
-    DreamV3WriteRegister(DevExt, AMDBC250_REG_OTG0_OTG_CRTC_H_SYNC_START_END,
-                         (2008 << 16) | 2052);
-    DreamV3WriteRegister(DevExt, AMDBC250_REG_OTG0_OTG_CRTC_V_SYNC_START_END,
-                         (1084 << 16) | 1089);
+    /* Program display timing based on current mode */
+    if (DevExt->CurrentMode.Width == 640 && DevExt->CurrentMode.Height == 480) {
+        /* VGA 640x480@60Hz timing (standard VESA) */
+        DreamV3WriteRegister(DevExt, AMDBC250_REG_OTG0_OTG_CRTC_H_TOTAL, 800 - 1);
+        DreamV3WriteRegister(DevExt, AMDBC250_REG_OTG0_OTG_CRTC_V_TOTAL, 525 - 1);
+        DreamV3WriteRegister(DevExt, AMDBC250_REG_OTG0_OTG_CRTC_H_BLANK_START_END,
+                             (640 << 16) | 800);
+        DreamV3WriteRegister(DevExt, AMDBC250_REG_OTG0_OTG_CRTC_V_BLANK_START_END,
+                             (480 << 16) | 525);
+        DreamV3WriteRegister(DevExt, AMDBC250_REG_OTG0_OTG_CRTC_H_SYNC_START_END,
+                             (656 << 16) | 752);
+        DreamV3WriteRegister(DevExt, AMDBC250_REG_OTG0_OTG_CRTC_V_SYNC_START_END,
+                             (490 << 16) | 492);
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                   "AMDBC250-DREAM-V4.3: Display — 640x480@60Hz (VGA)\n"));
+    } else {
+        /* 1920x1080@60Hz timing (standard CEA-861) */
+        DevExt->CurrentMode.Width = 1920;
+        DevExt->CurrentMode.Height = 1080;
+        DevExt->CurrentMode.RefreshRate = 60;
+        DevExt->CurrentMode.BitsPerPixel = 32;
+        DevExt->CurrentMode.PixelClockKhz = 148500;
+        DevExt->CurrentMode.Format = D3DDDIFMT_A8R8G8B8;
 
-    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-               "AMDBC250-DREAM-V4.3: Display — 1920x1080@60Hz\n"));
+        DreamV3WriteRegister(DevExt, AMDBC250_REG_OTG0_OTG_CRTC_H_TOTAL, 2200 - 1);
+        DreamV3WriteRegister(DevExt, AMDBC250_REG_OTG0_OTG_CRTC_V_TOTAL, 1125 - 1);
+        DreamV3WriteRegister(DevExt, AMDBC250_REG_OTG0_OTG_CRTC_H_BLANK_START_END,
+                             (1920 << 16) | 2200);
+        DreamV3WriteRegister(DevExt, AMDBC250_REG_OTG0_OTG_CRTC_V_BLANK_START_END,
+                             (1080 << 16) | 1125);
+        DreamV3WriteRegister(DevExt, AMDBC250_REG_OTG0_OTG_CRTC_H_SYNC_START_END,
+                             (2008 << 16) | 2052);
+        DreamV3WriteRegister(DevExt, AMDBC250_REG_OTG0_OTG_CRTC_V_SYNC_START_END,
+                             (1084 << 16) | 1089);
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                   "AMDBC250-DREAM-V4.3: Display — 1920x1080@60Hz\n"));
+    }
 
     return STATUS_SUCCESS;
 }
