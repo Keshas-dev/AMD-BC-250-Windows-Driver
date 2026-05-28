@@ -644,105 +644,60 @@ static HRESULT APIENTRY D3D9_GetCaps(HANDLE hAdapter, CONST D3DDDIARG_GETCAPS* p
     UNREFERENCED_PARAMETER(hAdapter);
     if (!pCaps) return E_INVALIDARG;
 
-    /* Report basic D3D9 capabilities */
-    RtlZeroMemory(pCaps->pData, pCaps->DataSize);
+    /* Zero out the output buffer */
+    if (pCaps->pData && pCaps->DataSize > 0) {
+        memset(pCaps->pData, 0, pCaps->DataSize);
+    }
 
-    OutputDebugStringA("BC-250 UMD: D3D9 GetCaps\n");
+    /* Handle different capability query types */
+    switch (pCaps->Type) {
+    case D3DDDICAPS_DDRAW:
+        /* DDRAW capabilities - minimal */
+        if (pCaps->pData && pCaps->DataSize >= 16) {
+            UINT* pCapsData = (UINT*)pCaps->pData;
+            pCapsData[0] = 0x00000100; /* Caps: DDCAPS_BLT */
+            pCapsData[1] = 0; /* Caps2 */
+            pCapsData[2] = 0; /* CKeyCaps */
+            pCapsData[3] = 0x00000001; /* FxCaps */
+        }
+        break;
+
+    case D3DDDICAPS_GETFORMATCOUNT:
+        if (pCaps->pData) {
+            *(UINT*)pCaps->pData = 1;
+        }
+        break;
+
+    case D3DDDICAPS_GETD3D9CAPS:
+        /* D3D9 capabilities - fill with minimal valid data */
+        if (pCaps->pData && pCaps->DataSize >= 128) {
+            UINT* p = (UINT*)pCaps->pData;
+            /* DevType = 1 (HAL) */
+            p[0] = 1;
+            /* Caps: BLT + COLORFILL */
+            p[1] = 0x00000140;
+            /* Caps2: WINDOWED */
+            p[2] = 0x00000001;
+            /* DevCaps: HWTRANSFORM */
+            p[4] = 0x00010000;
+            /* MaxTextureWidth */
+            p[10] = 8192;
+            /* MaxTextureHeight */
+            p[11] = 8192;
+            /* MaxTextureBlendStages */
+            p[30] = 8;
+            /* MaxSimultaneousTextures */
+            p[31] = 8;
+        }
+        break;
+
+    default:
+        return E_NOTIMPL;
+    }
+
+    OutputDebugStringA("BC-250 UMD: D3D9 GetCaps OK\n");
     return S_OK;
 }
-
-static HRESULT APIENTRY D3D9_CloseAdapter(HANDLE hAdapter) { UNREFERENCED_PARAMETER(hAdapter); return S_OK; }
-
-/* D3D9 DDI: CreateDevice */
-static HRESULT APIENTRY D3D9_CreateDevice(HANDLE hAdapter, D3DDDIARG_CREATEDEVICE* pArgs)
-{
-    UNREFERENCED_PARAMETER(hAdapter);
-    PBC250_D3D9_DEVICE dev = &g_D3D9Device;
-    RtlZeroMemory(dev, sizeof(BC250_D3D9_DEVICE));
-    InitializeCriticalSection(&dev->Lock);
-    dev->hDevice = pArgs->hDevice;
-    dev->FenceValue = 1;
-
-    /* Open KMD communication channel */
-    dev->KmdDevice = Bc250OpenKmd();
-    if (dev->KmdDevice == INVALID_HANDLE_VALUE) {
-        OutputDebugStringA("BC-250 UMD: WARNING - KMD not available\n");
-    }
-
-    /* Allocate DMA command buffer (256KB) via KMD IOCTL */
-    dev->CommandBufferSize = 256 * 1024;
-    if (dev->KmdDevice != INVALID_HANDLE_VALUE) {
-        dev->CommandBuffer = Bc250AllocDmaBuffer(dev->KmdDevice, dev->CommandBufferSize, &dev->FramebufferGpuVa);
-    }
-    if (dev->CommandBuffer == NULL) {
-        /* Fallback: VirtualAlloc */
-        dev->CommandBuffer = VirtualAlloc(NULL, dev->CommandBufferSize, MEM_COMMIT, PAGE_READWRITE);
-    }
-    dev->CmdBufferUsed = 0;
-
-    OutputDebugStringA("BC-250 UMD: D3D9 CreateDevice OK (cmd buf allocated)\n");
-
-    /* Fill D3D9 DDI function table */
-    D3DDDI_DEVICEFUNCS* f = pArgs->pDeviceFuncs;
-    f->pfnSetRenderState        = D3D9_SetRenderState;
-    f->pfnUpdateWInfo           = D3D9_UpdateWInfo;
-    f->pfnValidateDevice        = D3D9_ValidateDevice;
-    f->pfnSetTextureStageState  = D3D9_SetTextureStageState;
-    f->pfnSetTexture            = D3D9_SetTexture;
-    f->pfnSetPixelShader        = D3D9_SetPixelShader;
-    f->pfnSetPixelShaderConst   = D3D9_SetPixelShaderConst;
-    f->pfnSetStreamSourceUm     = D3D9_SetStreamSourceUm;
-    f->pfnSetIndices            = D3D9_SetIndices;
-    f->pfnDrawPrimitive         = D3D9_DrawPrimitive;
-    f->pfnDrawIndexedPrimitive  = D3D9_DrawIndexedPrimitive;
-    f->pfnDrawPrimitive2        = D3D9_DrawPrimitive2;
-    f->pfnDrawIndexedPrimitive2 = D3D9_DrawIndexedPrimitive2;
-    f->pfnSetPriority           = D3D9_SetPriority;
-    f->pfnClear                 = D3D9_Clear;
-    f->pfnUpdatePalette         = D3D9_UpdatePalette;
-    f->pfnSetPalette            = D3D9_SetPalette;
-    f->pfnSetVertexShaderConst  = D3D9_SetVertexShaderConst;
-    f->pfnMultiplyTransform     = D3D9_MultiplyTransform;
-    f->pfnSetTransform          = D3D9_SetTransform;
-    f->pfnSetViewport           = D3D9_SetViewport;
-    f->pfnSetZRange             = D3D9_SetZRange;
-    f->pfnSetMaterial           = D3D9_SetMaterial;
-    f->pfnSetLight              = D3D9_SetLight;
-    f->pfnCreateLight           = D3D9_CreateLight;
-    f->pfnDestroyLight          = D3D9_DestroyLight;
-    f->pfnSetClipPlane          = D3D9_SetClipPlane;
-    f->pfnGetInfo               = D3D9_GetInfo;
-    f->pfnLock                  = D3D9_Lock;
-    f->pfnUnlock                = D3D9_Unlock;
-    f->pfnCreateResource        = D3D9_CreateResource;
-    f->pfnDestroyResource       = D3D9_DestroyResource;
-    f->pfnSetDisplayMode        = D3D9_SetDisplayMode;
-    f->pfnPresent               = D3D9_Present;
-    f->pfnFlush                 = D3D9_Flush;
-    f->pfnCreateVertexShaderFunc = D3D9_CreateVertexShaderFunc;
-    f->pfnDeleteVertexShaderFunc = D3D9_DeleteVertexShaderFunc;
-    f->pfnSetVertexShaderFunc   = D3D9_SetVertexShaderFunc;
-    f->pfnCreateVertexShaderDecl = D3D9_CreateVertexShaderDecl;
-    f->pfnDeleteVertexShaderDecl = D3D9_DeleteVertexShaderDecl;
-    f->pfnSetVertexShaderDecl   = D3D9_SetVertexShaderDecl;
-    f->pfnSetVertexShaderConstI = D3D9_SetVertexShaderConstI;
-    f->pfnSetVertexShaderConstB = D3D9_SetVertexShaderConstB;
-    f->pfnSetPixelShaderConstI  = D3D9_SetPixelShaderConstI;
-    f->pfnSetPixelShaderConstB  = D3D9_SetPixelShaderConstB;
-    f->pfnCreatePixelShader     = D3D9_CreatePixelShader;
-    f->pfnSetStreamSource       = D3D9_SetStreamSource;
-    f->pfnSetIndices            = D3D9_SetIndices;
-    f->pfnSetScissorRect        = D3D9_SetScissorRect;
-    f->pfnSetRenderTarget       = D3D9_SetRenderTarget;
-    f->pfnCreateQuery           = D3D9_CreateQuery;
-    f->pfnDestroyQuery          = D3D9_DestroyQuery;
-    f->pfnIssueQuery            = D3D9_IssueQuery;
-
-    OutputDebugStringA("BC-250 UMD: D3D9 CreateDevice OK\n");
-    return S_OK;
-}
-
-static HRESULT APIENTRY D3D9_DestroyDevice(HANDLE hDev) { UNREFERENCED_PARAMETER(hDev); DeleteCriticalSection(&g_D3D9Device.Lock); return S_OK; }
 
 /* D3D9 DDI: Additional stubs with correct types */
 static HRESULT APIENTRY D3D9_UpdateWInfo(HANDLE h, CONST D3DDDIARG_WINFO* p) { UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(p); return S_OK; }

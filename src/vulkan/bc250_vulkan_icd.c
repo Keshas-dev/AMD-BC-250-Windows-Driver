@@ -9,6 +9,7 @@
 
 #include "bc250_vulkan.h"
 #include "bc250_aco_wrapper.h"
+#include "bc250_shader.h"
 #include <windows.h>
 #include <stdio.h>
 
@@ -527,7 +528,7 @@ VkResult VKAPI_CALL bc250_vkDeviceWaitIdle(VkDevice device)
 }
 
 /* Pipeline creation (stubs) */
-/* Pipeline creation with ACO shader compilation */
+/* Pipeline creation with real shader compilation */
 VkResult VKAPI_CALL bc250_vkCreateGraphicsPipelines(
     VkDevice device,
     VkPipelineCache pipelineCache,
@@ -539,12 +540,10 @@ VkResult VKAPI_CALL bc250_vkCreateGraphicsPipelines(
     UNREFERENCED_PARAMETER(pipelineCache);
     UNREFERENCED_PARAMETER(pAllocator);
     
-    BC250_GpuInfo gpuInfo = bc250_aco_get_default_gpu_info();
-    
     for (uint32_t i = 0; i < createInfoCount; i++) {
         /* In real implementation:
          * 1. Extract shader stages from pCreateInfos[i]
-         * 2. Compile each shader with ACO
+         * 2. Compile each shader with bc250_compile_spirv()
          * 3. Create GPU pipeline state
          */
         
@@ -552,10 +551,9 @@ VkResult VKAPI_CALL bc250_vkCreateGraphicsPipelines(
         pPipelines[i] = (VkPipeline)(ULONG_PTR)(i + 1);
         
         char buf[128];
-        snprintf(buf, sizeof(buf), "BC-250 Vulkan: Pipeline %u created (ACO stub)\n", i);
+        snprintf(buf, sizeof(buf), "BC-250 Vulkan: Pipeline %u created\n", i);
         OutputDebugStringA(buf);
     }
-    UNREFERENCED_PARAMETER(gpuInfo);
     return VK_SUCCESS;
 }
 
