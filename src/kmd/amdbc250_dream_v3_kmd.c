@@ -40,6 +40,12 @@ static UNICODE_STRING g_SymlinkName;
 
 /* Forward declarations */
 NTSTATUS DreamV3DeviceControl(PDEVICE_OBJECT, PIRP);
+NTSTATUS DreamV3SdmaCopyBuffer(PDREAM_V3_DEVICE_EXTENSION, PHYSICAL_ADDRESS, PHYSICAL_ADDRESS, SIZE_T);
+NTSTATUS DreamV3SdmaFillBuffer(PDREAM_V3_DEVICE_EXTENSION, PHYSICAL_ADDRESS, SIZE_T, ULONG);
+NTSTATUS DreamV3TdrReset(PDREAM_V3_DEVICE_EXTENSION);
+NTSTATUS DreamV3ReadEdid(PDREAM_V3_DEVICE_EXTENSION, ULONG, PUCHAR, PULONG);
+NTSTATUS DreamV3ParseEdid(PDREAM_V3_DEVICE_EXTENSION, ULONG, PULONG, PULONG, PULONG);
+NTSTATUS DreamV3ShaderCompileStub(PDREAM_V3_DEVICE_EXTENSION, PVOID, SIZE_T, ULONG, PVOID*, PULONG);
 
 /*===========================================================================
   DreamV3DxgkInitialize Stub
@@ -2053,6 +2059,100 @@ DreamV3DeviceControl(
         break;
     }
 
+    /* --- SDMA Copy Buffer --- */
+    case 0x80000940: { /* IOCTL_AMDBC250_SDMA_COPY */
+        if (inputLen >= sizeof(ULONG) * 4 + sizeof(ULONG64)) {
+            PULONG InData32 = (PULONG)inputBuffer;
+            ULONG64* InData64 = (ULONG64*)inputBuffer;
+            PHYSICAL_ADDRESS src, dst;
+            src.QuadPart = InData64[0];
+            dst.QuadPart = InData64[1];
+            SIZE_T size = (SIZE_T)InData32[4];
+            status = DreamV3SdmaCopyBuffer(DevExt, src, dst, size);
+        } else {
+            status = STATUS_BUFFER_TOO_SMALL;
+        }
+        break;
+    }
+
+    /* --- SDMA Fill Buffer --- */
+    case 0x80000944: { /* IOCTL_AMDBC250_SDMA_FILL */
+        if (inputLen >= sizeof(ULONG) * 4) {
+            PULONG InData = (PULONG)inputBuffer;
+            PHYSICAL_ADDRESS dst;
+            dst.QuadPart = ((ULONG64)InData[1] << 32) | InData[0];
+            SIZE_T size = (SIZE_T)InData[2];
+            ULONG fillVal = InData[3];
+            status = DreamV3SdmaFillBuffer(DevExt, dst, size, fillVal);
+        } else {
+            status = STATUS_BUFFER_TOO_SMALL;
+        }
+        break;
+    }
+
+    /* --- TDR Reset --- */
+    case 0x80000950: { /* IOCTL_AMDBC250_TDR_RESET */
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+            "AMDBC250-DREAM-V4.3: TDR reset requested via IOCTL\n"));
+        status = DreamV3TdrReset(DevExt);
+        break;
+    }
+
+    /* --- Read EDID --- */
+    case 0x80000960: { /* IOCTL_AMDBC250_READ_EDID */
+        if (inputLen >= sizeof(ULONG) && outputLen >= 128 + sizeof(ULONG)) {
+            PULONG InData = (PULONG)inputBuffer;
+            ULONG childUid = InData[0];
+            PUCHAR edidBuf = (PUCHAR)outputBuffer;
+            ULONG edidSize = 0;
+            status = DreamV3ReadEdid(DevExt, childUid, edidBuf, &edidSize);
+            bytesReturned = edidSize;
+        } else {
+            status = STATUS_BUFFER_TOO_SMALL;
+        }
+        break;
+    }
+
+    /* --- Get Child Relations (monitor enumeration) --- */
+    case 0x80000964: { /* IOCTL_AMDBC250_GET_CHILD_RELATIONS */
+        if (outputLen >= sizeof(ULONG) * 3) {
+            PULONG OutData = (PULONG)outputBuffer;
+            ULONG maxW, maxH, maxR;
+            DreamV3ParseEdid(DevExt, 0, &maxW, &maxH, &maxR);
+            OutData[0] = DevExt->NumDisplayPipes; /* Child count */
+            OutData[1] = 0x03; /* Connected: DP + HDMI */
+            OutData[2] = maxW; /* Max width */
+            bytesReturned = sizeof(ULONG) * 3;
+        } else {
+            status = STATUS_BUFFER_TOO_SMALL;
+        }
+        break;
+    }
+
+    /* --- Compile Shader (stub) --- */
+    case 0x80000970: { /* IOCTL_AMDBC250_SHADER_COMPILE */
+        if (inputLen >= sizeof(ULONG) * 2) {
+            PULONG InData = (PULONG)inputBuffer;
+            ULONG shaderType = InData[0];
+            ULONG shaderSize = InData[1];
+            PVOID compiled = NULL;
+            ULONG compiledSize = 0;
+            DreamV3ShaderCompileStub(DevExt, NULL, (SIZE_T)shaderSize,
+                                      shaderType, &compiled, &compiledSize);
+            /* Return stub result */
+            if (outputLen >= sizeof(ULONG) * 2) {
+                PULONG OutData = (PULONG)outputBuffer;
+                OutData[0] = compiledSize;
+                OutData[1] = compiled != NULL ? 0 : 1; /* 0=success, 1=stub */
+                bytesReturned = sizeof(ULONG) * 2;
+            }
+            status = STATUS_SUCCESS;
+        } else {
+            status = STATUS_BUFFER_TOO_SMALL;
+        }
+        break;
+    }
+
     default:
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
                    "AMDBC250-DREAM-V4.3: Unknown IOCTL 0x%08X\n", ioctlCode));
@@ -2066,3 +2166,432 @@ Cleanup:
     IoCompleteRequest(Irp, IO_NO_INCREMENT);
     return status;
 }
+
+/*===========================================================================
+  SDMA Copy Engine — Hardware buffer copies via DMA
+  
+  SDMA (System DMA) engine copies data without CPU involvement.
+  Used for: buffer copies, texture uploads, buffer fills.
+  
+  GFX10 SDMA packet format:
+  - Header: opcode + control
+  - Src/Dst addresses (64-bit physical)
+  - Size in bytes
+  - Fence (optional)
+===========================================================================*/
+
+/* SDMA packet header: type(2bits) | opcode(5bits) | sub-op(1bit) | rest */
+#define SDMA_PKT_HDR(op, sub) \
+    ((1 << 29) | ((op) << 20) | ((sub) << 0))
+
+NTSTATUS
+DreamV3SdmaCopyBuffer(
+    _In_ PDREAM_V3_DEVICE_EXTENSION DevExt,
+    _In_ PHYSICAL_ADDRESS SrcPhysical,
+    _In_ PHYSICAL_ADDRESS DstPhysical,
+    _In_ SIZE_T SizeBytes
+    )
+{
+    volatile PULONG Ring;
+    ULONG WPtr;
+    ULONG DwordsNeeded;
+
+    if (DevExt->SdmaRing.VirtualAddress == NULL) {
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+                   "AMDBC250-DREAM-V4.3: SDMA ring not initialized\n"));
+        return STATUS_DEVICE_NOT_READY;
+    }
+
+    Ring = (volatile PULONG)DevExt->SdmaRing.VirtualAddress;
+    WPtr = DevExt->SdmaRing.WritePointer;
+
+    /* SDMA COPY_LINEAR packet: 10 DWORDs */
+    DwordsNeeded = 10;
+    ULONG TotalBytes = DwordsNeeded * sizeof(ULONG);
+
+    /* Check ring bounds */
+    if (WPtr + TotalBytes > (ULONG)DevExt->SdmaRing.SizeInBytes) {
+        /* Wrap: fill with NOPs */
+        ULONG SpaceLeft = (ULONG)DevExt->SdmaRing.SizeInBytes - WPtr;
+        ULONG NopCount = SpaceLeft / sizeof(ULONG);
+        for (ULONG i = 0; i < NopCount; i++) {
+            Ring[WPtr / sizeof(ULONG)] = 0; /* SDMA NOP */
+            WPtr += sizeof(ULONG);
+        }
+        WPtr = 0;
+    }
+
+    /* Build SDMA COPY_LINEAR packet */
+    ULONG idx = WPtr / sizeof(ULONG);
+
+    /* DWORD 0: Header (opcode=COPY_LINEAR, sub=0, int=0, wait=0) */
+    Ring[idx + 0] = SDMA_PKT_HDR(SDMA_OP_COPY_LINEAR, 0);
+
+    /* DWORD 1: Control (system architecture) */
+    Ring[idx + 1] = 0; /* src/dst = physical */
+
+    /* DWORD 2-3: Src address (64-bit, aligned to 4) */
+    Ring[idx + 2] = (ULONG)(SrcPhysical.LowPart & 0xFFFFFFFC);
+    Ring[idx + 3] = SrcPhysical.HighPart;
+
+    /* DWORD 4-5: Dst address (64-bit, aligned to 4) */
+    Ring[idx + 4] = (ULONG)(DstPhysical.LowPart & 0xFFFFFFFC);
+    Ring[idx + 5] = DstPhysical.HighPart;
+
+    /* DWORD 6: Size (bytes - 1) */
+    Ring[idx + 6] = (ULONG)(SizeBytes - 1);
+
+    /* DWORD 7: End of packet (EOP=1) */
+    Ring[idx + 7] = (1 << 29); /* EOP bit */
+
+    /* DWORD 8-9: Reserved */
+    Ring[idx + 8] = 0;
+    Ring[idx + 9] = 0;
+
+    WPtr += TotalBytes;
+    DevExt->SdmaRing.WritePointer = WPtr;
+
+    /* Submit to hardware: write WPTR */
+    DreamV3WriteRegister(DevExt, AMDBC250_REG_SDMA0_GFX_RB_WPTR, WPtr);
+
+    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_TRACE_LEVEL,
+        "AMDBC250-DREAM-V4.3: SDMA copy: PA 0x%llX -> PA 0x%llX, %llu bytes\n",
+        SrcPhysical.QuadPart, DstPhysical.QuadPart, (ULONG64)SizeBytes));
+
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS
+DreamV3SdmaFillBuffer(
+    _In_ PDREAM_V3_DEVICE_EXTENSION DevExt,
+    _In_ PHYSICAL_ADDRESS DstPhysical,
+    _In_ SIZE_T SizeBytes,
+    _In_ ULONG FillValue
+    )
+{
+    volatile PULONG Ring;
+    ULONG WPtr;
+
+    if (DevExt->SdmaRing.VirtualAddress == NULL) {
+        return STATUS_DEVICE_NOT_READY;
+    }
+
+    Ring = (volatile PULONG)DevExt->SdmaRing.VirtualAddress;
+    WPtr = DevExt->SdmaRing.WritePointer;
+
+    /* SDMA FILL packet: 9 DWORDs */
+    ULONG TotalBytes = 9 * sizeof(ULONG);
+
+    if (WPtr + TotalBytes > (ULONG)DevExt->SdmaRing.SizeInBytes) {
+        WPtr = 0;
+    }
+
+    ULONG idx = WPtr / sizeof(ULONG);
+
+    /* Header: opcode=FILL */
+    Ring[idx + 0] = SDMA_PKT_HDR(SDMA_OP_FILL, 0);
+    /* Control */
+    Ring[idx + 1] = 0;
+    /* Dst address */
+    Ring[idx + 2] = (ULONG)(DstPhysical.LowPart & 0xFFFFFFFC);
+    Ring[idx + 3] = DstPhysical.HighPart;
+    /* Fill value (32-bit) */
+    Ring[idx + 4] = FillValue;
+    /* Size - 1 */
+    Ring[idx + 5] = (ULONG)(SizeBytes - 1);
+    /* EOP */
+    Ring[idx + 6] = (1 << 29);
+    Ring[idx + 7] = 0;
+    Ring[idx + 8] = 0;
+
+    WPtr += TotalBytes;
+    DevExt->SdmaRing.WritePointer = WPtr;
+    DreamV3WriteRegister(DevExt, AMDBC250_REG_SDMA0_GFX_RB_WPTR, WPtr);
+
+    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_TRACE_LEVEL,
+        "AMDBC250-DREAM-V4.3: SDMA fill: PA 0x%llX, %llu bytes, val=0x%X\n",
+        DstPhysical.QuadPart, (ULONG64)SizeBytes, FillValue));
+
+    return STATUS_SUCCESS;
+}
+
+/*===========================================================================
+  TDR (Timeout Detection and Recovery) — Enhanced Reset
+  
+  Windows TDR mechanism: if GPU doesn't respond within 2 seconds,
+  the display driver is reset. Our driver implements:
+  1. Emergency halt (CP + SDMA + Display)
+  2. Ring buffer reset
+  3. Hardware re-initialization
+  4. State restoration
+===========================================================================*/
+
+NTSTATUS
+DreamV3TdrReset(
+    _In_ PDREAM_V3_DEVICE_EXTENSION DevExt
+    )
+{
+    NTSTATUS Status;
+    ULONG TimeoutUs;
+
+    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
+        "AMDBC250-DREAM-V4.3: === TDR RESET STARTED ===\n"));
+
+    DevExt->GpuResetInProgress = TRUE;
+    DevExt->ResetCount++;
+
+    /* Step 1: Emergency halt all engines */
+    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+        "AMDBC250-DREAM-V4.3: TDR Step 1/6: Emergency halt\n"));
+
+    /* Halt Command Processor */
+    DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_ME_CNTL,
+        CP_ME_CNTL__ME_HALT | CP_ME_CNTL__PFP_HALT | CP_ME_CNTL__CE_HALT);
+    KeStallExecutionProcessor(100);
+
+    /* Halt SDMA */
+    DreamV3WriteRegister(DevExt, AMDBC250_REG_SDMA0_CNTL, 0x1); /* HALT bit */
+    KeStallExecutionProcessor(50);
+
+    /* Disable interrupts */
+    DreamV3WriteRegister(DevExt, AMDBC250_REG_IH_CNTL, 0);
+
+    /* Step 2: Drain all pending commands */
+    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+        "AMDBC250-DREAM-V4.3: TDR Step 2/6: Drain commands\n"));
+
+    /* Wait for CP to finish current batch */
+    TimeoutUs = 100000; /* 100ms */
+    while (TimeoutUs > 0) {
+        ULONG CpStatus = DreamV3ReadRegister(DevExt, AMDBC250_REG_CP_ME_STATUS);
+        if ((CpStatus & 0x1) == 0) break; /* CP idle */
+        KeStallExecutionProcessor(10);
+        TimeoutUs -= 10;
+    }
+
+    /* Step 3: Reset ring buffers */
+    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+        "AMDBC250-DREAM-V4.3: TDR Step 3/6: Reset rings\n"));
+
+    DevExt->GfxRing.ReadPointer = 0;
+    DevExt->GfxRing.WritePointer = 0;
+    DevExt->IhRing.ReadPointer = 0;
+    DevExt->SdmaRing.ReadPointer = 0;
+    DevExt->SdmaRing.WritePointer = 0;
+
+    /* Reset hardware ring pointers */
+    DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_GFX_RING0_RPTR, 0);
+    DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_GFX_RING0_WPTR, 0);
+    DreamV3WriteRegister(DevExt, AMDBC250_REG_IH_RB_RPTR, 0);
+    DreamV3WriteRegister(DevExt, AMDBC250_REG_SDMA0_GFX_RB_RPTR, 0);
+    DreamV3WriteRegister(DevExt, AMDBC250_REG_SDMA0_GFX_RB_WPTR, 0);
+
+    /* Step 4: Reset fence */
+    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+        "AMDBC250-DREAM-V4.3: TDR Step 4/6: Reset fence\n"));
+
+    DevExt->GlobalFence.LastSubmittedValue = 0;
+    DevExt->GlobalFence.LastSignaledValue = 0;
+    if (DevExt->GlobalFence.VirtualAddress != NULL) {
+        *DevExt->GlobalFence.VirtualAddress = 0;
+    }
+
+    /* Step 5: Re-initialize hardware */
+    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+        "AMDBC250-DREAM-V4.3: TDR Step 5/6: Re-init hardware\n"));
+
+    Status = DreamV3HwInitialize(DevExt);
+
+    /* Step 6: Re-enable interrupts and resume */
+    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+        "AMDBC250-DREAM-V4.3: TDR Step 6/6: Resume\n"));
+
+    if (NT_SUCCESS(Status)) {
+        DreamV3WriteRegister(DevExt, AMDBC250_REG_IH_CNTL,
+            IH_CNTL__ENABLE_INTR | IH_CNTL__RPTR_REARM);
+    }
+
+    DevExt->GpuResetInProgress = FALSE;
+
+    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+        "AMDBC250-DREAM-V4.3: === TDR RESET %s ===\n",
+        NT_SUCCESS(Status) ? "SUCCESS" : "FAILED"));
+
+    return Status;
+}
+
+/*===========================================================================
+  EDID Parsing — Read monitor capabilities from display
+  
+  EDID (Extended Display Identification Data) contains:
+  - Monitor name, serial, manufacture date
+  - Supported resolutions and refresh rates
+  - Color space, gamma, timing parameters
+  
+  For BC-250 with DCN 2.1:
+  - Up to 4 independent displays
+  - DP 1.4, HDMI 2.1, DVI-D, VGA (via DAC)
+  - Max 8K@30Hz or 4K@120Hz
+===========================================================================*/
+
+#define EDID_BLOCK_SIZE          128
+#define EDID_HEADER_SIZE         8
+#define EDID_VMT_OFFSET          54
+#define EDID_VMT_SIZE            18
+#define EDID_NUM_DETAILED_TIMING 4
+#define EDID_SERIAL_OFFSET       0xFC
+
+NTSTATUS
+DreamV3ParseEdid(
+    _In_ PDREAM_V3_DEVICE_EXTENSION DevExt,
+    _In_ ULONG ChildUid,
+    _Out_ PULONG MaxWidth,
+    _Out_ PULONG MaxHeight,
+    _Out_ PULONG MaxRefreshRate
+    )
+{
+    /* EDID is typically read via I2C/DDC from the monitor.
+     * For now, provide reasonable defaults based on DCN 2.1 capabilities. */
+
+    UNREFERENCED_PARAMETER(DevExt);
+
+    /* Default: support common resolutions */
+    *MaxWidth = 3840;      /* 4K */
+    *MaxHeight = 2160;
+    *MaxRefreshRate = 60;
+
+    /* DCN 2.1 supports higher resolutions */
+    if (ChildUid == 0) {
+        /* Primary display: up to 4K@120Hz */
+        *MaxWidth = 3840;
+        *MaxHeight = 2160;
+        *MaxRefreshRate = 120;
+    } else if (ChildUid == 1) {
+        /* Secondary display: up to 2K@60Hz */
+        *MaxWidth = 2560;
+        *MaxHeight = 1440;
+        *MaxRefreshRate = 60;
+    }
+
+    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+        "AMDBC250-DREAM-V4.3: EDID child %u: max %ux%u@%uHz\n",
+        ChildUid, *MaxWidth, *MaxHeight, *MaxRefreshRate));
+
+    return STATUS_SUCCESS;
+}
+
+/* EDID raw data block (128 bytes) for display identification */
+static UCHAR g_DefaultEdid[EDID_BLOCK_SIZE] = {
+    /* Header: 00 FF FF FF FF FF FF 00 */
+    0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00,
+    /* Manufacturer ID: AMD (0x0000) */
+    0x00, 0x00,
+    /* Product code */
+    0xFE, 0x13,
+    /* Serial number */
+    0x00, 0x00, 0x00, 0x00,
+    /* Week/Year of manufacture */
+    0x26, 0x16, /* Week 38, Year 2022 */
+    /* EDID version 1.3 */
+    0x01, 0x03,
+    /* Display type: Digital */
+    0x80, 0x20, 0x15, 0x2D, 0xE0, 0xA0, 0x4E, 0xA0,
+    0x10, 0x32, 0x90, 0x04, 0x01, 0x31, 0x00, 0x00,
+    /* Detailed timing: 1920x1080@60Hz (VESA standard) */
+    0x01, 0x1D, 0x00, 0x72, 0x51, 0xD0, 0x1E, 0x20,
+    0x6E, 0x28, 0x55, 0x00, 0xC4, 0x8E, 0x21, 0x00,
+    0x00, 0x1E,
+    /* Monitor name */
+    0x00, 0x00, 0x00, 0xFD, 0x00, 0x17, 0x3C, 0x1E,
+    0x50, 0x10, 0x00, 0x0A, 0x20, 0x20, 0x20, 0x20,
+    0x20, 0x20,
+    /* Monitor serial */
+    0x00, 0x00, 0x00, 0xFC, 0x00, 0x41, 0x4D, 0x44,
+    0x20, 0x42, 0x43, 0x2D, 0x32, 0x35, 0x30, 0x0A,
+    0x20, 0x20,
+    /* Checksum (last byte) */
+    0x00
+};
+
+NTSTATUS
+DreamV3ReadEdid(
+    _In_ PDREAM_V3_DEVICE_EXTENSION DevExt,
+    _In_ ULONG ChildUid,
+    _Out_writes_(EDID_BLOCK_SIZE) PUCHAR EdidBuffer,
+    _Out_ PULONG EdidSize
+    )
+{
+    UNREFERENCED_PARAMETER(DevExt);
+    UNREFERENCED_PARAMETER(ChildUid);
+
+    /* Copy default EDID */
+    RtlCopyMemory(EdidBuffer, g_DefaultEdid, EDID_BLOCK_SIZE);
+    *EdidSize = EDID_BLOCK_SIZE;
+
+    /* Calculate checksum */
+    UCHAR sum = 0;
+    for (ULONG i = 0; i < EDID_BLOCK_SIZE - 1; i++) {
+        sum += EdidBuffer[i];
+    }
+    EdidBuffer[EDID_BLOCK_SIZE - 1] = (UCHAR)(256 - sum);
+
+    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+        "AMDBC250-DREAM-V4.3: EDID read for child %u (%u bytes)\n",
+        ChildUid, *EdidSize));
+
+    return STATUS_SUCCESS;
+}
+
+/*===========================================================================
+  Shader Compilation Stub — DXBC → PM4 command conversion
+  
+  In a real driver, this would:
+  1. Parse DXBC (DirectX Bytecode) shader binary
+  2. Translate to GFX10 PM4 packets (SP/SGPR setup, fetch shaders)
+  3. Upload to GPU command processor
+  
+  For now, this is a stub that logs the shader and returns success.
+  Real implementation requires:
+  - Shader bytecode parser
+  - GFX10 ISA knowledge
+  - Register allocation
+  - Instruction scheduling
+===========================================================================*/
+
+NTSTATUS
+DreamV3ShaderCompileStub(
+    _In_ PDREAM_V3_DEVICE_EXTENSION DevExt,
+    _In_ PVOID ShaderCode,
+    _In_ SIZE_T ShaderSize,
+    _In_ ULONG ShaderType,  /* 0=VS, 1=PS, 2=CS, 3=GS, 4=HS, 5=DS */
+    _Out_ PVOID* CompiledShader,
+    _Out_ PULONG CompiledSize
+    )
+{
+    UNREFERENCED_PARAMETER(ShaderCode);
+    UNREFERENCED_PARAMETER(ShaderSize);
+
+    static const CHAR* ShaderTypeNames[] = {
+        "Vertex", "Pixel", "Compute", "Geometry", "Hull", "Domain"
+    };
+
+    if (ShaderType < 6) {
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+            "AMDBC250-DREAM-V4.3: Shader compile stub: %s shader (%llu bytes)\n",
+            ShaderTypeNames[ShaderType], (ULONG64)ShaderSize));
+    }
+
+    /* Stub: return empty compiled shader */
+    *CompiledShader = NULL;
+    *CompiledSize = 0;
+
+    return STATUS_SUCCESS;
+}
+
+/*===========================================================================
+  Additional IOCTL handlers for new features
+  (Added to existing switch in DreamV3DeviceControl)
+===========================================================================*/
+
+/* Note: These are called from the existing IOCTL dispatch.
+ * New IOCTL codes added for SDMA, EDID, and shader operations. */
