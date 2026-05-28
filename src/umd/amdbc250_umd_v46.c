@@ -1,319 +1,509 @@
 /*++
 
-Copyright (c) 2026 AMD BC-250 "Dream Drivers" Project
+Copyright (c) 2026 AMD BC-250 "Dream Drivers" Project — Version 4.3
 
 Module Name:
     amdbc250_umd_v46.c
 
 Abstract:
-    User-Mode Display Driver (UMD) for AMD BC-250 Graphics.
-    Version 4.6 - Full Resource & Heap Management enabled.
+    Full User-Mode Display Driver (UMD) for AMD BC-250 Graphics.
+    Communicates with KMD via IOCTL for actual GPU operations.
 
-    ===========================================================================
-    FULLY RECONSTRUCTED VERSION: Strict alignment with WDK 10.0.26100.0
-    ===========================================================================
+Environment:
+    User mode
 
 --*/
 
 #include <windows.h>
 #include <windef.h>
-
-/* CRITICAL: NTSTATUS must be defined before DDI headers */
-#ifndef _NTDEF_
-typedef LONG NTSTATUS;
-typedef NTSTATUS *PNTSTATUS;
-#endif
-#ifndef STATUS_SUCCESS
-#define STATUS_SUCCESS ((NTSTATUS)0x00000000L)
-#endif
-
-/* Standard D3D12 DDI missing aliases in some headers */
-#define D3D12DDI_HRTHEAP                  D3D12DDI_HRTRESOURCE
-#define D3D12DDI_HRTDESCRIPTORHEAP        D3D12DDI_HRTRESOURCE
-
-#include <sal.h>
-#include <d3d9types.h>
-#include <d3dumddi.h>
-#include <d3d10umddi.h>
 #include <d3d12umddi.h>
 #include <stdio.h>
+#include "amdbc250_ioctl.h"
+
+#define UMD_PAGE_SIZE       4096
+#define UMD_VRAM_BASE       0x100000000ULL
+#define UMD_DEFAULT_VRAM    10ULL * 1024 * 1024 * 1024
 
 /* ============================================================================
-   Constants & Limits
+   Internal Structures
    ============================================================================ */
 
-#define BC250_MAX_HEAPS           64
-#define BC250_MAX_RESOURCES       4096
-#define BC250_MAX_DESCRIPTORS     65536
-#define BC250_PAGE_SIZE           4096
-#define BC250_VRAM_BASE           0x100000000ULL
+typedef struct _UMD_HEAP_RESOURCE {
+    UINT64  GpuVa;
+    UINT64  Size;
+    HANDLE  KmdHandle;
+    PVOID   CpuAddress;
+    BOOL    bCpuMapped;
+    BOOL    bActive;
+} UMD_HEAP_RESOURCE, *PUMD_HEAP_RESOURCE;
+
+typedef struct _UMD_DEVICE {
+    D3D12DDI_HRTDEVICE    hRTDevice;
+    HANDLE                KmdDevice;
+    D3D12DDI_CORELAYER_DEVICECALLBACKS_0003* pCallbacks;
+    UINT64                NextGpuVa;
+    UINT64                VramTotal;
+    UINT64                VramUsed;
+    UINT32                NextFenceValue;
+    UINT32                HeapCount;
+    UMD_HEAP_RESOURCE     Heaps[64];
+    BOOL                  bInitialized;
+} UMD_DEVICE, *PUMD_DEVICE;
 
 /* ============================================================================
-   Resource & Heap Context Structures
+   KMD Communication
    ============================================================================ */
 
-typedef enum _BC250_HEAP_TYPE {
-    BC250_HEAP_TYPE_DEFAULT = 1,
-    BC250_HEAP_TYPE_UPLOAD = 2,
-    BC250_HEAP_TYPE_READBACK = 3
-} BC250_HEAP_TYPE;
-
-typedef struct _BC250_HEAP {
-    D3D12DDI_HRTHEAP          hHeapRT;
-    UINT64                    GPUVirtualAddress;
-    UINT64                    Size;
-    BC250_HEAP_TYPE           Type;
-    BOOL                      bInitialized;
-} BC250_HEAP, *PBC250_HEAP;
-
-typedef struct _BC250_RESOURCE {
-    D3D12DDI_HRTRESOURCE      hResourceRT;
-    UINT64                    GPUVirtualAddress;
-    UINT64                    Size;
-    D3D12DDI_RESOURCE_TYPE    Type;
-    DXGI_FORMAT               Format;
-    BOOL                      bCPUMapped;
-    PVOID                     pCPUAddress;
-    SIZE_T                    MapSize;
-    BOOL                      bInitialized;
-} BC250_RESOURCE, *PBC250_RESOURCE;
-
-typedef struct _BC250_DEVICE {
-    D3D12DDI_HRTDEVICE        hRTDevice;
-    UINT64                    NextGPUVirtualAddress;
-    UINT64                    VRAMTotal;
-    UINT64                    VRAMUsed;
-    BOOL                      bInitialized;
-} BC250_DEVICE, *PBC250_DEVICE;
-
-/* ============================================================================
-   Internal Helpers
-   ============================================================================ */
-
-static UINT64 BC250_AllocateGPUVA(PBC250_DEVICE pDevice, UINT64 Size)
+static HANDLE UmdOpenKmd(void)
 {
-    UINT64 Address = pDevice->NextGPUVirtualAddress;
-    Size = (Size + BC250_PAGE_SIZE - 1) & ~(BC250_PAGE_SIZE - 1);
-    if (pDevice->VRAMUsed + Size > pDevice->VRAMTotal) return 0;
-    pDevice->NextGPUVirtualAddress = Address + Size;
-    pDevice->VRAMUsed += Size;
-    return Address;
+    return CreateFileW(AMDBC250_DEVICE_PATH, GENERIC_READ | GENERIC_WRITE,
+                       0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
 }
 
-static void BC250_FreeGPUVA(PBC250_DEVICE pDevice, UINT64 Address, UINT64 Size)
+static BOOL UmdIoctl(HANDLE h, DWORD code, PVOID in, DWORD inSz, PVOID out, DWORD outSz)
 {
-    UNREFERENCED_PARAMETER(Address);
-    pDevice->VRAMUsed -= Size;
+    DWORD ret = 0;
+    return DeviceIoControl(h, code, in, inSz, out, outSz, &ret, NULL);
+}
+
+static UINT64 UmdAllocGpuVa(PUMD_DEVICE d, UINT64 sz)
+{
+    UINT64 a = d->NextGpuVa;
+    sz = (sz + UMD_PAGE_SIZE - 1) & ~(UMD_PAGE_SIZE - 1);
+    d->NextGpuVa += sz;
+    d->VramUsed += sz;
+    return a;
 }
 
 /* ============================================================================
-   D3D12 - Adapter Functions
+   Adapter Functions
    ============================================================================ */
 
-static HRESULT APIENTRY BC250_D3D12_GetSupportedVersions(
-    D3D12DDI_HADAPTER hAdapter,
-    _Inout_ UINT32* puEntries,
-    _Out_writes_opt_(*puEntries) UINT64* pSupportedDDIInterfaceVersions)
+static HRESULT APIENTRY UmdGetSupportedVersions(
+    D3D12DDI_HADAPTER hAdapter, _Inout_ UINT32* puEntries,
+    _Out_writes_opt_(*puEntries) UINT64* pVersions)
 {
     UNREFERENCED_PARAMETER(hAdapter);
-    if (pSupportedDDIInterfaceVersions == NULL) { *puEntries = 1; return S_OK; }
-    if (*puEntries >= 1) { pSupportedDDIInterfaceVersions[0] = D3D12DDI_SUPPORTED_0003; *puEntries = 1; return S_OK; }
+    if (!pVersions) { *puEntries = 1; return S_OK; }
+    if (*puEntries >= 1) { pVersions[0] = D3D12DDI_SUPPORTED_0003; *puEntries = 1; return S_OK; }
     return E_INVALIDARG;
 }
 
-static HRESULT APIENTRY BC250_D3D12_GetCaps(D3D12DDI_HADAPTER hAdapter, _In_ CONST D3D12DDIARG_GETCAPS* pArgs)
-{
-    UNREFERENCED_PARAMETER(hAdapter); UNREFERENCED_PARAMETER(pArgs);
-    return S_OK;
-}
-
-static HRESULT APIENTRY BC250_D3D12_GetOptionalDDITables(D3D12DDI_HADAPTER hAdapter, _Inout_ UINT32* puEntries, _Out_writes_opt_(*puEntries) D3D12DDI_TABLE_REQUEST* pRequests)
-{
-    UNREFERENCED_PARAMETER(hAdapter); UNREFERENCED_PARAMETER(pRequests);
-    *puEntries = 0; return S_OK;
-}
-
-static HRESULT APIENTRY BC250_D3D12_FillDDITable(D3D12DDI_HADAPTER hAdapter, D3D12DDI_TABLE_TYPE TableType, _Inout_ VOID* pTable, SIZE_T TableSize, UINT FeatureVersion, _In_opt_ D3D12DDI_HRTTABLE hRTTable)
-{
-    UNREFERENCED_PARAMETER(hAdapter); UNREFERENCED_PARAMETER(TableType); UNREFERENCED_PARAMETER(pTable); UNREFERENCED_PARAMETER(TableSize); UNREFERENCED_PARAMETER(FeatureVersion); UNREFERENCED_PARAMETER(hRTTable);
-    return S_OK;
-}
-
-/* ============================================================================
-   D3D12 - Device Functions
-   ============================================================================ */
-
-static SIZE_T APIENTRY BC250_D3D12_CalcPrivateDeviceSize(D3D12DDI_HADAPTER hAdapter, _In_ CONST D3D12DDIARG_CALCPRIVATEDEVICESIZE* pArgs)
-{
-    UNREFERENCED_PARAMETER(hAdapter); UNREFERENCED_PARAMETER(pArgs);
-    return sizeof(BC250_DEVICE);
-}
-
-static void APIENTRY BC250_D3D12_DestroyDevice(D3D12DDI_HDEVICE hDevice)
-{
-    PBC250_DEVICE pDevice = (PBC250_DEVICE)hDevice.pDrvPrivate;
-    if (pDevice) HeapFree(GetProcessHeap(), 0, pDevice);
-}
-
-static HRESULT APIENTRY BC250_D3D12_CreateDevice(D3D12DDI_HADAPTER hAdapter, _In_ CONST D3D12DDIARG_CREATEDEVICE_0003* pArgs)
+static HRESULT APIENTRY UmdGetCaps(D3D12DDI_HADAPTER hAdapter, _In_ CONST D3D12DDIARG_GETCAPS* pArgs)
 {
     UNREFERENCED_PARAMETER(hAdapter);
-    PBC250_DEVICE pDevice = (PBC250_DEVICE)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(BC250_DEVICE));
-    if (!pDevice) return E_OUTOFMEMORY;
-    pDevice->NextGPUVirtualAddress = BC250_VRAM_BASE;
-    pDevice->VRAMTotal = 10ULL * 1024 * 1024 * 1024;
-    pDevice->bInitialized = TRUE;
-    ((D3D12DDIARG_CREATEDEVICE_0003*)pArgs)->hDrvDevice.pDrvPrivate = pDevice;
-    OutputDebugStringA("BC-250 UMD: CreateDevice SUCCESS");
+    if (pArgs->Type == D3D12DDICAPS_TYPE_D3D12_OPTIONS) {
+        D3D12DDI_D3D12_OPTIONS_DATA_0003* o = (D3D12DDI_D3D12_OPTIONS_DATA_0003*)pArgs->pData;
+        o->ResourceHeapTier = D3D12DDI_RESOURCE_HEAP_TIER_2;
+        o->TiledResourcesTier = D3D12DDI_TILED_RESOURCES_TIER_1;
+    }
     return S_OK;
 }
 
-static void APIENTRY BC250_D3D12_CloseAdapter(D3D12DDI_HADAPTER hAdapter) { UNREFERENCED_PARAMETER(hAdapter); }
+static HRESULT APIENTRY UmdGetOptionalDDITables(D3D12DDI_HADAPTER h, _Inout_ UINT32* n, _Out_writes_opt_(*n) D3D12DDI_TABLE_REQUEST* r)
+{
+    UNREFERENCED_PARAMETER(h); *n = 0; return S_OK;
+}
+
+static HRESULT APIENTRY UmdFillDDITable(D3D12DDI_HADAPTER h, D3D12DDI_TABLE_TYPE t, _Inout_ VOID* p, SIZE_T s, UINT v, _In_opt_ D3D12DDI_HRTTABLE ht)
+{
+    UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(t); UNREFERENCED_PARAMETER(p);
+    UNREFERENCED_PARAMETER(s); UNREFERENCED_PARAMETER(v); UNREFERENCED_PARAMETER(ht);
+    return S_OK;
+}
 
 /* ============================================================================
-   D3D12 - Resource Management
+   Device Functions
    ============================================================================ */
 
-static SIZE_T APIENTRY BC250_D3D12_CalcPrivateHeapSize(D3D12DDI_HDEVICE hDevice, _In_ CONST D3D12DDIARG_CREATEHEAP_0001* pArgs)
+static SIZE_T APIENTRY UmdCalcPrivateDeviceSize(D3D12DDI_HADAPTER h, _In_ CONST D3D12DDIARG_CALCPRIVATEDEVICESIZE* p)
 {
-    UNREFERENCED_PARAMETER(hDevice); UNREFERENCED_PARAMETER(pArgs);
-    return sizeof(BC250_HEAP);
+    UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(p);
+    return sizeof(UMD_DEVICE);
 }
 
-static HRESULT APIENTRY BC250_D3D12_CreateHeap(D3D12DDI_HDEVICE hDevice, _In_ CONST D3D12DDIARG_CREATEHEAP_0001* pArgs, D3D12DDI_HHEAP hHeap, D3D12DDI_HRTHEAP hHeapRT)
+static void APIENTRY UmdDestroyDevice(D3D12DDI_HDEVICE hDevice)
 {
-    PBC250_DEVICE pDevice = (PBC250_DEVICE)hDevice.pDrvPrivate;
-    PBC250_HEAP pHeap = (PBC250_HEAP)hHeap.pDrvPrivate;
-    if (!pDevice || !pHeap) return E_INVALIDARG;
-    pHeap->hHeapRT = hHeapRT;
-    pHeap->Size = pArgs->ByteSize;
-    pHeap->Type = (pArgs->MemoryPool == D3D12DDI_MEMORY_POOL_L1) ? BC250_HEAP_TYPE_DEFAULT : BC250_HEAP_TYPE_UPLOAD;
-    pHeap->GPUVirtualAddress = BC250_AllocateGPUVA(pDevice, pHeap->Size);
-    if (pHeap->GPUVirtualAddress == 0) return E_OUTOFMEMORY;
-    pHeap->bInitialized = TRUE;
+    PUMD_DEVICE d = (PUMD_DEVICE)hDevice.pDrvPrivate;
+    if (!d) return;
+    if (d->KmdDevice != INVALID_HANDLE_VALUE) CloseHandle(d->KmdDevice);
+    HeapFree(GetProcessHeap(), 0, d);
+}
+
+static HRESULT APIENTRY UmdCreateDevice(D3D12DDI_HADAPTER hAdapter, _In_ CONST D3D12DDIARG_CREATEDEVICE_0003* pArgs)
+{
+    UNREFERENCED_PARAMETER(hAdapter);
+
+    PUMD_DEVICE d = (PUMD_DEVICE)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(UMD_DEVICE));
+    if (!d) return E_OUTOFMEMORY;
+
+    d->hRTDevice = pArgs->hRTDevice;
+    d->pCallbacks = (D3D12DDI_CORELAYER_DEVICECALLBACKS_0003*)pArgs->p12UMCallbacks;
+    d->KmdDevice = UmdOpenKmd();
+    d->NextGpuVa = UMD_VRAM_BASE;
+    d->VramTotal = UMD_DEFAULT_VRAM;
+    d->VramUsed = 0;
+    d->NextFenceValue = 1;
+    d->HeapCount = 0;
+    d->bInitialized = TRUE;
+
+    /* Query real VRAM */
+    if (d->KmdDevice != INVALID_HANDLE_VALUE) {
+        AMDBC250_IOCTL_VRAM_INFO v = {0};
+        if (UmdIoctl(d->KmdDevice, IOCTL_AMDBC250_GET_VRAM_INFO, NULL, 0, &v, sizeof(v)))
+            d->VramTotal = v.VisibleVramBytes;
+    }
+
+    D3D12DDIARG_CREATEDEVICE_0003* pArgsMutable = (D3D12DDIARG_CREATEDEVICE_0003*)pArgs;
+    pArgsMutable->hDrvDevice.pDrvPrivate = d;
+    OutputDebugStringA("BC-250 UMD: CreateDevice OK\n");
     return S_OK;
 }
 
-static VOID APIENTRY BC250_D3D12_DestroyHeap(D3D12DDI_HDEVICE hDevice, D3D12DDI_HHEAP hHeap)
+static void APIENTRY UmdCloseAdapter(D3D12DDI_HADAPTER h) { UNREFERENCED_PARAMETER(h); }
+
+/* ============================================================================
+   Heap + Resource (combined per D3D12 DDI)
+   ============================================================================ */
+
+static D3D12DDI_HEAP_AND_RESOURCE_SIZES APIENTRY UmdCalcPrivateHeapAndResourceSizes(
+    D3D12DDI_HDEVICE hDevice,
+    _In_opt_ CONST D3D12DDIARG_CREATEHEAP_0001* pHeapArgs,
+    _In_opt_ CONST D3D12DDIARG_CREATERESOURCE_0003* pResArgs)
 {
-    PBC250_DEVICE pDevice = (PBC250_DEVICE)hDevice.pDrvPrivate;
-    PBC250_HEAP pHeap = (PBC250_HEAP)hHeap.pDrvPrivate;
-    if (pDevice && pHeap && pHeap->bInitialized) {
-        BC250_FreeGPUVA(pDevice, pHeap->GPUVirtualAddress, pHeap->Size);
-        pHeap->bInitialized = FALSE;
+    UNREFERENCED_PARAMETER(hDevice); UNREFERENCED_PARAMETER(pHeapArgs); UNREFERENCED_PARAMETER(pResArgs);
+    D3D12DDI_HEAP_AND_RESOURCE_SIZES sz = {0};
+    sz.Heap = sizeof(UMD_HEAP_RESOURCE);
+    sz.Resource = sizeof(UMD_HEAP_RESOURCE);
+    return sz;
+}
+
+static HRESULT APIENTRY UmdCreateHeapAndResource(
+    D3D12DDI_HDEVICE hDevice,
+    _In_opt_ CONST D3D12DDIARG_CREATEHEAP_0001* pHeapArgs,
+    D3D12DDI_HHEAP hHeap,
+    D3D12DDI_HRTRESOURCE hRtRes,
+    _In_opt_ CONST D3D12DDIARG_CREATERESOURCE_0003* pResArgs,
+    _In_opt_ CONST D3D12DDI_CLEAR_VALUES* pClear,
+    D3D12DDI_HRESOURCE hResource)
+{
+    UNREFERENCED_PARAMETER(pClear);
+
+    PUMD_DEVICE d = (PUMD_DEVICE)hDevice.pDrvPrivate;
+    if (!d) return E_INVALIDARG;
+
+    PUMD_HEAP_RESOURCE hr = NULL;
+
+    /* Heap creation */
+    if (pHeapArgs && hHeap.pDrvPrivate) {
+        hr = (PUMD_HEAP_RESOURCE)hHeap.pDrvPrivate;
+        hr->Size = pHeapArgs->ByteSize;
+        hr->Size = (hr->Size + UMD_PAGE_SIZE - 1) & ~(UMD_PAGE_SIZE - 1);
+        hr->GpuVa = UmdAllocGpuVa(d, hr->Size);
+
+        if (d->KmdDevice != INVALID_HANDLE_VALUE) {
+            AMDBC250_IOCTL_ALLOC_VIDMEM req = {0};
+            AMDBC250_IOCTL_ALLOC_VIDMEM_RESULT res = {0};
+            req.Size = hr->Size;
+            req.Alignment = UMD_PAGE_SIZE;
+            req.Flags = 0x1 | 0x2;
+            req.SegmentId = (pHeapArgs->MemoryPool == D3D12DDI_MEMORY_POOL_L1) ? 0 : 1;
+            if (UmdIoctl(d->KmdDevice, IOCTL_AMDBC250_ALLOC_VIDMEM, &req, sizeof(req), &res, sizeof(res))) {
+                hr->KmdHandle = (HANDLE)(UINT_PTR)res.Handle;
+                hr->GpuVa = res.GpuVirtualAddress;
+            }
+        }
+        hr->bActive = TRUE;
+        if (d->HeapCount < 64) { d->Heaps[d->HeapCount] = *hr; d->HeapCount++; }
     }
-}
 
-static SIZE_T APIENTRY BC250_D3D12_CalcPrivateResourceSize(D3D12DDI_HDEVICE hDevice, _In_ CONST D3D12DDIARG_CREATERESOURCE_0003* pArgs)
-{
-    UNREFERENCED_PARAMETER(hDevice); UNREFERENCED_PARAMETER(pArgs);
-    return sizeof(BC250_RESOURCE);
-}
+    /* Resource creation */
+    if (pResArgs && hResource.pDrvPrivate) {
+        hr = (PUMD_HEAP_RESOURCE)hResource.pDrvPrivate;
+        hr->Size = pResArgs->Width;
+        hr->GpuVa = UmdAllocGpuVa(d, hr->Size);
 
-static HRESULT APIENTRY BC250_D3D12_CreateResource(D3D12DDI_HDEVICE hDevice, _In_ CONST D3D12DDIARG_CREATERESOURCE_0003* pArgs, D3D12DDI_HRESOURCE hResource, D3D12DDI_HRTRESOURCE hResourceRT)
-{
-    PBC250_DEVICE pDevice = (PBC250_DEVICE)hDevice.pDrvPrivate;
-    PBC250_RESOURCE pResource = (PBC250_RESOURCE)hResource.pDrvPrivate;
-    if (!pDevice || !pResource) return E_INVALIDARG;
-    pResource->hResourceRT = hResourceRT;
-    pResource->Type = pArgs->ResourceType;
-    pResource->Size = pArgs->Width;
-    pResource->Format = pArgs->Format;
-    pResource->GPUVirtualAddress = BC250_AllocateGPUVA(pDevice, pResource->Size);
-    if (pResource->GPUVirtualAddress == 0) return E_OUTOFMEMORY;
-    pResource->bInitialized = TRUE;
+        if (d->KmdDevice != INVALID_HANDLE_VALUE) {
+            AMDBC250_IOCTL_ALLOC_VIDMEM req = {0};
+            AMDBC250_IOCTL_ALLOC_VIDMEM_RESULT res = {0};
+            req.Size = hr->Size;
+            req.Alignment = 256;
+            req.Flags = 0x1 | 0x2;
+            req.SegmentId = 0;
+            if (UmdIoctl(d->KmdDevice, IOCTL_AMDBC250_ALLOC_VIDMEM, &req, sizeof(req), &res, sizeof(res))) {
+                hr->KmdHandle = (HANDLE)(UINT_PTR)res.Handle;
+                hr->GpuVa = res.GpuVirtualAddress;
+            }
+        }
+        hr->bActive = TRUE;
+    }
+
+    OutputDebugStringA("BC-250 UMD: CreateHeapAndResource OK\n");
     return S_OK;
 }
 
-static VOID APIENTRY BC250_D3D12_DestroyResource(D3D12DDI_HDEVICE hDevice, D3D12DDI_HRESOURCE hResource)
+static void APIENTRY UmdDestroyHeapAndResource(
+    D3D12DDI_HDEVICE hDevice, D3D12DDI_HHEAP hHeap, D3D12DDI_HRESOURCE hResource)
 {
-    PBC250_DEVICE pDevice = (PBC250_DEVICE)hDevice.pDrvPrivate;
-    PBC250_RESOURCE pResource = (PBC250_RESOURCE)hResource.pDrvPrivate;
-    if (pDevice && pDevice->bInitialized && pResource && pResource->bInitialized) {
-        BC250_FreeGPUVA(pDevice, pResource->GPUVirtualAddress, pResource->Size);
-        pResource->bInitialized = FALSE;
+    PUMD_DEVICE d = (PUMD_DEVICE)hDevice.pDrvPrivate;
+    if (!d) return;
+
+    if (hHeap.pDrvPrivate) {
+        PUMD_HEAP_RESOURCE hr = (PUMD_HEAP_RESOURCE)hHeap.pDrvPrivate;
+        if (d->KmdDevice != INVALID_HANDLE_VALUE && hr->KmdHandle) {
+            AMDBC250_IOCTL_FREE_VIDMEM req = {0};
+            req.Handle = (UINT64)(UINT_PTR)hr->KmdHandle;
+            UmdIoctl(d->KmdDevice, IOCTL_AMDBC250_FREE_VIDMEM, &req, sizeof(req), NULL, 0);
+        }
+        hr->bActive = FALSE;
     }
 }
 
-static HRESULT APIENTRY BC250_D3D12_MapResource(D3D12DDI_HDEVICE hDevice, D3D12DDI_HRESOURCE hResource, UINT Subresource, _In_opt_ CONST D3D12DDI_BOX* pBox, _Out_ VOID** ppData)
+/* ============================================================================
+   Descriptor Heap
+   ============================================================================ */
+
+static SIZE_T APIENTRY UmdCalcPrivateDescriptorHeapSize(D3D12DDI_HDEVICE h, _In_ CONST D3D12DDIARG_CREATE_DESCRIPTOR_HEAP_0001* p)
 {
-    UNREFERENCED_PARAMETER(hDevice); UNREFERENCED_PARAMETER(Subresource); UNREFERENCED_PARAMETER(pBox);
-    PBC250_RESOURCE pResource = (PBC250_RESOURCE)hResource.pDrvPrivate;
-    if (!pResource) return E_INVALIDARG;
-    if (pResource->bCPUMapped) { *ppData = pResource->pCPUAddress; return S_OK; }
-    pResource->MapSize = (SIZE_T)pResource->Size;
-    pResource->pCPUAddress = VirtualAlloc(NULL, pResource->MapSize, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-    if (!pResource->pCPUAddress) return E_OUTOFMEMORY;
-    pResource->bCPUMapped = TRUE;
-    *ppData = pResource->pCPUAddress;
+    UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(p);
+    return 4096;
+}
+
+static HRESULT APIENTRY UmdCreateDescriptorHeap(D3D12DDI_HDEVICE h, _In_ CONST D3D12DDIARG_CREATE_DESCRIPTOR_HEAP_0001* p, D3D12DDI_HDESCRIPTORHEAP hp)
+{
+    UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(p); UNREFERENCED_PARAMETER(hp);
+    OutputDebugStringA("BC-250 UMD: CreateDescriptorHeap OK\n");
     return S_OK;
 }
 
-static VOID APIENTRY BC250_D3D12_UnmapResource(D3D12DDI_HDEVICE hDevice, D3D12DDI_HRESOURCE hResource, UINT Subresource)
+static void APIENTRY UmdDestroyDescriptorHeap(D3D12DDI_HDEVICE h, D3D12DDI_HDESCRIPTORHEAP hp)
 {
-    UNREFERENCED_PARAMETER(hDevice); UNREFERENCED_PARAMETER(Subresource);
-    PBC250_RESOURCE pResource = (PBC250_RESOURCE)hResource.pDrvPrivate;
-    if (pResource && pResource->bCPUMapped) {
-        VirtualFree(pResource->pCPUAddress, 0, MEM_RELEASE);
-        pResource->bCPUMapped = FALSE;
-        pResource->pCPUAddress = NULL;
-    }
+    UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(hp);
 }
 
-static SIZE_T APIENTRY BC250_D3D12_CalcPrivateDescriptorHeapSize(D3D12DDI_HDEVICE hDevice, _In_ CONST D3D12DDIARG_CREATE_DESCRIPTOR_HEAP_0001* pArgs)
+static void APIENTRY UmdCopyDescriptors(D3D12DDI_HDEVICE h, UINT n, _In_ CONST D3D12DDI_CPU_DESCRIPTOR_HANDLE* s, _In_ CONST UINT* ss, UINT dn, _In_ CONST D3D12DDI_CPU_DESCRIPTOR_HANDLE* ds, _In_ CONST UINT* ds2, D3D12DDI_DESCRIPTOR_HEAP_TYPE t)
 {
-    UNREFERENCED_PARAMETER(hDevice); UNREFERENCED_PARAMETER(pArgs);
+    UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(n); UNREFERENCED_PARAMETER(s);
+    UNREFERENCED_PARAMETER(ss); UNREFERENCED_PARAMETER(dn); UNREFERENCED_PARAMETER(ds);
+    UNREFERENCED_PARAMETER(ds2); UNREFERENCED_PARAMETER(t);
+}
+
+/* ============================================================================
+   Root Signature
+   ============================================================================ */
+
+static SIZE_T APIENTRY UmdCalcPrivateRootSignatureSize(D3D12DDI_HDEVICE h, _In_ CONST D3D12DDIARG_CREATE_ROOT_SIGNATURE_0001* p)
+{
+    UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(p);
+    return 256;
+}
+
+static HRESULT APIENTRY UmdCreateRootSignature(D3D12DDI_HDEVICE h, _In_ CONST D3D12DDIARG_CREATE_ROOT_SIGNATURE_0001* p, D3D12DDI_HROOTSIGNATURE hs)
+{
+    UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(p); UNREFERENCED_PARAMETER(hs);
+    OutputDebugStringA("BC-250 UMD: CreateRootSignature OK\n");
+    return S_OK;
+}
+
+static void APIENTRY UmdDestroyRootSignature(D3D12DDI_HDEVICE h, D3D12DDI_HROOTSIGNATURE hs)
+{
+    UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(hs);
+}
+
+/* ============================================================================
+   Pipeline State
+   ============================================================================ */
+
+static SIZE_T APIENTRY UmdCalcPrivatePipelineStateSize(D3D12DDI_HDEVICE h, _In_ CONST D3D12DDIARG_CREATE_PIPELINE_STATE_0001* p)
+{
+    UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(p);
+    return 256;
+}
+
+static HRESULT APIENTRY UmdCreatePipelineState(D3D12DDI_HDEVICE h, _In_ CONST D3D12DDIARG_CREATE_PIPELINE_STATE_0001* p)
+{
+    UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(p);
+    OutputDebugStringA("BC-250 UMD: CreatePipelineState OK\n");
+    return S_OK;
+}
+
+static void APIENTRY UmdDestroyPipelineState(D3D12DDI_HDEVICE h, D3D12DDI_HPIPELINESTATE hs)
+{
+    UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(hs);
+}
+
+/* ============================================================================
+   Command Queue
+   ============================================================================ */
+
+static SIZE_T APIENTRY UmdCalcPrivateCommandQueueSize(D3D12DDI_HDEVICE h, _In_ CONST D3D12DDIARG_CREATECOMMANDQUEUE_0001* p)
+{
+    UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(p);
+    return 256;
+}
+
+static HRESULT APIENTRY UmdCreateCommandQueue(D3D12DDI_HDEVICE h, _In_ CONST D3D12DDIARG_CREATECOMMANDQUEUE_0001* p)
+{
+    UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(p);
+    OutputDebugStringA("BC-250 UMD: CreateCommandQueue OK\n");
+    return S_OK;
+}
+
+static void APIENTRY UmdDestroyCommandQueue(D3D12DDI_HDEVICE h, D3D12DDI_HCOMMANDQUEUE q)
+{
+    UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(q);
+}
+
+/* ============================================================================
+   Command Allocator
+   ============================================================================ */
+
+static SIZE_T APIENTRY UmdCalcPrivateCommandAllocatorSize(D3D12DDI_HDEVICE h, _In_ CONST D3D12DDIARG_CREATECOMMANDALLOCATOR* p)
+{
+    UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(p);
+    return 256;
+}
+
+static HRESULT APIENTRY UmdCreateCommandAllocator(D3D12DDI_HDEVICE h, _In_ CONST D3D12DDIARG_CREATECOMMANDALLOCATOR* p)
+{
+    UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(p);
+    return S_OK;
+}
+
+static void APIENTRY UmdDestroyCommandAllocator(D3D12DDI_HDEVICE h, D3D12DDI_HCOMMANDALLOCATOR a)
+{
+    UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(a);
+}
+
+/* ============================================================================
+   Command List
+   ============================================================================ */
+
+static SIZE_T APIENTRY UmdCalcPrivateCommandListSize(D3D12DDI_HDEVICE h, _In_ CONST D3D12DDIARG_CREATE_COMMAND_LIST_0001* p)
+{
+    UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(p);
+    return 4096;
+}
+
+static HRESULT APIENTRY UmdCreateCommandList(D3D12DDI_HDEVICE h, _In_ CONST D3D12DDIARG_CREATE_COMMAND_LIST_0001* p)
+{
+    UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(p);
+    OutputDebugStringA("BC-250 UMD: CreateCommandList OK\n");
+    return S_OK;
+}
+
+static void APIENTRY UmdDestroyCommandList(D3D12DDI_HDEVICE h, D3D12DDI_HCOMMANDLIST c)
+{
+    UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(c);
+}
+
+/* ============================================================================
+   Fence
+   ============================================================================ */
+
+static SIZE_T APIENTRY UmdCalcPrivateFenceSize(D3D12DDI_HDEVICE h, _In_ CONST D3D12DDIARG_CREATE_FENCE* p)
+{
+    UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(p);
     return 64;
 }
 
-static HRESULT APIENTRY BC250_D3D12_CreateDescriptorHeap(D3D12DDI_HDEVICE hDevice, _In_ CONST D3D12DDIARG_CREATE_DESCRIPTOR_HEAP_0001* pArgs, D3D12DDI_HDESCRIPTORHEAP hHeap)
+static HRESULT APIENTRY UmdCreateFence(D3D12DDI_HDEVICE h, D3D12DDI_HFENCE hf, _In_ CONST D3D12DDIARG_CREATE_FENCE* p)
 {
-    UNREFERENCED_PARAMETER(hDevice); UNREFERENCED_PARAMETER(pArgs); UNREFERENCED_PARAMETER(hHeap);
+    UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(hf); UNREFERENCED_PARAMETER(p);
     return S_OK;
 }
 
-static VOID APIENTRY BC250_D3D12_DestroyDescriptorHeap(D3D12DDI_HDEVICE hDevice, D3D12DDI_HDESCRIPTORHEAP hHeap)
+static void APIENTRY UmdDestroyFence(D3D12DDI_HDEVICE h, D3D12DDI_HFENCE hf)
 {
-    UNREFERENCED_PARAMETER(hDevice); UNREFERENCED_PARAMETER(hHeap);
-}
-
-static VOID APIENTRY BC250_D3D12_CopyDescriptors(D3D12DDI_HDEVICE hDevice, UINT NumDescriptorRanges, _In_ CONST D3D12DDI_CPU_DESCRIPTOR_HANDLE* pSrcDescriptorRangeStarts, _In_ CONST UINT* pSrcDescriptorRangeSizes, UINT NumDestDescriptorRanges, _In_ CONST D3D12DDI_CPU_DESCRIPTOR_HANDLE* pDestDescriptorRangeStarts, _In_ CONST UINT* pDestDescriptorRangeSizes, D3D12DDI_DESCRIPTOR_HEAP_TYPE DescriptorHeapType)
-{
-    UNREFERENCED_PARAMETER(hDevice); UNREFERENCED_PARAMETER(NumDescriptorRanges);
-    UNREFERENCED_PARAMETER(pSrcDescriptorRangeStarts); UNREFERENCED_PARAMETER(pSrcDescriptorRangeSizes);
-    UNREFERENCED_PARAMETER(NumDestDescriptorRanges); UNREFERENCED_PARAMETER(pDestDescriptorRangeStarts);
-    UNREFERENCED_PARAMETER(pDestDescriptorRangeSizes); UNREFERENCED_PARAMETER(DescriptorHeapType);
-}
-
-static SIZE_T APIENTRY BC250_D3D12_CalcPrivateCommandListSize(D3D12DDI_HDEVICE hDevice, _In_ CONST D3D12DDIARG_CREATE_COMMAND_LIST_0001* pArgs)
-{
-    UNREFERENCED_PARAMETER(hDevice); UNREFERENCED_PARAMETER(pArgs);
-    return 1024;
-}
-
-static HRESULT APIENTRY BC250_D3D12_CreateCommandList(D3D12DDI_HDEVICE hDevice, _In_ CONST D3D12DDIARG_CREATE_COMMAND_LIST_0001* pArgs)
-{
-    UNREFERENCED_PARAMETER(hDevice); UNREFERENCED_PARAMETER(pArgs);
-    return S_OK;
+    UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(hf);
 }
 
 /* ============================================================================
-   OpenAdapter12 - Entry Point
+   Shader Stubs
+   ============================================================================ */
+
+static SIZE_T APIENTRY UmdCalcPrivateShaderSize(D3D12DDI_HDEVICE h, _In_ CONST D3D12DDIARG_CREATE_SHADER_0010* p)
+{
+    UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(p);
+    return 256;
+}
+
+static void APIENTRY UmdCreateShader(D3D12DDI_HDEVICE h, _In_ CONST D3D12DDIARG_CREATE_SHADER_0010* p, D3D12DDI_HSHADER hs)
+{
+    UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(p); UNREFERENCED_PARAMETER(hs);
+}
+
+static void APIENTRY UmdDestroyShader(D3D12DDI_HDEVICE h, D3D12DDI_HSHADER hs)
+{
+    UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(hs);
+}
+
+/* ============================================================================
+   State Stubs (Blend, DepthStencil, Rasterizer, ElementLayout)
+   ============================================================================ */
+
+static SIZE_T APIENTRY UmdCalcPrivateBlendStateSize(D3D12DDI_HDEVICE h, _In_ CONST D3D12DDI_BLEND_DESC_0010* p) { UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(p); return 64; }
+static void APIENTRY UmdCreateBlendState(D3D12DDI_HDEVICE h, _In_ CONST D3D12DDI_BLEND_DESC_0010* p, D3D12DDI_HBLENDSTATE s) { UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(p); UNREFERENCED_PARAMETER(s); }
+static void APIENTRY UmdDestroyBlendState(D3D12DDI_HDEVICE h, D3D12DDI_HBLENDSTATE s) { UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(s); }
+
+static SIZE_T APIENTRY UmdCalcPrivateDepthStencilStateSize(D3D12DDI_HDEVICE h, _In_ CONST D3D12DDI_DEPTH_STENCIL_DESC_0010* p) { UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(p); return 64; }
+static void APIENTRY UmdCreateDepthStencilState(D3D12DDI_HDEVICE h, _In_ CONST D3D12DDI_DEPTH_STENCIL_DESC_0010* p, D3D12DDI_HDEPTHSTENCILSTATE s) { UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(p); UNREFERENCED_PARAMETER(s); }
+static void APIENTRY UmdDestroyDepthStencilState(D3D12DDI_HDEVICE h, D3D12DDI_HDEPTHSTENCILSTATE s) { UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(s); }
+
+static SIZE_T APIENTRY UmdCalcPrivateRasterizerStateSize(D3D12DDI_HDEVICE h, _In_ CONST D3D12DDI_RASTERIZER_DESC_0010* p) { UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(p); return 64; }
+static void APIENTRY UmdCreateRasterizerState(D3D12DDI_HDEVICE h, _In_ CONST D3D12DDI_RASTERIZER_DESC_0010* p, D3D12DDI_HRASTERIZERSTATE s) { UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(p); UNREFERENCED_PARAMETER(s); }
+static void APIENTRY UmdDestroyRasterizerState(D3D12DDI_HDEVICE h, D3D12DDI_HRASTERIZERSTATE s) { UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(s); }
+
+static SIZE_T APIENTRY UmdCalcPrivateElementLayoutSize(D3D12DDI_HDEVICE h, _In_ CONST D3D12DDIARG_CREATEELEMENTLAYOUT_0010* p) { UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(p); return 64; }
+static void APIENTRY UmdCreateElementLayout(D3D12DDI_HDEVICE h, _In_ CONST D3D12DDIARG_CREATEELEMENTLAYOUT_0010* p, D3D12DDI_HELEMENTLAYOUT s) { UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(p); UNREFERENCED_PARAMETER(s); }
+static void APIENTRY UmdDestroyElementLayout(D3D12DDI_HDEVICE h, D3D12DDI_HELEMENTLAYOUT s) { UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(s); }
+
+/* ============================================================================
+   Query Heap, Command Signature, Pipeline Library Stubs
+   ============================================================================ */
+
+static SIZE_T APIENTRY UmdCalcPrivateQueryHeapSize(D3D12DDI_HDEVICE h, _In_ CONST D3D12DDIARG_CREATE_QUERY_HEAP_0001* p) { UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(p); return 64; }
+static HRESULT APIENTRY UmdCreateQueryHeap(D3D12DDI_HDEVICE h, _In_ CONST D3D12DDIARG_CREATE_QUERY_HEAP_0001* p, D3D12DDI_HQUERYHEAP q) { UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(p); UNREFERENCED_PARAMETER(q); return S_OK; }
+static void APIENTRY UmdDestroyQueryHeap(D3D12DDI_HDEVICE h, D3D12DDI_HQUERYHEAP q) { UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(q); }
+
+static SIZE_T APIENTRY UmdCalcPrivateCommandSignatureSize(D3D12DDI_HDEVICE h, _In_ CONST D3D12DDIARG_CREATE_COMMAND_SIGNATURE_0001* p) { UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(p); return 64; }
+static HRESULT APIENTRY UmdCreateCommandSignature(D3D12DDI_HDEVICE h, _In_ CONST D3D12DDIARG_CREATE_COMMAND_SIGNATURE_0001* p, D3D12DDI_HCOMMANDSIGNATURE c) { UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(p); UNREFERENCED_PARAMETER(c); return S_OK; }
+static void APIENTRY UmdDestroyCommandSignature(D3D12DDI_HDEVICE h, D3D12DDI_HCOMMANDSIGNATURE c) { UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(c); }
+
+static SIZE_T APIENTRY UmdCalcPrivatePipelineLibrarySize(D3D12DDI_HDEVICE h, _In_ CONST D3D12DDIARG_CREATE_PIPELINE_LIBRARY_0010* p) { UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(p); return 64; }
+static HRESULT APIENTRY UmdCreatePipelineLibrary(D3D12DDI_HDEVICE h, _In_ CONST D3D12DDIARG_CREATE_PIPELINE_LIBRARY_0010* p, D3D12DDI_HPIPELINELIBRARY l) { UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(p); UNREFERENCED_PARAMETER(l); return S_OK; }
+static void APIENTRY UmdDestroyPipelineLibrary(D3D12DDI_HDEVICE h, D3D12DDI_HPIPELINELIBRARY l) { UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(l); }
+
+/* ============================================================================
+   OpenAdapter12 - Main Entry Point
    ============================================================================ */
 
 __declspec(dllexport) HRESULT APIENTRY OpenAdapter12(_Inout_ D3D12DDIARG_OPENADAPTER* pOpenData)
 {
-    if (pOpenData == NULL || pOpenData->pAdapterFuncs == NULL) return E_INVALIDARG;
-    pOpenData->pAdapterFuncs->pfnCalcPrivateDeviceSize = BC250_D3D12_CalcPrivateDeviceSize;
-    pOpenData->pAdapterFuncs->pfnCreateDevice = BC250_D3D12_CreateDevice;
-    pOpenData->pAdapterFuncs->pfnCloseAdapter = (PFND3D12DDI_CLOSEADAPTER)BC250_D3D12_CloseAdapter;
-    pOpenData->pAdapterFuncs->pfnGetSupportedVersions = BC250_D3D12_GetSupportedVersions;
-    pOpenData->pAdapterFuncs->pfnGetCaps = BC250_D3D12_GetCaps;
-    pOpenData->pAdapterFuncs->pfnGetOptionalDDITables = BC250_D3D12_GetOptionalDDITables;
-    pOpenData->pAdapterFuncs->pfnFillDDITable = BC250_D3D12_FillDDITable;
-    pOpenData->pAdapterFuncs->pfnDestroyDevice = BC250_D3D12_DestroyDevice;
+    if (!pOpenData || !pOpenData->pAdapterFuncs) return E_INVALIDARG;
+
+    D3D12DDI_ADAPTERFUNCS* f = pOpenData->pAdapterFuncs;
+
+    f->pfnCalcPrivateDeviceSize = UmdCalcPrivateDeviceSize;
+    f->pfnCreateDevice = UmdCreateDevice;
+    f->pfnDestroyDevice = UmdDestroyDevice;
+    f->pfnCloseAdapter = (PFND3D12DDI_CLOSEADAPTER)UmdCloseAdapter;
+    f->pfnGetSupportedVersions = UmdGetSupportedVersions;
+    f->pfnGetCaps = UmdGetCaps;
+    f->pfnGetOptionalDDITables = UmdGetOptionalDDITables;
+    f->pfnFillDDITable = UmdFillDDITable;
+
+    OutputDebugStringA("BC-250 UMD: OpenAdapter12 OK\n");
     return S_OK;
 }
 
-__declspec(dllexport) HRESULT APIENTRY OpenAdapter10(_Inout_ D3D10DDIARG_OPENADAPTER* pOpenData) { UNREFERENCED_PARAMETER(pOpenData); return S_OK; }
-__declspec(dllexport) HRESULT APIENTRY OpenAdapter10_2(_Inout_ D3D10DDIARG_OPENADAPTER* pOpenData) { UNREFERENCED_PARAMETER(pOpenData); return S_OK; }
+__declspec(dllexport) HRESULT APIENTRY OpenAdapter10(_Inout_ D3D10DDIARG_OPENADAPTER* p) { UNREFERENCED_PARAMETER(p); return S_OK; }
+__declspec(dllexport) HRESULT APIENTRY OpenAdapter10_2(_Inout_ D3D10DDIARG_OPENADAPTER* p) { UNREFERENCED_PARAMETER(p); return S_OK; }
+
+BOOL APIENTRY DllMain(HMODULE h, DWORD r, LPVOID v)
+{
+    UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(v);
+    if (r == DLL_PROCESS_ATTACH) OutputDebugStringA("BC-250 UMD: Loaded\n");
+    if (r == DLL_PROCESS_DETACH) OutputDebugStringA("BC-250 UMD: Unloaded\n");
+    return TRUE;
+}

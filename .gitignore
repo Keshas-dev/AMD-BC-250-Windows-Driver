@@ -1,0 +1,41 @@
+# Build artifacts
+*.obj
+*.pdb
+*.exp
+*.lib
+*.ilk
+*.log
+*.tlog
+*.lastbuildstate
+*.res
+*.pch
+*.idb
+*.ipdb
+*.iobj
+
+# Build output (keep output/ in git for prebuilt drivers)
+# output/
+
+# Temp files
+*.tmp
+*.bak
+*.swp
+~$*
+
+# OS files
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# IDE files
+.vs/
+*.suo
+*.user
+*.sdf
+*.opensdf
+.vscode/
+
+# Cert files (keep out of git)
+testcert.*
+_cert_thumbprint.txt
+sign*.txt

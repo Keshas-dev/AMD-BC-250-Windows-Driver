@@ -1,105 +1,121 @@
-# AMD BC-250 Windows Dream Drivers
+# AMD BC-250 Dream Drivers v4.3
 
-**Projekto tikslas:** Sukurti veikiančius Windows GPU draiverius AMD BC-250 (Cyan Skillfish / RDNA2/GFX1013) plokštei.
+Windows GPU driver for AMD BC-250 (Cyan Skillfish / RDNA2 / GFX1013).
 
-**Dabartinė versija:** v4.2 (2026-04-15)  
-**Būsena:** KMD kompiliuojasi ir instaliuojasi, UMD stub'ai dalinai įgyvendinti.
+## Hardware
 
-## 📁 Projekto struktūra
+| Spec | Value |
+|------|-------|
+| Architecture | RDNA 2 (GFX1013) |
+| Compute Units | 24 (1536 shaders) |
+| Memory | 16GB GDDR6 |
+| Ray Tracing | Early gen RT cores |
+| Display Engine | DCN 2.1 |
+| PCI ID | `VEN_1002&DEV_13FE` |
+
+## Project Structure
 
 ```
-AMD-BC-250-Windows-Driver/
-├── QUICK-START.md          ← Greito paleidimo instrukcija
-├── MASTER-STATUS.md        ← Dabartinė būsena ir struktūra
-├── QWEN.md                 ← Projekto istorija ir atmintys
-├── docs/                   ← Techninė dokumentacija
-│   ├── README.md           ← Projekto overview (EN)
-│   ├── PILNAS-APRASAS.md   ← Išsamus techninis aprašymas (LT)
-│   ├── BUILD-STATUS.md     ← Build aplinkos ataskaita
-│   └── D3D12-UMD-RESEARCH.md
-├── src/                    ← Šaltinis kodas
-│   ├── kmd/                ← Kernel-Mode Driver (aktyvus)
-│   └── umd/                ← User-Mode Driver (stub'ai)
-├── inc/                    ← Header failai
-├── inf/                    ← Instaliacijos failai
-├── tools/                  ← Įrankiai ir skriptai
-├── test-tools/             ← Testavimo įrankiai
-└── output/                 ← Build output (jei nėra, buildinti iš src/)
+AMD-BC-250-Windows-Driver-main/
+├── src/                        Source code
+│   ├── kmd/                    Kernel-Mode Driver
+│   │   ├── amdbc250_dream_v3_kmd.c       Main DDI callbacks
+│   │   ├── amdbc250_dream_v3_hw_init.c   Hardware init (GFX10, DCN 2.1)
+│   │   ├── amdbc250_dream_v3_power.c     Power/thermal management
+│   │   ├── amdbc250_dream_v3_vm.c        GPU virtual memory
+│   │   ├── makefile
+│   │   └── SOURCES
+│   └── umd/                    User-Mode Driver (D3D12 stub)
+│       └── amdbc250_umd_v46.c
+├── inc/                        Header files
+│   ├── amdbc250_dream_v3_kmd.h    KMD structures & prototypes
+│   ├── amdbc250_dream_v3_hw.h     Hardware register definitions
+│   └── amdbc250_d3d12.h           D3D12 DDI interfaces
+├── inf/                        Driver installation
+│   └── amdbc250_dream_v3.inf
+├── output/                     Build output
+│   ├── atikmdag.sys            Kernel driver (signed)
+│   ├── amdbc250umd64.dll       User driver (signed)
+│   └── amdbc250_dream_v3.inf
+├── tools/                      Utility scripts
+│   ├── uninstall-bc250.ps1
+│   └── Uninstall-Old-Drivers.bat
+├── test-tools/                 GPU testing
+│   ├── test-gpu-simple.c
+│   ├── test-gpu-simple.exe
+│   └── run-gpu-test.bat
+├── docs/                       Documentation
+│   ├── README.md               Overview (EN)
+│   ├── PILNAS-APRASAS.md       Technical spec (LT)
+│   ├── BUILD-STATUS.md         Build environment notes
+│   └── D3D12-UMD-RESEARCH.md   D3D12 UMD research
+├── build.bat                   Build script (VS 2022 + WDK)
+├── .gitignore
+└── README.md
 ```
 
-## 🚀 Greitas pradžia
+## Quick Start
 
-1. **Reikalavimai:**
-   - Windows 11 (64-bit)
-   - Visual Studio 2022 su WDK
-   - Test signing įjungtas: `bcdedit /set testsigning on`
+### Requirements
+- Windows 10/11 64-bit
+- Visual Studio 2022 (Community or higher)
+- Windows Driver Kit (WDK) 10.0.26100.0
+- Test signing enabled
 
-2. **Build ir instaliacija:**
-   ```powershell
-   .\build.bat
-   # Pasirinkti 1 (Full Build)
-   ```
-   Arba naudoti prebuilt iš `output/` aplanko.
+### Build
+```cmd
+build.bat
+```
+Or open **Developer Command Prompt for VS 2022** and run manually.
 
-3. **Instaliuoti:**
-   - Device Manager → Update Driver → Browse → `output\amdbc250_dream_v3.inf`
-   - Pasirinkti: "AMD Radeon BC-250 Graphics (Dream Drivers v4.2 - RDNA2)"
+### Install
+```powershell
+bcdedit /set testsigning on
+```
+Reboot, then: **Device Manager > Update Driver > Browse** to `output/`
 
-4. **Patikrinti:**
-   ```powershell
-   Get-PnpDevice -Class Display | Select Status, FriendlyName
-   ```
+## Architecture
 
-## 📊 Būsena
+Based on Linux `amdgpu` driver:
+- `gfx_v10_0.c` - GFX10 command processor
+- `nv.c` - Navi family init
+- `dcn20/` - DCN 2.1 display engine
+- `amdgpu_vm.c` - GPU virtual memory
 
-| Komponentas | Statusas | Pastabos |
-|-------------|----------|----------|
-| **KMD** | ✅ Kompiliuojasi | WDDM DDI callbacks, HW init |
-| **UMD** | ⚠️ Stub'ai | D3D12 baziniai, ne pilnas |
-| **Build** | ✅ Veikia | MSVC + WDK |
-| **Instaliacija** | ✅ Veikia | Device Manager |
-| **D3D12** | ⚠️ Bazinis | OpenAdapter12 veikia |
-| **Display** | ✅ DCN 2.1 | Iš Linux amdgpu |
-| **Ray Tracing** | ❌ Neįgyvendinta | Aparatinė įranga turi RT cores |
+### KMD Modules
 
-## 📚 Dokumentacija
+| File | Purpose |
+|------|---------|
+| `amdbc250_dream_v3_kmd.c` | WDDM DDI callbacks, ring buffers, interrupt handling |
+| `amdbc250_dream_v3_hw_init.c` | GPU init, golden registers, HDP flush, display |
+| `amdbc250_dream_v3_power.c` | SMU stubs, thermal monitoring, fan control |
+| `amdbc250_dream_v3_vm.c` | GART, GPU page tables (4-level), TLB invalidation |
 
-- **[QUICK-START.md](QUICK-START.md)** - Greitos pradžios gidas
-- **[MASTER-STATUS.md](MASTER-STATUS.md)** - Išsami būsena ir struktūra
-- **[docs/README.md](docs/README.md)** - Projekto istorija ir specifikacijos
-- **[docs/PILNAS-APRASAS.md](docs/PILNAS-APRASAS.md)** - Techninis aprašymas (lietuviškai)
-- **[docs/BUILD-STATUS.md](docs/BUILD-STATUS.md)** - Build aplinkos problema ir sprendimai
-- **[QWEN.md](QWEN.md)** - Projekto atmintys ir istorija
+### Key Features
+- 64-bit fences (GFX10 requirement)
+- HDP coherency flush before ring reads
+- Thermal throttle with hysteresis (85C on, 80C off)
+- Dynamic clock scaling
+- GPU virtual memory with 4-level page tables
 
-## 🐧 Linux palyginimas
+## Known Limitations
 
-Šis projektas bando atkartoti Linux `amdgpu` driver funkcionalumą Windows aplinkoje:
+- **Compute queue**: Disabled (hardware quirk)
+- **VCN firmware**: Blocked by Sony
+- **VRAM**: ~10GB visible limit (hardware quirk)
+- **UMD**: D3D12 stub only, no full rendering pipeline
+- **No OpenGL/Vulkan**: Needs Mesa RADV or AMDVLK
 
-| Funkcija | Linux (amdgpu) | Windows (Dream Drivers) |
-|----------|----------------|-------------------------|
-| Vulkan | ✅ RADV | ⚠️ AMDVLK reikalingas |
-| OpenGL | ✅ radeonsi | ❌ Neįgyvendinta |
-| D3D12 | ✅ DXVK | ⚠️ Bazinis stub |
-| Compute | ❌ Broken HW | ✅ Išjungta (quirk) |
-| Video | ❌ Blocked | ❌ Blocked |
-| Performance | ~RX 6600 | TBD |
+## Linux Comparison
 
-## ⚠️ Žinomos problemos
+| Feature | Linux (amdgpu) | Windows (Dream) |
+|---------|---------------|-----------------|
+| Vulkan | RADV | AMDVLK required |
+| OpenGL | radeonsi | Not implemented |
+| D3D12 | DXVK | Basic stub |
+| Compute | Broken HW | Disabled (quirk) |
+| Video | Blocked | Blocked |
 
-- **Hardware limitations:** Broken compute queue, VCN firmware blocked, ~10GB VRAM limit
-- **UMD:** Tik baziniai D3D12 stub'ai, nėra pilno rendering
-- **Build:** Reikia WDK aplinkos
-- **Testing:** Ribotas testavimas dėl aparatinės įrangos prieinamumo
+## License
 
-## 🤝 Kontributoriai
-
-Šis projektas yra bendruomeninis, skirtas AMD BC-250 savininkams, kurie nori Windows GPU palaikymo.
-
-## 📄 Licencija
-
-Šaltinis kodas yra atviras, bet skirtas mokymosi tikslams. Naudokite savo rizika.
-
----
-
-*Atnaujinta: 2026-04-15*</content>
-<filePath>file:///c:/AMD-BC-250-Windows-Driver/README.md
+Source code for educational purposes. Use at your own risk.

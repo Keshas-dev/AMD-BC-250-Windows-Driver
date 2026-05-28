@@ -1,11 +1,13 @@
 @echo off
-echo AMD BC-250 Dream Drivers Build Script v4.3
-echo ==========================================
+echo AMD BC-250 Dream Drivers Build + Sign Script v4.3
+echo ==================================================
 
 set "PROJECT_DIR=%~dp0"
 set "SRC_DIR=%PROJECT_DIR%src"
 set "INC_DIR=%PROJECT_DIR%inc"
 set "OUTPUT_DIR=%PROJECT_DIR%output"
+set "CERT_FILE=%PROJECT_DIR%testcert.pfx"
+set "CERT_NAME=AMD-BC250-Signer"
 
 rem --- Detect Visual Studio on E: or C: drive ---
 set "VSWHERE="
@@ -59,11 +61,32 @@ exit /b 1
 :FoundWDK
 echo Using Windows Kit version %WDK_VERSION%
 
+rem --- Locate signing tools ---
+set "SIGNTOOLS="
+set "INF2CAT="
+if exist "%WDK_ROOT%\bin\%WDK_VERSION%\x64\signtool.exe" (
+    set "SIGNTOOLS=%WDK_ROOT%\bin\%WDK_VERSION%\x64"
+)
+if exist "%WDK_ROOT%\bin\%WDK_VERSION%\x86\signtool.exe" (
+    if "%SIGNTOOLS%"=="" set "SIGNTOOLS=%WDK_ROOT%\bin\%WDK_VERSION%\x86"
+)
+if exist "%WDK_ROOT%\bin\%WDK_VERSION%\x86\Inf2Cat.exe" (
+    set "INF2CAT=%WDK_ROOT%\bin\%WDK_VERSION%\x86\Inf2Cat.exe"
+)
+if exist "%WDK_ROOT%\bin\%WDK_VERSION%\x64\Inf2Cat.exe" (
+    set "INF2CAT=%WDK_ROOT%\bin\%WDK_VERSION%\x64\Inf2Cat.exe"
+)
+if "%SIGNTOOLS%"=="" (
+    echo WARNING: signtool.exe not found - will skip signing
+)
+
 if not exist "%OUTPUT_DIR%" mkdir "%OUTPUT_DIR%"
 if exist "%PROJECT_DIR%*.obj" del /q "%PROJECT_DIR%*.obj" 2>nul
 
 echo.
-echo Building KMD (Kernel-Mode Driver)...
+echo ==========================================
+echo  BUILDING KMD (Kernel-Mode Driver)
+echo ==========================================
 echo.
 
 cl.exe /c /kernel /W3 /Zi /Od /DAMD64 /D_AMD64_ /DAMDBC250_DREAM_V3 ^
@@ -96,7 +119,9 @@ if errorlevel 1 (
 )
 
 echo.
-echo Building UMD (User-Mode Driver)...
+echo ==========================================
+echo  BUILDING UMD (User-Mode Driver)
+echo ==========================================
 echo.
 
 cl.exe /c /TP /D_AMD64_ /DWIN64 /DAMDBC250_UMD /W3 /Zi /O2 ^
@@ -126,12 +151,106 @@ if errorlevel 1 (
 
 echo.
 echo Copying INF file...
-copy "%PROJECT_DIR%\inf\amdbc250_dream_v3.inf" "%OUTPUT_DIR%\"
+copy "%PROJECT_DIR%\inf\amdbc250_dream_v3.inf" "%OUTPUT_DIR%\" >nul
 
 echo.
 echo ==========================================
-echo BUILD COMPLETED SUCCESSFULLY!
-echo Output: %OUTPUT_DIR%
+echo  SIGNING DRIVERS
 echo ==========================================
+echo.
+
+if "%SIGNTOOLS%"=="" (
+    echo WARNING: Skipping signing - signtool not found
+    goto :SkipSigning
+)
+
+rem --- Create certificate if not exists ---
+if not exist "%CERT_FILE%" (
+    echo Creating self-signed test certificate...
+    "%SIGNTOOLS%\makecert.exe" -r -pe -n "CN=%CERT_NAME%" ^
+      -ss My -sr CurrentUser ^
+      -sky signature -a sha256 -m 60 ^
+      "%CERT_FILE%"
+    if errorlevel 1 (
+        echo WARNING: Certificate creation failed - skipping signing
+        goto :SkipSigning
+    )
+    echo Certificate created.
+    
+    rem --- Trust the certificate (add to Root store) ---
+    echo Adding certificate to Root trust store...
+    certutil -addstore -user Root "%CERT_FILE%" >nul 2>&1
+    certutil -addstore -user TrustedPublisher "%CERT_FILE%" >nul 2>&1
+    echo   Certificate trusted.
+)
+
+rem --- Generate catalog file ---
+if "%INF2CAT%"=="" (
+    echo WARNING: Inf2Cat not found - skipping catalog generation
+    goto :SignFiles
+)
+echo Generating catalog file...
+"%INF2CAT%" /driver:"%OUTPUT_DIR%" /os:10_x64 /verbose
+if errorlevel 1 (
+    echo WARNING: inf2cat failed - signing individual files only
+    goto :SignFiles
+)
+
+rem --- Sign catalog ---
+echo Signing amdbc250_dream_v3.cat...
+"%SIGNTOOLS%\signtool.exe" sign /fd SHA256 /a /s My /n "%CERT_NAME%" ^
+  "%OUTPUT_DIR%\amdbc250_dream_v3.cat"
+if errorlevel 1 (
+    echo WARNING: Catalog signing failed
+) else (
+    echo   OK
+)
+
+:SignFiles
+rem --- Sign KMD ---
+echo Signing atikmdag.sys...
+"%SIGNTOOLS%\signtool.exe" sign /fd SHA256 /a /s My /n "%CERT_NAME%" ^
+  "%OUTPUT_DIR%\atikmdag.sys"
+if errorlevel 1 (
+    echo WARNING: KMD signing failed
+) else (
+    echo   OK
+)
+
+rem --- Sign UMD ---
+echo Signing amdbc250umd64.dll...
+"%SIGNTOOLS%\signtool.exe" sign /fd SHA256 /a /s My /n "%CERT_NAME%" ^
+  "%OUTPUT_DIR%\amdbc250umd64.dll"
+if errorlevel 1 (
+    echo WARNING: UMD signing failed
+) else (
+    echo   OK
+)
+
+rem --- Verify ---
+echo.
+echo Verifying signatures...
+"%SIGNTOOLS%\signtool.exe" verify /pa "%OUTPUT_DIR%\atikmdag.sys" 2>nul
+"%SIGNTOOLS%\signtool.exe" verify /pa "%OUTPUT_DIR%\amdbc250umd64.dll" 2>nul
+if exist "%OUTPUT_DIR%\amdbc250_dream_v3.cat" (
+    "%SIGNTOOLS%\signtool.exe" verify /pa "%OUTPUT_DIR%\amdbc250_dream_v3.cat" 2>nul
+)
+
+:SkipSigning
+
+echo.
+echo ==========================================
+echo  BUILD COMPLETED!
+echo ==========================================
+echo.
+echo  Output: %OUTPUT_DIR%
+echo    atikmdag.sys      - Kernel driver
+echo    amdbc250umd64.dll - User driver
+echo    amdbc250_dream_v3.inf
+echo.
+echo  Install:
+echo    1. bcdedit /set testsigning on  (as Admin)
+echo    2. Reboot
+echo    3. Device Manager - Update Driver - Browse to output\
 echo.
 pause
