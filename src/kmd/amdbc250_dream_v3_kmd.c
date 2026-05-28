@@ -40,6 +40,7 @@ static UNICODE_STRING g_SymlinkName;
 
 /* Forward declarations */
 NTSTATUS DreamV3DeviceControl(PDEVICE_OBJECT, PIRP);
+NTSTATUS DreamV3CreateClose(PDEVICE_OBJECT, PIRP);
 NTSTATUS DreamV3SdmaCopyBuffer(PDREAM_V3_DEVICE_EXTENSION, PHYSICAL_ADDRESS, PHYSICAL_ADDRESS, SIZE_T);
 NTSTATUS DreamV3SdmaFillBuffer(PDREAM_V3_DEVICE_EXTENSION, PHYSICAL_ADDRESS, SIZE_T, ULONG);
 NTSTATUS DreamV3TdrReset(PDREAM_V3_DEVICE_EXTENSION);
@@ -193,8 +194,8 @@ DriverEntry(
             g_ControlDevice->Flags &= ~DO_DEVICE_INITIALIZING;
             IoCreateSymbolicLink(&symLink, &devName);
             DriverObject->MajorFunction[IRP_MJ_DEVICE_CONTROL] = DreamV3DeviceControl;
-            DriverObject->MajorFunction[IRP_MJ_CREATE] = NULL;
-            DriverObject->MajorFunction[IRP_MJ_CLOSE] = NULL;
+            DriverObject->MajorFunction[IRP_MJ_CREATE] = DreamV3CreateClose;
+            DriverObject->MajorFunction[IRP_MJ_CLOSE] = DreamV3CreateClose;
             KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                        "AMDBC250-DREAM-V4.3: Control device created: %wZ\n", &devName));
         } else {
@@ -1784,6 +1785,19 @@ DreamV3VmInitialize(_In_ PDREAM_V3_DEVICE_EXTENSION DevExt)
   The UMD opens \\.\AMDBC250DreamV43 and sends IOCTLs.
   This device is created by DreamV3DdiAddDevice via IoCreateDevice.
 ===========================================================================*/
+
+NTSTATUS
+DreamV3CreateClose(
+    _In_ PDEVICE_OBJECT DeviceObject,
+    _Inout_ PIRP Irp
+    )
+{
+    UNREFERENCED_PARAMETER(DeviceObject);
+    Irp->IoStatus.Status = STATUS_SUCCESS;
+    Irp->IoStatus.Information = 0;
+    IoCompleteRequest(Irp, IO_NO_INCREMENT);
+    return STATUS_SUCCESS;
+}
 
 NTSTATUS
 DreamV3DeviceControl(
