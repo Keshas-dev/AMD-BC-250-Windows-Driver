@@ -7,7 +7,7 @@ cd AMD-BC-250-Windows-Driver-main
 build.bat
 ```
 
-Output: `output/` (atikmdag.sys, amdbc250umd64.dll, .cat, .inf)
+Output: `output/` (atikmdag.sys, amdbc250umd64.dll, amdbc250vulkan.dll, .cat, .inf)
 
 ## 2. Enable Test Signing
 
@@ -33,13 +33,20 @@ Get-PnpDevice -Class Display | Select Status, FriendlyName
 
 Expected: `Status = OK/Degraded`, `FriendlyName = AMD Radeon BC-250 Graphics`
 
-## 5. Test IOCTL Communication
+## 5. Enable 40 CUs (optional, 1.61x boost)
 
-```cmd
-test-tools\test-gpu-ioctls.exe
+```powershell
+# Run as Admin
+reg add "HKLM\SYSTEM\CurrentControlSet\Services\AMDBC250DreamV43" /v Enable40CU /t REG_DWORD /d 1
+# Reboot
 ```
 
-Runs 15 tests: GetCaps, VRAM, Temperature, Display, Memory, SDMA, Fence, TDR, EDID, Shader.
+## 6. Test
+
+```cmd
+test-tools\test-gpu-ioctls.exe      # IOCTL communication test
+test-tools\simple_test.exe           # Vulkan ICD test
+```
 
 ## Uninstall
 
