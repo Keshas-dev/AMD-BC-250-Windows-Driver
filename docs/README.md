@@ -20,13 +20,35 @@ Linux has full support via AMDGPU, but Windows has zero official GPU drivers. Th
 | CPU | 6x Zen 2 cores @ ~3.5GHz |
 | PCI Device ID | `0x13FE` |
 
+## Architecture
+
+### Kernel-Mode Driver (KMD)
+- WDDM 2.x/3.x display miniport driver
+- GFX10 command processor with PM4 packets
+- DCN 2.1 display engine (4 display pipes)
+- SDMA copy engine for GPU buffer operations
+- 4-level GPU page tables (GFX10 VM)
+- 21 IOCTL handlers for UMD communication
+- TDR recovery with 6-step reset sequence
+
+### User-Mode Driver (UMD)
+- D3D12 DDI (Device Driver Interface) implementation
+- Communicates with KMD via IOCTL
+- Resource/Heap management through KMD
+- Command list and fence management
+
+### Build System
+- Auto-detect Visual Studio 2022 + WDK
+- Auto catalog generation and signing
+- Self-signed test certificate
+
 ## Documentation Files
 
 | File | Description |
 |------|-------------|
 | [PILNAS-APRASAS.md](PILNAS-APRASAS.md) | Full technical specification (Lithuanian) |
-| [BUILD-STATUS.md](BUILD-STATUS.md) | Build environment and compilation notes |
-| [D3D12-UMD-RESEARCH.md](D3D12-UMD-RESEARCH.md) | D3D12 User-Mode Driver research notes |
+| [BUILD-STATUS.md](BUILD-STATUS.md) | Build environment notes |
+| [D3D12-UMD-RESEARCH.md](D3D12-UMD-RESEARCH.md) | D3D12 UMD research notes |
 
 ## References
 

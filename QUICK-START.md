@@ -1,4 +1,4 @@
-# Quick Start - AMD BC-250 Dream Drivers
+# Quick Start - AMD BC-250 Dream Drivers v4.3
 
 ## 1. Build
 
@@ -7,7 +7,7 @@ cd AMD-BC-250-Windows-Driver-main
 build.bat
 ```
 
-Output: `output/atikmdag.sys`, `output/amdbc250umd64.dll`
+Output: `output/` (atikmdag.sys, amdbc250umd64.dll, .cat, .inf)
 
 ## 2. Enable Test Signing
 
@@ -31,13 +31,19 @@ Reboot required.
 Get-PnpDevice -Class Display | Select Status, FriendlyName
 ```
 
-Expected: `Status = OK`, `FriendlyName = AMD Radeon BC-250 Graphics`
+Expected: `Status = OK/Degraded`, `FriendlyName = AMD Radeon BC-250 Graphics`
+
+## 5. Test IOCTL Communication
+
+```cmd
+test-tools\test-gpu-ioctls.exe
+```
+
+Runs 15 tests: GetCaps, VRAM, Temperature, Display, Memory, SDMA, Fence, TDR, EDID, Shader.
 
 ## Uninstall
 
 ```powershell
-# PowerShell (run as admin)
 tools\uninstall-bc250.ps1
 ```
-
 Or Device Manager > Uninstall device.
