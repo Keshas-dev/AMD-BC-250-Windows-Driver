@@ -79,6 +79,10 @@ Environment:
 /* Shader */
 #define IOCTL_AMDBC250_SHADER_COMPILE       CTL_CODE_AMDBC250(0x5C, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
+/* 40 CU Unlock */
+#define IOCTL_AMDBC250_UNLOCK_40CU          CTL_CODE_AMDBC250(0x60, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define IOCTL_AMDBC250_GET_CU_STATUS        CTL_CODE_AMDBC250(0x61, METHOD_BUFFERED, FILE_ANY_ACCESS)
+
 /*===========================================================================
   Capability Flags
 ============================================================================*/

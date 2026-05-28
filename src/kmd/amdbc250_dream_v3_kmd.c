@@ -414,6 +414,40 @@ DreamV3DdiStartDevice(
     DevExt->HardwareInitialized = TRUE;
     DevExt->DeviceStarted = TRUE;
 
+    /* Check registry for 40 CU unlock */
+    {
+        UNICODE_STRING regPath;
+        UNICODE_STRING regValueName;
+        OBJECT_ATTRIBUTES objAttr;
+        HANDLE hKey = NULL;
+        UCHAR regBuffer[sizeof(KEY_VALUE_PARTIAL_INFORMATION) + sizeof(ULONG)];
+        PKEY_VALUE_PARTIAL_INFORMATION regInfo = (PKEY_VALUE_PARTIAL_INFORMATION)regBuffer;
+        ULONG regSize = 0;
+
+        RtlInitUnicodeString(&regPath, L"\\Registry\\Machine\\SYSTEM\\CurrentControlSet\\Services\\AMDBC250DreamV43");
+        InitializeObjectAttributes(&objAttr, &regPath, OBJ_CASE_INSENSITIVE, NULL, NULL);
+
+        NTSTATUS regStatus = ZwOpenKey(&hKey, KEY_READ, &objAttr);
+        if (NT_SUCCESS(regStatus)) {
+            RtlInitUnicodeString(&regValueName, L"Enable40CU");
+            regStatus = ZwQueryValueKey(hKey, &regValueName, KeyValuePartialInformation,
+                                         regBuffer, sizeof(regBuffer), &regSize);
+            ZwClose(hKey);
+
+            if (NT_SUCCESS(regStatus) && regInfo->Type == REG_DWORD &&
+                regInfo->DataLength == sizeof(ULONG)) {
+                ULONG regValue = *(PULONG)regInfo->Data;
+                if (regValue == 1) {
+                    /* Unlock 40 CUs! */
+                    DreamV3WriteRegister(DevExt, 0x2004, 0xFFE00000);
+                    DreamV3WriteRegister(DevExt, 0x229C, 0x0000001F);
+                    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+                        "AMDBC250-DREAM-V4.3: *** 40 CU UNLOCKED via registry ***\n"));
+                }
+            }
+        }
+    }
+
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                "AMDBC250-DREAM-V4.3: StartDevice SUCCESS\n"));
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
@@ -2211,6 +2245,88 @@ DreamV3DeviceControl(
                 bytesReturned = sizeof(ULONG) * 2;
             }
             status = STATUS_SUCCESS;
+        } else {
+            status = STATUS_BUFFER_TOO_SMALL;
+        }
+        break;
+    }
+
+    /* --- Unlock 40 CUs --- */
+    case 0x80000980: { /* IOCTL_AMDBC250_UNLOCK_40CU */
+        /*
+         * BC-250 40 CU Unlock (from duggasco/bc250-40cu-unlock)
+         *
+         * Two registers must be written:
+         * 1. CC_GC_SHADER_ARRAY_CONFIG (0x2004): CU enumeration mask
+         *    Stock: 0xFFF80000 (24 CUs) → Unlocked: 0xFFE00000 (40 CUs)
+         * 2. SPI_PG_ENABLE_STATIC_WGP_MASK (0x229C): WGP dispatch gate
+         *    Stock: 0x7 (WGP 0-2) → Unlocked: 0x1F (WGP 0-4)
+         *
+         * Both registers must be written together.
+         * CC alone changes what driver reports but SPI still dispatches to 24 CUs.
+         * SPI alone enables hardware dispatch but driver only generates for 24 CUs.
+         */
+        if (inputLen >= sizeof(ULONG)) {
+            PULONG InData = (PULONG)inputBuffer;
+            ULONG enable = InData[0]; /* 0=disable (stock 24CU), 1=enable (40CU) */
+
+            if (enable) {
+                /* Write CC_GC_SHADER_ARRAY_CONFIG: 0xFFF80000 → 0xFFE00000 */
+                DreamV3WriteRegister(DevExt, 0x2004, 0xFFE00000);
+                /* Write SPI_PG_ENABLE_STATIC_WGP_MASK: 0x7 → 0x1F */
+                DreamV3WriteRegister(DevExt, 0x229C, 0x0000001F);
+
+                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+                    "AMDBC250-DREAM-V4.3: *** 40 CU UNLOCK ENABLED *** "
+                    "CC=0xFFF80000->0xFFE00000 SPI=0x7->0x1F\n"));
+            } else {
+                /* Restore stock 24 CUs */
+                DreamV3WriteRegister(DevExt, 0x2004, 0xFFF80000);
+                DreamV3WriteRegister(DevExt, 0x229C, 0x00000007);
+
+                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                    "AMDBC250-DREAM-V4.3: 40 CU unlock DISABLED (stock 24 CU)\n"));
+            }
+            status = STATUS_SUCCESS;
+        } else {
+            status = STATUS_BUFFER_TOO_SMALL;
+        }
+        break;
+    }
+
+    /* --- Get CU Status --- */
+    case 0x80000984: { /* IOCTL_AMDBC250_GET_CU_STATUS */
+        if (outputLen >= sizeof(ULONG) * 4) {
+            PULONG OutData = (PULONG)outputBuffer;
+
+            /* Read current register values */
+            ULONG ccConfig = DreamV3ReadRegister(DevExt, 0x2004);
+            ULONG spiMask = DreamV3ReadRegister(DevExt, 0x229C);
+
+            /* Decode CU count from CC_GC_SHADER_ARRAY_CONFIG */
+            /* Bits [31:19] = CU mask, count set bits */
+            ULONG cuMask = (ccConfig >> 19) & 0x1FFF;
+            ULONG cuCount = 0;
+            for (ULONG i = 0; i < 13; i++) {
+                if (cuMask & (1 << i)) cuCount++;
+            }
+            cuCount *= 2; /* Each bit = 2 CUs (1 WGP = 2 CUs) */
+
+            /* Decode WGP count from SPI mask */
+            ULONG wgpCount = 0;
+            for (ULONG i = 0; i < 5; i++) {
+                if (spiMask & (1 << i)) wgpCount++;
+            }
+
+            OutData[0] = cuCount;      /* Active CUs */
+            OutData[1] = wgpCount;     /* Active WGPs */
+            OutData[2] = ccConfig;     /* CC register value */
+            OutData[3] = spiMask;      /* SPI register value */
+            bytesReturned = sizeof(ULONG) * 4;
+
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                "AMDBC250-DREAM-V4.3: CU Status: %lu CUs, %lu WGPs, CC=0x%08X, SPI=0x%08X\n",
+                cuCount, wgpCount, ccConfig, spiMask));
         } else {
             status = STATUS_BUFFER_TOO_SMALL;
         }
