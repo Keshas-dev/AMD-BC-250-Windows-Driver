@@ -527,6 +527,35 @@ VkResult VKAPI_CALL bc250_vkDeviceWaitIdle(VkDevice device)
     return VK_SUCCESS;
 }
 
+/* Queue Present - Flip display via KMD IOCTL */
+VkResult VKAPI_CALL bc250_vkQueuePresentKHR(
+    VkQueue queue,
+    const void* pPresentInfo)
+{
+    UNREFERENCED_PARAMETER(queue);
+    UNREFERENCED_PARAMETER(pPresentInfo);
+
+    /* Submit present to KMD via IOCTL 0x800008C4 */
+    BC250_VK_DEVICE* dev = &g_Device;
+    if (dev->kmdDevice != INVALID_HANDLE_VALUE) {
+        ULONG flipData[7] = {0};
+        flipData[0] = 0;  /* Surface address low */
+        flipData[1] = 0;  /* Surface address high */
+        flipData[2] = 1920; /* Width */
+        flipData[3] = 1080; /* Height */
+        flipData[4] = 1920 * 4; /* Pitch */
+        flipData[5] = 22;  /* D3DDDIFMT_A8R8G8B8 */
+        flipData[6] = 1;   /* VSync */
+
+        DWORD ret = 0;
+        DeviceIoControl(dev->kmdDevice, 0x800008C4, flipData, sizeof(flipData),
+                        NULL, 0, &ret, NULL);
+    }
+
+    OutputDebugStringA("BC-250 Vulkan: QueuePresentKHR → KMD flip\n");
+    return VK_SUCCESS;
+}
+
 /* Pipeline creation (stubs) */
 /* Pipeline creation with real shader compilation */
 VkResult VKAPI_CALL bc250_vkCreateGraphicsPipelines(
@@ -897,6 +926,7 @@ typedef struct VkIcdDispatchTable {
     PFN_vkDeviceWaitIdle                     DeviceWaitIdle;
     PFN_vkCreateGraphicsPipelines            CreateGraphicsPipelines;
     PFN_vkDestroyPipeline                    DestroyPipeline;
+    PFN_vkQueuePresentKHR                    QueuePresentKHR;
     PFN_vkCmdPipelineBarrier                 CmdPipelineBarrier;
     PFN_vkCmdBindPipeline                    CmdBindPipeline;
     PFN_vkCmdDraw                            CmdDraw;
@@ -949,6 +979,7 @@ __declspec(dllexport) VkIcdDispatchTable* VKAPI_CALL vk_icdGetInstanceProcAddr(V
         table.DeviceWaitIdle = bc250_vkDeviceWaitIdle;
         table.CreateGraphicsPipelines = bc250_vkCreateGraphicsPipelines;
         table.DestroyPipeline = bc250_vkDestroyPipeline;
+        table.QueuePresentKHR = bc250_vkQueuePresentKHR;
         table.CmdPipelineBarrier = bc250_vkCmdPipelineBarrier;
         table.CmdBindPipeline = bc250_vkCmdBindPipeline;
         table.CmdDraw = bc250_vkCmdDraw;
