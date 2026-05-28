@@ -1971,6 +1971,9 @@ DreamV3DeviceControl(
             /* Update fence */
             DevExt->GlobalFence.LastSubmittedValue = (ULONG64)fenceValue;
 
+            /* Signal fence event for WaitFence */
+            KeSetEvent(&DevExt->GlobalFence.FenceEvent, 0, FALSE);
+
             KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_TRACE_LEVEL,
                 "AMDBC250-DREAM-V4.3: SubmitCommands fence=%u\n", fenceValue));
         }
@@ -1983,26 +1986,29 @@ DreamV3DeviceControl(
             PULONG InData = (PULONG)inputBuffer;
             ULONG targetFence = InData[0];
             ULONG timeoutMs = InData[1];
-            ULONG elapsed = 0;
+            LARGE_INTEGER timeout;
+            NTSTATUS waitStatus;
 
-            while (DevExt->GlobalFence.LastSignaledValue < (ULONG64)targetFence &&
-                   elapsed < timeoutMs) {
-                KeStallExecutionProcessor(100);
-                elapsed += 100;
-
-                /* Check if GPU signaled the fence */
-                if (DevExt->GlobalFence.VirtualAddress != NULL) {
-                    ULONG64 currentFence = *DevExt->GlobalFence.VirtualAddress;
-                    if (currentFence > DevExt->GlobalFence.LastSignaledValue) {
-                        DevExt->GlobalFence.LastSignaledValue = currentFence;
-                    }
-                }
-            }
-
+            /* Check if fence already signaled */
             if (DevExt->GlobalFence.LastSignaledValue >= (ULONG64)targetFence) {
                 status = STATUS_SUCCESS;
-            } else {
+                break;
+            }
+
+            /* Wait on fence event with timeout */
+            timeout.QuadPart = (LONGLONG)timeoutMs * -10000; /* Convert ms to 100ns units */
+            waitStatus = KeWaitForSingleObject(
+                &DevExt->GlobalFence.FenceEvent,
+                Executive,
+                KernelMode,
+                FALSE,
+                &timeout
+                );
+
+            if (waitStatus == STATUS_TIMEOUT) {
                 status = STATUS_TIMEOUT;
+            } else {
+                status = STATUS_SUCCESS;
             }
         }
         break;
