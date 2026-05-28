@@ -1,0 +1,145 @@
+;
+; AMD BC-250 "Dream Drivers" v4.3 Installation File
+;
+; Architecture: RDNA2 / Cyan Skillfish (GFX1013)
+; Device: AMD Radeon BC-250 (PCI\VEN_1002&DEV_13FE)
+; Memory: 16GB GDDR6 shared
+; CUs: 24 RDNA2 Compute Units (1536 shaders)
+; Ray Tracing: Enabled (early generation)
+;
+; Version: 4.3.0.0 (Dream Drivers v4.3 — DEBUG LOGGING + BSOD 0x9F FIX)
+; Based on: Linux amdgpu driver (GFX10 / Navi family)
+; Changes: Enhanced KdPrintEx logging, power state fixes, error handling
+;
+
+[Version]
+Signature="$Windows NT$"
+Provider=%AMD%
+ClassGUID={4D36E968-E325-11CE-BFC1-08002BE10318}
+Class=Display
+DriverVer=04/13/2026,4.3.0.0
+CatalogFile=amdbc250_dream_v3.CAT
+PnpLockdown=1
+
+[DestinationDirs]
+DefaultDestDir = 11
+DreamV3.Miniport = 12
+DreamV3.UMD      = 11
+
+[SourceDisksNames]
+1 = %DISKNAME%,,,
+
+[SourceDisksFiles]
+; Kernel-mode drivers (KMD)
+atikmdag.sys = 1
+
+; User-mode driver (UMD) - D3D10/D3D11/D3D12
+amdbc250umd64.dll = 1
+
+[Manufacturer]
+%AMD% = AMD,NTamd64
+
+[AMD.NTamd64]
+%BC250.DeviceDesc% = DreamV3_Install, PCI\VEN_1002&DEV_13FE
+
+;-----------------------------------------------------------------------
+; Installation
+;-----------------------------------------------------------------------
+
+[DreamV3_Install]
+CopyFiles = DreamV3.Miniport, DreamV3.UMD
+AddReg    = DreamV3_AddReg
+
+[DreamV3_Install.HW]
+AddReg = DreamV3_HwSettings
+
+[DreamV3_Install.Services]
+AddService = atikmdag, 0x00000002, DreamV3_ServiceInstall
+
+[DreamV3_ServiceInstall]
+ServiceType    = 1
+StartType      = 3
+ErrorControl   = 0
+ServiceBinary  = %12%\atikmdag.sys
+LoadOrderGroup = Video
+
+;-----------------------------------------------------------------------
+; File Copy
+;-----------------------------------------------------------------------
+
+[DreamV3.Miniport]
+atikmdag.sys
+
+[DreamV3.UMD]
+amdbc250umd64.dll
+
+;-----------------------------------------------------------------------
+; Registry
+;-----------------------------------------------------------------------
+
+[DreamV3_AddReg]
+; CRITICAL: D3D12 UMD driver registration
+HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Drivers32",ms1,,"amdbc250umd64.dll"
+HKR,, InstalledDisplayDrivers, %REG_MULTI_SZ%, amdbc250umd64
+HKR,, VgaCompatible,           %REG_DWORD%,    0
+HKR,, SupportIcd,              %REG_DWORD%,    0
+HKR,, D3D12UMD,                %REG_SZ%,       amdbc250umd64.dll
+HKR,, D3D12UMDFlags,           %REG_DWORD%,    0x1
+HKR,, D3D11UMD,                %REG_SZ%,       amdbc250umd64.dll
+HKR,, D3D10UMD,                %REG_SZ%,       amdbc250umd64.dll
+HKR,, DXGIAdapter,             %REG_DWORD%,    1
+HKR,, DisableDxvaOnD3D12,      %REG_DWORD%,    0
+
+; GPU Identification (for dxdiag and device manager)
+HKR,, AdapterDACType,          %REG_SZ%,       "GDDR6 Memory Controller"
+HKR,, ChipType,                %REG_SZ%,       "AMD RDNA2 Graphics Processor (GFX1013)"
+HKR,, DACType,                 %REG_SZ%,       "GDDR6"
+HKR,, HardwareInformation.ChipType,     %REG_SZ%, "AMD RDNA2 GFX1013 (Cyan Skillfish)"
+HKR,, HardwareInformation.DacType,      %REG_SZ%, "GDDR6 Memory Controller"
+HKR,, HardwareInformation.AdapterString, %REG_SZ%, "AMD Radeon BC-250 Graphics"
+HKR,, HardwareInformation.BiosString,   %REG_SZ%, "BC-250 vBIOS RDNA2 16GB GDDR6"
+HKR,, HardwareInformation.MemorySize,   %REG_QWORD%,    0x0000000400000000  ; 16GB GDDR6
+
+; D3D12 Feature support (minimal)
+HKR,, D3D12SupportedFeatureLevel, %REG_DWORD%, 0xC000 ; 12_0
+HKR,, EnableDeferredContexts,  %REG_DWORD%,    1
+
+[DreamV3_HwSettings]
+; Disable ULPS for stability
+HKR,, EnableUlps,              %REG_DWORD%,    0
+
+; Enable clock gating for power savings
+HKR,, KMD_EnableInternalMemClockGating, %REG_DWORD%, 1
+
+; Allow non-optimal refresh rates
+HKR,, DALRULE_ALLOW_NON_OPTIMAL_REFRESH_RATE, %REG_DWORD%, 1
+
+; TDR settings
+HKR,, TdrDelay,                %REG_DWORD%,    2
+HKR,, TdrDdiDelay,             %REG_DWORD%,    2
+
+; RDNA2 specific workarounds (from Linux driver knowledge)
+HKR,, DisableComputeQueue,     %REG_DWORD%,    1       ; HW quirk - broken
+HKR,, EnableHdpFlush,          %REG_DWORD%,    1       ; CRITICAL for coherency
+HKR,, EnableGoldenRegs,        %REG_DWORD%,    1       ; HW workarounds
+HKR,, EnableThermalMonitor,    %REG_DWORD%,    1       ; Safety feature
+HKR,, ThermalThrottleTemp,     %REG_DWORD%,    85      ; °C throttle point
+HKR,, ThermalShutdownTemp,     %REG_DWORD%,    105     ; °C emergency stop
+HKR,, VisibleVramLimit,        %REG_DWORD%,    10240   ; ~10GB quirk (MB)
+
+; Performance settings
+HKR,, GpuClockBoost,           %REG_DWORD%,    1       ; Enable boost to 2000MHz
+HKR,, RayTracingEnabled,       %REG_DWORD%,    1       ; Enable RT cores
+
+;-----------------------------------------------------------------------
+; Strings
+;-----------------------------------------------------------------------
+
+[Strings]
+AMD                = "Advanced Micro Devices, Inc."
+DISKNAME           = "AMD BC-250 Dream Drivers v4.3 Installation Disk"
+BC250.DeviceDesc   = "AMD Radeon BC-250 Graphics (Dream Drivers v4.3 - Debug + Power Fix)"
+REG_DWORD          = 0x00010001
+REG_MULTI_SZ       = 0x00010000
+REG_SZ             = 0x00000000
+REG_QWORD          = 0x0001000B

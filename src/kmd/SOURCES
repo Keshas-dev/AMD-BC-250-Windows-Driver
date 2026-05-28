@@ -1,0 +1,26 @@
+###########################################################################
+# SOURCES file for AMD BC-250 Dream Drivers v3.0 (Kernel-Mode Driver)
+# This file is used by WDK build system (BUILD.exe)
+###########################################################################
+
+TARGETNAME=amdbc250_dream_v3
+TARGETTYPE=DRIVER
+DRIVERTYPE=DISPLAY
+
+TARGETLIBS=$(DDK_LIB_PATH)\dxgkrnl.lib
+
+SOURCES=amdbc250_dream_v3_kmd.c \
+        amdbc250_dream_v3_hw_init.c \
+        amdbc250_dream_v3_vm.c \
+        amdbc250_dream_v3_power.c
+
+TARGETPATH=obj
+
+INCLUDES=..\inc
+
+C_DEFINES=$(C_DEFINES) \
+    -DAMDBC250_DREAM_V3
+
+MSC_WARNING_LEVEL=/W3 /WX
+
+NTTARGETFILES=

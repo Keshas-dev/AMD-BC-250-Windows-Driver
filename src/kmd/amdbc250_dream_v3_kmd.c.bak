@@ -1,0 +1,933 @@
+/*++
+
+Copyright (c) 2026 AMD BC-250 "Dream Drivers" Project — Version 3.0
+
+Module Name:
+    amdbc250_dream_v3_kmd.c
+
+Abstract:
+    Kernel-Mode Display Miniport Driver (KMD) for AMD BC-250 APU.
+    
+    ========================================
+    VERSION 3.0 — COMPLETE REWRITE
+    ========================================
+    
+    ARCHITECTURE: RDNA2 / Cyan Skillfish (GFX1013)
+    - 24 RDNA2 Compute Units (1536 shaders)
+    - 16GB GDDR6 shared memory
+    - Dedicated Ray Tracing cores
+    - DCN 2.1 display engine
+    - GFX10 command processor
+    
+    Based on Linux amdgpu driver architecture:
+    - drivers/gpu/drm/amd/amdgpu/gfx_v10_0.c
+    - drivers/gpu/drm/amd/amdgpu/nv.c (Navi family init)
+    - drivers/gpu/drm/amd/display/dc/dcn20/ (DCN 2.x)
+
+Environment:
+    Kernel mode (WDDM 2.x/3.x)
+
+--*/
+
+#include "amdbc250_dream_v3_kmd.h"
+
+static PDRIVER_OBJECT g_DriverObject = NULL;
+
+/*===========================================================================
+  DriverEntry — Main entry point
+===========================================================================*/
+
+NTSTATUS
+DriverEntry(
+    _In_ PDRIVER_OBJECT  DriverObject,
+    _In_ PUNICODE_STRING RegistryPath
+    )
+{
+    DXGKDDI_INTERFACE_FUNCTIONS DxgkDdiInterface = {0};
+    NTSTATUS Status;
+
+    UNREFERENCED_PARAMETER(RegistryPath);
+
+    g_DriverObject = DriverObject;
+
+    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+               "AMDBC250-DREAM-V3: DriverEntry v%d.%d.%d - RDNA2/Cyan Skillfish\n",
+               AMDBC250_DREAM_V3_VERSION_MAJOR,
+               AMDBC250_DREAM_V3_VERSION_MINOR,
+               AMDBC250_DREAM_V3_VERSION_PATCH));
+
+    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+               "AMDBC250-DREAM-V3: Architecture: 24 CU RDNA2, 16GB GDDR6\n"));
+
+    /* Fill WDDM DDI callback table */
+    RtlZeroMemory(&DxgkDdiInterface, sizeof(DxgkDdiInterface));
+    DxgkDdiInterface.Version = DXGKDDI_INTERFACE_VERSION_WIN10;
+
+    /* Core device lifecycle */
+    DxgkDdiInterface.DxgkDdiAddDevice         = DreamV3DdiAddDevice;
+    DxgkDdiInterface.DxgkDdiStartDevice       = DreamV3DdiStartDevice;
+    DxgkDdiInterface.DxgkDdiStopDevice        = DreamV3DdiStopDevice;
+    DxgkDdiInterface.DxgkDdiRemoveDevice      = DreamV3DdiRemoveDevice;
+    DxgkDdiInterface.DxgkDdiResetDevice       = DreamV3DdiResetDevice;
+    DxgkDdiInterface.DxgkDdiUnload            = DreamV3DdiUnload;
+
+    /* Display enumeration */
+    DxgkDdiInterface.DxgkDdiQueryChildRelations   = DreamV3DdiQueryChildRelations;
+    DxgkDdiInterface.DxgkDdiQueryChildStatus      = DreamV3DdiQueryChildStatus;
+    DxgkDdiInterface.DxgkDdiQueryDeviceDescriptor = DreamV3DdiQueryDeviceDescriptor;
+
+    /* Power management */
+    DxgkDdiInterface.DxgkDdiSetPowerState     = DreamV3DdiSetPowerState;
+    DxgkDdiInterface.DxgkDdiNotifyAcpiEvent   = DreamV3DdiNotifyAcpiEvent;
+
+    /* Interrupt handling */
+    DxgkDdiInterface.DxgkDdiInterruptRoutine  = DreamV3DdiInterruptRoutine;
+    DxgkDdiInterface.DxgkDdiDpcRoutine        = DreamV3DdiDpcRoutine;
+
+    /* Adapter queries */
+    DxgkDdiInterface.DxgkDdiQueryAdapterInfo  = DreamV3DdiQueryAdapterInfo;
+    DxgkDdiInterface.DxgkDdiQueryInterface    = DreamV3DdiQueryInterface;
+
+    /* Device context */
+    DxgkDdiInterface.DxgkDdiCreateDevice      = DreamV3DdiCreateDevice;
+    DxgkDdiInterface.DxgkDdiDestroyDevice     = DreamV3DdiDestroyDevice;
+
+    /* Memory management */
+    DxgkDdiInterface.DxgkDdiCreateAllocation  = DreamV3DdiCreateAllocation;
+    DxgkDdiInterface.DxgkDdiDestroyAllocation = DreamV3DdiDestroyAllocation;
+    DxgkDdiInterface.DxgkDdiBuildPagingBuffer = DreamV3DdiBuildPagingBuffer;
+
+    /* Command submission */
+    DxgkDdiInterface.DxgkDdiSubmitCommand     = DreamV3DdiSubmitCommand;
+    DxgkDdiInterface.DxgkDdiPreemptCommand    = DreamV3DdiPreemptCommand;
+    DxgkDdiInterface.DxgkDdiQueryCurrentFence = DreamV3DdiQueryCurrentFence;
+
+    /* Rendering and present */
+    DxgkDdiInterface.DxgkDdiPresent           = DreamV3DdiPresent;
+    DxgkDdiInterface.DxgkDdiRender            = DreamV3DdiRender;
+
+    /* Display/VidPN */
+    DxgkDdiInterface.DxgkDdiRecommendFunctionalVidPn   = DreamV3DdiRecommendFunctionalVidPn;
+    DxgkDdiInterface.DxgkDdiEnumVidPnCofuncModality    = DreamV3DdiEnumVidPnCofuncModality;
+    DxgkDdiInterface.DxgkDdiCommitVidPn                = DreamV3DdiCommitVidPn;
+    DxgkDdiInterface.DxgkDdiSetVidPnSourceAddress      = DreamV3DdiSetVidPnSourceAddress;
+    DxgkDdiInterface.DxgkDdiSetVidPnSourceVisibility   = DreamV3DdiSetVidPnSourceVisibility;
+    DxgkDdiInterface.DxgkDdiUpdateActiveVidPnPresentPath = DreamV3DdiUpdateActiveVidPnPresentPath;
+    DxgkDdiInterface.DxgkDdiRecommendMonitorModes      = DreamV3DdiRecommendMonitorModes;
+    DxgkDdiInterface.DxgkDdiGetScanLine                = DreamV3DdiGetScanLine;
+    DxgkDdiInterface.DxgkDdiControlInterrupt           = DreamV3DdiControlInterrupt;
+
+    /* Register with DirectX Graphics Kernel */
+    Status = DxgkInitialize(DriverObject, RegistryPath, &DxgkDdiInterface);
+
+    if (NT_SUCCESS(Status)) {
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                   "AMDBC250-DREAM-V3: DriverEntry successful\n"));
+    } else {
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
+                   "AMDBC250-DREAM-V3: DxgkInitialize failed: 0x%08X\n", Status));
+    }
+
+    return Status;
+}
+
+/*===========================================================================
+  DxgkDdiAddDevice — PnP manager found matching PCI device
+===========================================================================*/
+
+NTSTATUS
+APIENTRY
+DreamV3DdiAddDevice(
+    _In_  CONST PDEVICE_OBJECT  PhysicalDeviceObject,
+    _Out_ PVOID                 *MiniportDeviceContext
+    )
+{
+    PDREAM_V3_DEVICE_EXTENSION DevExt;
+
+    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_TRACE_LEVEL,
+               "AMDBC250-DREAM-V3: DxgkDdiAddDevice called\n"));
+
+    /* Allocate device extension */
+    DevExt = (PDREAM_V3_DEVICE_EXTENSION)ExAllocatePoolWithTag(
+        NonPagedPoolNx,
+        sizeof(DREAM_V3_DEVICE_EXTENSION),
+        DREAM_V3_TAG_DEVICE
+        );
+
+    if (DevExt == NULL) {
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
+                   "AMDBC250-DREAM-V3: Failed to allocate device extension\n"));
+        return STATUS_NO_MEMORY;
+    }
+
+    RtlZeroMemory(DevExt, sizeof(DREAM_V3_DEVICE_EXTENSION));
+
+    /* Initialize synchronization primitives */
+    ExInitializeFastMutex(&DevExt->DeviceMutex);
+    KeInitializeSpinLock(&DevExt->FenceLock);
+    KeInitializeSpinLock(&DevExt->AllocationListLock);
+    InitializeListHead(&DevExt->AllocationList);
+    KeInitializeEvent(&DevExt->DeviceRemoved, NotificationEvent, FALSE);
+
+    DevExt->PhysicalDeviceObject = PhysicalDeviceObject;
+
+    /* Initialize hardware quirks from Linux driver knowledge */
+    DevExt->VisibleVramBytes = 10ULL * 1024 * 1024 * 1024; /* ~10GB quirk */
+    DevExt->NumDisplayPipes = 4;  /* DCN 2.1: 4 pipes */
+    DevExt->CurrentTemperatureC = 0;
+
+    *MiniportDeviceContext = DevExt;
+
+    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+               "AMDBC250-DREAM-V3: Device extension allocated at %p\n", DevExt));
+
+    return STATUS_SUCCESS;
+}
+
+/*===========================================================================
+  DxgkDdiStartDevice — Start the device
+===========================================================================*/
+
+NTSTATUS
+APIENTRY
+DreamV3DdiStartDevice(
+    _In_  PVOID                     MiniportDeviceContext,
+    _In_  PDXGK_START_INFO          DxgkStartInfo,
+    _In_  PDXGKRNL_INTERFACE        DxgkInterface,
+    _Out_ PULONG                    NumberOfVideoPresentSources,
+    _Out_ PULONG                    NumberOfChildren
+    )
+{
+    PDREAM_V3_DEVICE_EXTENSION DevExt = (PDREAM_V3_DEVICE_EXTENSION)MiniportDeviceContext;
+    NTSTATUS Status;
+
+    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+               "AMDBC250-DREAM-V3: DxgkDdiStartDevice called\n"));
+
+    if (DevExt == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    /* Save DXGKRNL interface */
+    DevExt->DxgkInterface = *DxgkInterface;
+    DevExt->DeviceHandle = DxgkStartInfo->DeviceHandle;
+
+    /* Get device information */
+    DXGK_DEVICE_INFO DeviceInfo = {0};
+    Status = DxgkInterface->DxgkCbGetDeviceInformation(
+        DevExt->DeviceHandle,
+        &DeviceInfo
+        );
+
+    if (!NT_SUCCESS(Status)) {
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
+                   "AMDBC250-DREAM-V3: DxgkCbGetDeviceInformation failed: 0x%08X\n", Status));
+        return Status;
+    }
+
+    /* Store PCI identifiers */
+    DevExt->VendorId = DeviceInfo.VendorId;
+    DevExt->DeviceId = DeviceInfo.DeviceId;
+    DevExt->RevisionId = DeviceInfo.Revision;
+
+    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+               "AMDBC250-DREAM-V3: PCI %04X:%04X (Rev %02X) — Cyan Skillfish\n",
+               DevExt->VendorId, DevExt->DeviceId, DevExt->RevisionId));
+
+    /* Verify this is our GPU */
+    if (DeviceInfo.VendorId != AMD_VENDOR_ID) {
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
+                   "AMDBC250-DREAM-V3: Invalid vendor: %04X\n", DeviceInfo.VendorId));
+        return STATUS_DEVICE_CONFIGURATION_ERROR;
+    }
+
+    if (DeviceInfo.DeviceId != AMDBC250_DEVICE_ID_PRIMARY) {
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
+                   "AMDBC250-DREAM-V3: Unexpected device ID: %04X\n", DeviceInfo.DeviceId));
+        /* Continue anyway — might be a variant */
+    }
+
+    /* Map MMIO BAR */
+    if (DeviceInfo.TranslatedResourceList->List[0]
+        .PartialResourceList.PartialDescriptors[0].Type == CmMemory) {
+        
+        DevExt->MmioPhysicalBase = DeviceInfo.TranslatedResourceList->List[0]
+            .PartialResourceList.PartialDescriptors[0].u.Memory.Start;
+        DevExt->MmioSize = DeviceInfo.TranslatedResourceList->List[0]
+            .PartialResourceList.PartialDescriptors[0].u.Memory.Length;
+
+        DevExt->MmioVirtualBase = MmMapIoSpace(
+            DevExt->MmioPhysicalBase,
+            DevExt->MmioSize,
+            MmNonCached
+            );
+
+        if (DevExt->MmioVirtualBase == NULL) {
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
+                       "AMDBC250-DREAM-V3: Failed to map MMIO\n"));
+            return STATUS_INSUFFICIENT_RESOURCES;
+        }
+
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                   "AMDBC250-DREAM-V3: MMIO mapped: PA=0x%llX, Size=0x%llX\n",
+                   DevExt->MmioPhysicalBase.QuadPart, DevExt->MmioSize));
+    }
+
+    /* Map framebuffer if available */
+    if (DeviceInfo.TranslatedResourceList->List[0]
+        .PartialResourceList.PartialDescriptors[1].Type == CmMemory) {
+        
+        DevExt->FbPhysicalBase = DeviceInfo.TranslatedResourceList->List[0]
+            .PartialResourceList.PartialDescriptors[1].u.Memory.Start;
+        DevExt->FbSize = DeviceInfo.TranslatedResourceList->List[0]
+            .PartialResourceList.PartialDescriptors[1].u.Memory.Length;
+
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                   "AMDBC250-DREAM-V3: Framebuffer: PA=0x%llX, Size=0x%llX (%llu MB)\n",
+                   DevExt->FbPhysicalBase.QuadPart,
+                   DevExt->FbSize,
+                   DevExt->FbSize / (1024 * 1024)));
+    }
+
+    /* CRITICAL: Initialize hardware */
+    Status = DreamV3HwInitialize(DevExt);
+    if (!NT_SUCCESS(Status)) {
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
+                   "AMDBC250-DREAM-V3: Hardware init failed: 0x%08X\n", Status));
+        
+        if (DevExt->MmioVirtualBase != NULL) {
+            MmUnmapIoSpace(DevExt->MmioVirtualBase, DevExt->MmioSize);
+            DevExt->MmioVirtualBase = NULL;
+        }
+        return Status;
+    }
+
+    /* Report display topology */
+    *NumberOfVideoPresentSources = DevExt->NumDisplayPipes;
+    *NumberOfChildren = DevExt->NumDisplayPipes;
+
+    DevExt->HardwareInitialized = TRUE;
+    DevExt->DeviceStarted = TRUE;
+
+    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+               "AMDBC250-DREAM-V3: StartDevice SUCCESS\n"));
+    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+               "AMDBC250-DREAM-V3:   24 CU RDNA2, 1536 SP\n"));
+    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+               "AMDBC250-DREAM-V3:   VRAM: %llu MB GDDR6\n",
+               DevExt->TotalVramBytes / (1024 * 1024)));
+    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+               "AMDBC250-DREAM-V3:   Ray Tracing: Enabled (early gen)\n"));
+
+    return STATUS_SUCCESS;
+}
+
+/*===========================================================================
+  DxgkDdiStopDevice — Stop device
+===========================================================================*/
+
+NTSTATUS
+APIENTRY
+DreamV3DdiStopDevice(
+    _In_ PVOID MiniportDeviceContext
+    )
+{
+    PDREAM_V3_DEVICE_EXTENSION DevExt = (PDREAM_V3_DEVICE_EXTENSION)MiniportDeviceContext;
+
+    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+               "AMDBC250-DREAM-V3: DxgkDdiStopDevice called\n"));
+
+    if (DevExt == NULL) return STATUS_INVALID_PARAMETER;
+
+    if (DevExt->HardwareInitialized) {
+        DreamV3HwShutdown(DevExt);
+        DevExt->HardwareInitialized = FALSE;
+    }
+
+    if (DevExt->MmioVirtualBase != NULL) {
+        MmUnmapIoSpace(DevExt->MmioVirtualBase, DevExt->MmioSize);
+        DevExt->MmioVirtualBase = NULL;
+    }
+
+    if (DevExt->FbVirtualBase != NULL) {
+        MmUnmapIoSpace(DevExt->FbVirtualBase, DevExt->FbSize);
+        DevExt->FbVirtualBase = NULL;
+    }
+
+    if (DevExt->DoorbellVirtualBase != NULL) {
+        MmUnmapIoSpace(DevExt->DoorbellVirtualBase, DevExt->DoorbellSize);
+        DevExt->DoorbellVirtualBase = NULL;
+    }
+
+    DevExt->DeviceStarted = FALSE;
+
+    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+               "AMDBC250-DREAM-V3: StopDevice complete\n"));
+
+    return STATUS_SUCCESS;
+}
+
+/*===========================================================================
+  DxgkDdiRemoveDevice — Final cleanup
+===========================================================================*/
+
+NTSTATUS
+APIENTRY
+DreamV3DdiRemoveDevice(
+    _In_ PVOID MiniportDeviceContext
+    )
+{
+    PDREAM_V3_DEVICE_EXTENSION DevExt = (PDREAM_V3_DEVICE_EXTENSION)MiniportDeviceContext;
+
+    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+               "AMDBC250-DREAM-V3: DxgkDdiRemoveDevice called\n"));
+
+    if (DevExt != NULL) {
+        KeSetEvent(&DevExt->DeviceRemoved, 0, FALSE);
+        ExFreePoolWithTag(DevExt, DREAM_V3_TAG_DEVICE);
+    }
+
+    return STATUS_SUCCESS;
+}
+
+/*===========================================================================
+  DxgkDdiResetDevice — TDR recovery
+===========================================================================*/
+
+VOID
+APIENTRY
+DreamV3DdiResetDevice(
+    _In_ PVOID MiniportDeviceContext
+    )
+{
+    PDREAM_V3_DEVICE_EXTENSION DevExt = (PDREAM_V3_DEVICE_EXTENSION)MiniportDeviceContext;
+
+    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+               "AMDBC250-DREAM-V3: TDR reset initiated\n"));
+
+    if (DevExt == NULL) return;
+
+    DevExt->GpuResetInProgress = TRUE;
+    DevExt->ResetCount++;
+
+    if (DevExt->HardwareInitialized) {
+        NTSTATUS Status = DreamV3HwReset(DevExt);
+        if (!NT_SUCCESS(Status)) {
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
+                       "AMDBC250-DREAM-V3: GPU reset FAILED: 0x%08X\n", Status));
+        } else {
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                       "AMDBC250-DREAM-V3: GPU reset SUCCESS\n"));
+        }
+    }
+
+    DevExt->GpuResetInProgress = FALSE;
+}
+
+/*===========================================================================
+  DxgkDdiUnload
+===========================================================================*/
+
+VOID
+APIENTRY
+DreamV3DdiUnload(VOID)
+{
+    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+               "AMDBC250-DREAM-V3: Driver unload\n"));
+}
+
+/*===========================================================================
+  Interrupt Routine (ISR) — Runs at DIRQL
+===========================================================================*/
+
+BOOLEAN
+APIENTRY
+DreamV3DdiInterruptRoutine(
+    _In_ PVOID  MiniportDeviceContext,
+    _In_ ULONG  MessageNumber
+    )
+{
+    PDREAM_V3_DEVICE_EXTENSION DevExt = (PDREAM_V3_DEVICE_EXTENSION)MiniportDeviceContext;
+    ULONG IhWptr;
+    BOOLEAN OurInterrupt = FALSE;
+
+    UNREFERENCED_PARAMETER(MessageNumber);
+
+    if (DevExt == NULL || !DevExt->IhRing.Initialized) {
+        return FALSE;
+    }
+
+    /* CRITICAL: Flush HDP before reading ring pointers (Linux quirk) */
+    DreamV3HdpFlush(DevExt);
+
+    /* Read IH ring write pointer */
+    IhWptr = DreamV3ReadRegister(DevExt, AMDBC250_REG_IH_RB_WPTR) & 0x0001FFFF;
+
+    if (IhWptr != DevExt->IhRing.ReadPointer) {
+        DevExt->LastInterruptStatus = IhWptr;
+        DevExt->InterruptCount++;
+        OurInterrupt = TRUE;
+
+        /* Queue DPC */
+        DevExt->DxgkInterface.DxgkCbQueueDpc(DevExt->DeviceHandle);
+    }
+
+    return OurInterrupt;
+}
+
+/*===========================================================================
+  DPC Routine — Deferred interrupt processing
+===========================================================================*/
+
+VOID
+APIENTRY
+DreamV3DdiDpcRoutine(
+    _In_ PVOID MiniportDeviceContext
+    )
+{
+    PDREAM_V3_DEVICE_EXTENSION DevExt = (PDREAM_V3_DEVICE_EXTENSION)MiniportDeviceContext;
+    PULONG64 IhBase;
+    ULONG WPtr, RPtr;
+    ULONG64 Entry[4];
+    ULONG ClientId, SrcId;
+
+    if (DevExt == NULL || !DevExt->HardwareInitialized ||
+        DevExt->IhRing.VirtualAddress == NULL) {
+        return;
+    }
+
+    IhBase = (PULONG64)DevExt->IhRing.VirtualAddress;
+    WPtr = DevExt->LastInterruptStatus;
+    RPtr = DevExt->IhRing.ReadPointer;
+
+    /* Process IH entries */
+    while (RPtr != WPtr) {
+        ULONG EntryOffset = (RPtr / IH_ENTRY_SIZE_BYTES) * 4;
+
+        Entry[0] = IhBase[EntryOffset + 0];
+        Entry[1] = IhBase[EntryOffset + 1];
+        Entry[2] = IhBase[EntryOffset + 2];
+        Entry[3] = IhBase[EntryOffset + 3];
+
+        ClientId = (ULONG)((Entry[0] >> 8) & 0xFF);
+        SrcId    = (ULONG)(Entry[0] & 0xFF);
+
+        switch (ClientId) {
+        case IH_CLIENTID_GFX:
+            if (SrcId == 0xE0) {
+                /* EOP — fence completion */
+                DXGKARGCB_NOTIFY_INTERRUPT_DATA NotifyData = {0};
+                NotifyData.InterruptType = DXGK_INTERRUPT_DMA_COMPLETED;
+                NotifyData.DmaCompleted.SubmissionFenceId = (ULONG)Entry[2];
+                DevExt->DxgkInterface.DxgkCbNotifyInterrupt(
+                    DevExt->DeviceHandle, &NotifyData);
+            }
+            break;
+
+        case IH_CLIENTID_DCE:
+            /* VSYNC */
+            {
+                DXGKARGCB_NOTIFY_INTERRUPT_DATA NotifyData = {0};
+                NotifyData.InterruptType = DXGK_INTERRUPT_CRTC_VSYNC;
+                NotifyData.CrtcVsync.VidPnTargetId = 0;
+                DevExt->DxgkInterface.DxgkCbNotifyInterrupt(
+                    DevExt->DeviceHandle, &NotifyData);
+            }
+            break;
+
+        case IH_CLIENTID_VMC:
+            /* VM fault */
+            DevExt->ErrorCount++;
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+                       "AMDBC250-DREAM-V3: VM fault in DPC\n"));
+            break;
+        }
+
+        RPtr += IH_ENTRY_SIZE_BYTES;
+        if (RPtr >= DevExt->IhRing.SizeInBytes) {
+            RPtr = 0;
+        }
+    }
+
+    /* Update read pointer */
+    DevExt->IhRing.ReadPointer = RPtr;
+    DreamV3WriteRegister(DevExt, AMDBC250_REG_IH_RB_RPTR, RPtr);
+
+    DevExt->DxgkInterface.DxgkCbNotifyDpc(DevExt->DeviceHandle);
+}
+
+/*===========================================================================
+  QueryAdapterInfo — Report GPU capabilities
+===========================================================================*/
+
+NTSTATUS
+APIENTRY
+DreamV3DdiQueryAdapterInfo(
+    _In_ CONST HANDLE                   hAdapter,
+    _In_ CONST DXGKARG_QUERYADAPTERINFO *pQueryAdapterInfo
+    )
+{
+    PDREAM_V3_DEVICE_EXTENSION DevExt = (PDREAM_V3_DEVICE_EXTENSION)hAdapter;
+
+    if (DevExt == NULL || pQueryAdapterInfo == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    switch (pQueryAdapterInfo->Type) {
+
+    case DXGKQAITYPE_DRIVERCAPS: {
+        DXGK_DRIVERCAPS *pCaps = (DXGK_DRIVERCAPS *)pQueryAdapterInfo->pOutputData;
+        RtlZeroMemory(pCaps, sizeof(DXGK_DRIVERCAPS));
+
+        pCaps->WDDMVersion = D3DDDI_WDDMv2;
+        pCaps->MaxOverlayOnlySourceModeCount = 1;
+        pCaps->SupportedPresentFlipSequenceCount = 1;
+        pCaps->SupportedPresentInterval = 1;
+        pCaps->SchedulingCaps.MultiEngineAware = TRUE;
+        pCaps->SchedulingCaps.OutstandingPresentLimit = 3;
+        pCaps->MemoryManagementCaps.PagingNode = 0;
+        pCaps->MemoryManagementCaps.ResidentFenceSupported = TRUE;
+        pCaps->GpuEngineTopology.NbAsyncEngineCount = 2; /* GFX + SDMA */
+
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_TRACE_LEVEL,
+                   "AMDBC250-DREAM-V3: DRIVERCAPS reported\n"));
+        return STATUS_SUCCESS;
+    }
+
+    case DXGKQAITYPE_QUERYSEGMENT: {
+        DXGK_QUERYSEGMENTOUT *pSegOut = (DXGK_QUERYSEGMENTOUT *)pQueryAdapterInfo->pOutputData;
+
+        if (pQueryAdapterInfo->pInputData == NULL) {
+            pSegOut->NbSegment = 2;
+            return STATUS_SUCCESS;
+        }
+
+        pSegOut->NbSegment = 2;
+
+        /* Segment 0: GDDR6 VRAM */
+        pSegOut->pSegmentDescriptor[0].BaseAddress.QuadPart = 0;
+        pSegOut->pSegmentDescriptor[0].Size = DevExt->TotalVramBytes;
+        pSegOut->pSegmentDescriptor[0].CommitLimit = DevExt->TotalVramBytes;
+        pSegOut->pSegmentDescriptor[0].Flags.CpuVisible = TRUE;
+        pSegOut->pSegmentDescriptor[0].Flags.Aperture = TRUE;
+        pSegOut->pSegmentDescriptor[0].Flags.CacheCoherent = FALSE;
+
+        /* Segment 1: System memory */
+        pSegOut->pSegmentDescriptor[1].BaseAddress.QuadPart = 0;
+        pSegOut->pSegmentDescriptor[1].Size = 0x400000000ULL;  /* 16 GB */
+        pSegOut->pSegmentDescriptor[1].CommitLimit = 0x400000000ULL;
+        pSegOut->pSegmentDescriptor[1].Flags.Aperture = TRUE;
+        pSegOut->pSegmentDescriptor[1].Flags.CpuVisible = TRUE;
+        pSegOut->pSegmentDescriptor[1].Flags.CacheCoherent = TRUE;
+
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_TRACE_LEVEL,
+                   "AMDBC250-DREAM-V3: QUERYSEGMENT reported\n"));
+        return STATUS_SUCCESS;
+    }
+
+    case DXGKQAITYPE_CURRENTDISPLAYMODE: {
+        DXGK_DISPLAYMODE *pMode = (DXGK_DISPLAYMODE *)pQueryAdapterInfo->pOutputData;
+        
+        if (DevExt->CurrentMode.Width != 0) {
+            pMode->Width = DevExt->CurrentMode.Width;
+            pMode->Height = DevExt->CurrentMode.Height;
+            pMode->RefreshRate.Numerator = DevExt->CurrentMode.RefreshRate * 1000;
+            pMode->RefreshRate.Denominator = 1000;
+            pMode->Format = DevExt->CurrentMode.Format;
+            pMode->AcquisitionMode = D3DDDIDISPLAYMODE_SCANLINEORDERED;
+            pMode->Stereo = FALSE;
+        } else {
+            pMode->Width = 1920;
+            pMode->Height = 1080;
+            pMode->RefreshRate.Numerator = 60000;
+            pMode->RefreshRate.Denominator = 1000;
+            pMode->Format = D3DDDIFMT_A8R8G8B8;
+            pMode->AcquisitionMode = D3DDDIDISPLAYMODE_SCANLINEORDERED;
+            pMode->Stereo = FALSE;
+        }
+        return STATUS_SUCCESS;
+    }
+
+    default:
+        return STATUS_NOT_SUPPORTED;
+    }
+}
+
+/*===========================================================================
+  CreateDevice — Per-process GPU context
+===========================================================================*/
+
+NTSTATUS
+APIENTRY
+DreamV3DdiCreateDevice(
+    _In_    CONST HANDLE             hAdapter,
+    _Inout_ DXGKARG_CREATEDEVICE     *pCreateDevice
+    )
+{
+    PDREAM_V3_DEVICE_EXTENSION DevExt = (PDREAM_V3_DEVICE_EXTENSION)hAdapter;
+    PDREAM_V3_GPU_CONTEXT Context;
+
+    if (DevExt == NULL || pCreateDevice == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    Context = (PDREAM_V3_GPU_CONTEXT)ExAllocatePoolWithTag(
+        NonPagedPoolNx,
+        sizeof(DREAM_V3_GPU_CONTEXT),
+        DREAM_V3_TAG_CONTEXT
+        );
+
+    if (Context == NULL) return STATUS_NO_MEMORY;
+
+    RtlZeroMemory(Context, sizeof(DREAM_V3_GPU_CONTEXT));
+    Context->ContextId = DevExt->NumContexts++;
+    Context->VmId = AMDBC250_VMID_MIN_USER + Context->ContextId;
+    Context->IsValid = TRUE;
+    KeInitializeSpinLock(&Context->ContextLock);
+    InitializeListHead(&Context->AllocationList);
+
+    pCreateDevice->hDevice = (HANDLE)Context;
+
+    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_TRACE_LEVEL,
+               "AMDBC250-DREAM-V3: CreateDevice — Context %d, VMID %d\n",
+               Context->ContextId, Context->VmId));
+
+    return STATUS_SUCCESS;
+}
+
+/*===========================================================================
+  DestroyDevice
+===========================================================================*/
+
+NTSTATUS
+APIENTRY
+DreamV3DdiDestroyDevice(_In_ CONST HANDLE hDevice)
+{
+    PDREAM_V3_GPU_CONTEXT Context = (PDREAM_V3_GPU_CONTEXT)hDevice;
+    if (Context != NULL) {
+        Context->IsValid = FALSE;
+        ExFreePoolWithTag(Context, DREAM_V3_TAG_CONTEXT);
+    }
+    return STATUS_SUCCESS;
+}
+
+/*===========================================================================
+  CreateAllocation
+===========================================================================*/
+
+NTSTATUS
+APIENTRY
+DreamV3DdiCreateAllocation(
+    _In_    CONST HANDLE                    hAdapter,
+    _Inout_ DXGKARG_CREATEALLOCATION        *pCreateAllocation
+    )
+{
+    PDREAM_V3_DEVICE_EXTENSION DevExt = (PDREAM_V3_DEVICE_EXTENSION)hAdapter;
+    ULONG i;
+
+    if (DevExt == NULL || pCreateAllocation == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    for (i = 0; i < pCreateAllocation->NumAllocations; i++) {
+        DXGK_ALLOCATIONINFO *pAllocInfo = &pCreateAllocation->pAllocationInfo[i];
+        PDREAM_V3_ALLOCATION Alloc;
+
+        Alloc = (PDREAM_V3_ALLOCATION)ExAllocatePoolWithTag(
+            NonPagedPoolNx,
+            sizeof(DREAM_V3_ALLOCATION),
+            DREAM_V3_TAG_ALLOCATION
+            );
+
+        if (Alloc == NULL) return STATUS_NO_MEMORY;
+
+        RtlZeroMemory(Alloc, sizeof(DREAM_V3_ALLOCATION));
+        Alloc->SizeInBytes = pAllocInfo->Size;
+        Alloc->Alignment = max(4096, pAllocInfo->Alignment);
+        Alloc->SegmentId = 0;
+
+        pAllocInfo->hAllocation = (HANDLE)Alloc;
+        pAllocInfo->Alignment = Alloc->Alignment;
+        pAllocInfo->SupportedReadSegmentSet = 1;
+        pAllocInfo->SupportedWriteSegmentSet = 1;
+        pAllocInfo->EvictionSegmentSet = 2;
+
+        ExAcquireFastMutex(&DevExt->DeviceMutex);
+        InsertTailList(&DevExt->AllocationList, &Alloc->ListEntry);
+        ExReleaseFastMutex(&DevExt->DeviceMutex);
+    }
+
+    return STATUS_SUCCESS;
+}
+
+/*===========================================================================
+  DestroyAllocation
+===========================================================================*/
+
+NTSTATUS
+APIENTRY
+DreamV3DdiDestroyAllocation(
+    _In_ CONST HANDLE                   hAdapter,
+    _In_ CONST DXGKARG_DESTROYALLOCATION *pDestroyAllocation
+    )
+{
+    PDREAM_V3_DEVICE_EXTENSION DevExt = (PDREAM_V3_DEVICE_EXTENSION)hAdapter;
+    ULONG i;
+
+    if (DevExt == NULL || pDestroyAllocation == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    ExAcquireFastMutex(&DevExt->DeviceMutex);
+    for (i = 0; i < pDestroyAllocation->NumAllocations; i++) {
+        PDREAM_V3_ALLOCATION Alloc =
+            (PDREAM_V3_ALLOCATION)pDestroyAllocation->pAllocationList[i];
+        if (Alloc != NULL) {
+            RemoveEntryList(&Alloc->ListEntry);
+            ExFreePoolWithTag(Alloc, DREAM_V3_TAG_ALLOCATION);
+        }
+    }
+    ExReleaseFastMutex(&DevExt->DeviceMutex);
+
+    return STATUS_SUCCESS;
+}
+
+/*===========================================================================
+  SubmitCommand
+===========================================================================*/
+
+NTSTATUS
+APIENTRY
+DreamV3DdiSubmitCommand(
+    _In_ CONST HANDLE               hAdapter,
+    _In_ CONST DXGKARG_SUBMITCOMMAND *pSubmitCommand
+    )
+{
+    PDREAM_V3_DEVICE_EXTENSION DevExt = (PDREAM_V3_DEVICE_EXTENSION)hAdapter;
+
+    if (DevExt == NULL || pSubmitCommand == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    if (!DevExt->HardwareInitialized) {
+        return STATUS_DEVICE_NOT_READY;
+    }
+
+    /* CRITICAL: Check thermal throttle before submitting */
+    DreamV3CheckThermalThrottle(DevExt);
+
+    /* Update fence (64-bit for GFX10) */
+    ULONG64 CurrentFence = InterlockedIncrement64(
+        (volatile LONG64*)&DevExt->GlobalFence.LastSubmittedValue);
+
+    DevExt->SubmitCount++;
+
+    return STATUS_SUCCESS;
+}
+
+/*===========================================================================
+  QueryCurrentFence
+===========================================================================*/
+
+NTSTATUS
+APIENTRY
+DreamV3DdiQueryCurrentFence(
+    _In_    CONST HANDLE                hAdapter,
+    _Inout_ DXGKARG_QUERYCURRENTFENCE   *pCurrentFence
+    )
+{
+    PDREAM_V3_DEVICE_EXTENSION DevExt = (PDREAM_V3_DEVICE_EXTENSION)hAdapter;
+
+    if (DevExt == NULL || pCurrentFence == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    pCurrentFence->FenceValue = DevExt->GlobalFence.LastSignaledValue;
+    pCurrentFence->MonitorFenceValue = DevExt->GlobalFence.LastSignaledValue;
+
+    return STATUS_SUCCESS;
+}
+
+/*===========================================================================
+  Present
+===========================================================================*/
+
+NTSTATUS
+APIENTRY
+DreamV3DdiPresent(
+    _In_    CONST HANDLE        hContext,
+    _Inout_ DXGKARG_PRESENT     *pPresent
+    )
+{
+    UNREFERENCED_PARAMETER(hContext);
+    UNREFERENCED_PARAMETER(pPresent);
+    return STATUS_SUCCESS;
+}
+
+/*===========================================================================
+  Render
+===========================================================================*/
+
+NTSTATUS
+APIENTRY
+DreamV3DdiRender(
+    _In_    CONST HANDLE    hContext,
+    _Inout_ DXGKARG_RENDER  *pRender
+    )
+{
+    UNREFERENCED_PARAMETER(hContext);
+    UNREFERENCED_PARAMETER(pRender);
+    return STATUS_NOT_IMPLEMENTED;
+}
+
+/*===========================================================================
+  BuildPagingBuffer
+===========================================================================*/
+
+NTSTATUS
+APIENTRY
+DreamV3DdiBuildPagingBuffer(
+    _In_    CONST HANDLE                hAdapter,
+    _Inout_ DXGKARG_BUILDPAGINGBUFFER   *pBuildPagingBuffer
+    )
+{
+    UNREFERENCED_PARAMETER(hAdapter);
+    UNREFERENCED_PARAMETER(pBuildPagingBuffer);
+    return STATUS_NOT_IMPLEMENTED;
+}
+
+/*===========================================================================
+  PreemptCommand
+===========================================================================*/
+
+NTSTATUS
+APIENTRY
+DreamV3DdiPreemptCommand(
+    _In_ CONST HANDLE               hAdapter,
+    _In_ CONST DXGKARG_PREEMPTCOMMAND *pPreemptCommand
+    )
+{
+    UNREFERENCED_PARAMETER(hAdapter);
+    UNREFERENCED_PARAMETER(pPreemptCommand);
+    return STATUS_NOT_IMPLEMENTED;
+}
+
+/*===========================================================================
+  VidPN and Display Stubs
+===========================================================================*/
+
+NTSTATUS APIENTRY DreamV3DdiRecommendFunctionalVidPn(_In_ CONST HANDLE hAdapter, _In_ CONST DXGKARG_RECOMMENDFUNCTIONALVIDPN *p) { UNREFERENCED_PARAMETER(hAdapter); UNREFERENCED_PARAMETER(p); return STATUS_NOT_IMPLEMENTED; }
+NTSTATUS APIENTRY DreamV3DdiEnumVidPnCofuncModality(_In_ CONST HANDLE hAdapter, _In_ CONST DXGKARG_ENUMVIDPNCOFUNCMODALITY *p) { UNREFERENCED_PARAMETER(hAdapter); UNREFERENCED_PARAMETER(p); return STATUS_NOT_IMPLEMENTED; }
+NTSTATUS APIENTRY DreamV3DdiCommitVidPn(_In_ CONST HANDLE hAdapter, _In_ CONST DXGKARG_COMMITVIDPN *p) { UNREFERENCED_PARAMETER(hAdapter); UNREFERENCED_PARAMETER(p); return STATUS_NOT_IMPLEMENTED; }
+NTSTATUS APIENTRY DreamV3DdiSetVidPnSourceAddress(_In_ CONST HANDLE hAdapter, _In_ CONST DXGKARG_SETVIDPNSOURCEADDRESS *p) { UNREFERENCED_PARAMETER(hAdapter); UNREFERENCED_PARAMETER(p); return STATUS_NOT_IMPLEMENTED; }
+NTSTATUS APIENTRY DreamV3DdiSetVidPnSourceVisibility(_In_ CONST HANDLE hAdapter, _In_ CONST DXGKARG_SETVIDPNSOURCEVISIBILITY *p) { UNREFERENCED_PARAMETER(hAdapter); UNREFERENCED_PARAMETER(p); return STATUS_NOT_IMPLEMENTED; }
+NTSTATUS APIENTRY DreamV3DdiUpdateActiveVidPnPresentPath(_In_ CONST HANDLE hAdapter, _In_ CONST DXGKARG_UPDATEACTIVEVIDPNPRESENTPATH *p) { UNREFERENCED_PARAMETER(hAdapter); UNREFERENCED_PARAMETER(p); return STATUS_NOT_IMPLEMENTED; }
+NTSTATUS APIENTRY DreamV3DdiRecommendMonitorModes(_In_ CONST HANDLE hAdapter, _In_ CONST DXGKARG_RECOMMENDMONITORMODES *p) { UNREFERENCED_PARAMETER(hAdapter); UNREFERENCED_PARAMETER(p); return STATUS_NOT_IMPLEMENTED; }
+NTSTATUS APIENTRY DreamV3DdiGetScanLine(_In_ CONST HANDLE hAdapter, _Inout_ DXGKARG_GETSCANLINE *p) { UNREFERENCED_PARAMETER(hAdapter); UNREFERENCED_PARAMETER(p); return STATUS_NOT_IMPLEMENTED; }
+NTSTATUS APIENTRY DreamV3DdiControlInterrupt(_In_ CONST HANDLE hAdapter, _In_ CONST DXGK_INTERRUPT_TYPE t, _In_ BOOLEAN e) { UNREFERENCED_PARAMETER(hAdapter); UNREFERENCED_PARAMETER(t); UNREFERENCED_PARAMETER(e); return STATUS_NOT_IMPLEMENTED; }
+NTSTATUS APIENTRY DreamV3DdiQueryChildRelations(_In_ PVOID c, _Inout_ PDXGK_CHILD_DESCRIPTOR r, _In_ ULONG s) { UNREFERENCED_PARAMETER(c); UNREFERENCED_PARAMETER(r); UNREFERENCED_PARAMETER(s); return STATUS_NOT_IMPLEMENTED; }
+NTSTATUS APIENTRY DreamV3DdiQueryChildStatus(_In_ PVOID c, _Inout_ PDXGK_CHILD_STATUS s, _In_ BOOLEAN n) { UNREFERENCED_PARAMETER(c); UNREFERENCED_PARAMETER(s); UNREFERENCED_PARAMETER(n); return STATUS_NOT_IMPLEMENTED; }
+NTSTATUS APIENTRY DreamV3DdiQueryDeviceDescriptor(_In_ PVOID c, _In_ ULONG u, _Inout_ PDXGK_DEVICE_DESCRIPTOR d) { UNREFERENCED_PARAMETER(c); UNREFERENCED_PARAMETER(u); UNREFERENCED_PARAMETER(d); return STATUS_NOT_IMPLEMENTED; }
+NTSTATUS APIENTRY DreamV3DdiSetPowerState(_In_ PVOID c, _In_ ULONG u, _In_ DEVICE_POWER_STATE p, _In_ POWER_ACTION a) { UNREFERENCED_PARAMETER(c); UNREFERENCED_PARAMETER(u); UNREFERENCED_PARAMETER(p); UNREFERENCED_PARAMETER(a); return STATUS_NOT_IMPLEMENTED; }
+NTSTATUS APIENTRY DreamV3DdiNotifyAcpiEvent(_In_ PVOID c, _In_ DXGK_EVENT_TYPE t, _In_ ULONG e, _In_ PVOID a, _Out_ PULONG f) { UNREFERENCED_PARAMETER(c); UNREFERENCED_PARAMETER(t); UNREFERENCED_PARAMETER(e); UNREFERENCED_PARAMETER(a); UNREFERENCED_PARAMETER(f); return STATUS_NOT_IMPLEMENTED; }
+NTSTATUS APIENTRY DreamV3DdiQueryInterface(_In_ PVOID c, _In_ PQUERY_INTERFACE q) { UNREFERENCED_PARAMETER(c); UNREFERENCED_PARAMETER(q); return STATUS_NOT_IMPLEMENTED; }
