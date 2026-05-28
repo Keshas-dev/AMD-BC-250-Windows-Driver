@@ -30,9 +30,16 @@ Environment:
 --*/
 
 #include "amdbc250_dream_v3_kmd.h"
+#include "amdbc250_ioctl.h"
 
 static PDRIVER_OBJECT g_DriverObject = NULL;
 static DRIVER_INITIALIZATION_DATA g_InitData = {0};
+static PDEVICE_OBJECT g_ControlDevice = NULL;
+static UNICODE_STRING g_DeviceName;
+static UNICODE_STRING g_SymlinkName;
+
+/* Forward declarations */
+NTSTATUS DreamV3DeviceControl(PDEVICE_OBJECT, PIRP);
 
 /*===========================================================================
   DreamV3DxgkInitialize Stub
@@ -158,6 +165,39 @@ DriverEntry(
                    "AMDBC250-DREAM-V4.3: DreamV3DxgkInitialize failed: 0x%08X\n", Status));
     }
 
+    /* Create control device for UMD IOCTL communication */
+    {
+        UNICODE_STRING devName, symLink;
+        RtlInitUnicodeString(&devName, L"\\Device\\AMDBC250DreamV43");
+        RtlInitUnicodeString(&symLink, L"\\DosDevices\\AMDBC250DreamV43");
+        RtlCopyMemory(&g_DeviceName, &devName, sizeof(UNICODE_STRING));
+        RtlCopyMemory(&g_SymlinkName, &symLink, sizeof(UNICODE_STRING));
+
+        Status = IoCreateDevice(
+            DriverObject,
+            sizeof(DREAM_V3_DEVICE_EXTENSION),
+            &devName,
+            FILE_DEVICE_UNKNOWN,
+            FILE_DEVICE_SECURE_OPEN,
+            FALSE,
+            &g_ControlDevice);
+
+        if (NT_SUCCESS(Status)) {
+            g_ControlDevice->Flags |= DO_BUFFERED_IO;
+            g_ControlDevice->Flags &= ~DO_DEVICE_INITIALIZING;
+            IoCreateSymbolicLink(&symLink, &devName);
+            DriverObject->MajorFunction[IRP_MJ_DEVICE_CONTROL] = DreamV3DeviceControl;
+            DriverObject->MajorFunction[IRP_MJ_CREATE] = NULL;
+            DriverObject->MajorFunction[IRP_MJ_CLOSE] = NULL;
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                       "AMDBC250-DREAM-V4.3: Control device created: %wZ\n", &devName));
+        } else {
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+                       "AMDBC250-DREAM-V4.3: Control device creation failed: 0x%08X\n", Status));
+            Status = STATUS_SUCCESS; /* Non-fatal */
+        }
+    }
+
     return Status;
 }
 
@@ -205,6 +245,7 @@ DreamV3DdiAddDevice(
     DevExt->VisibleVramBytes = 10ULL * 1024 * 1024 * 1024; /* ~10GB quirk */
     DevExt->NumDisplayPipes = 4;  /* DCN 2.1: 4 pipes */
     DevExt->CurrentTemperatureC = 0;
+    DevExt->NextGpuVa = 0x100000000ULL; /* GPU VA starts at 4GB */
 
     *MiniportDeviceContext = DevExt;
 
@@ -495,6 +536,15 @@ DreamV3DdiUnload(VOID)
 {
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                "AMDBC250-DREAM-V4.3: Driver unload\n"));
+
+    /* Cleanup control device */
+    if (g_ControlDevice != NULL) {
+        IoDeleteSymbolicLink(&g_SymlinkName);
+        IoDeleteDevice(g_ControlDevice);
+        g_ControlDevice = NULL;
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                   "AMDBC250-DREAM-V4.3: Control device deleted\n"));
+    }
 }
 
 /*===========================================================================
@@ -1671,3 +1721,348 @@ DreamV3VmInitialize(_In_ PDREAM_V3_DEVICE_EXTENSION DevExt)
     return STATUS_SUCCESS;
 }
 #endif
+
+/*===========================================================================
+  IOCTL Dispatch — UMD ↔ KMD Communication
+  
+  The UMD opens \\.\AMDBC250DreamV43 and sends IOCTLs.
+  This device is created by DreamV3DdiAddDevice via IoCreateDevice.
+===========================================================================*/
+
+NTSTATUS
+DreamV3DeviceControl(
+    _In_ PDEVICE_OBJECT DeviceObject,
+    _Inout_ PIRP Irp
+    )
+{
+    PIO_STACK_LOCATION irpSp = IoGetCurrentIrpStackLocation(Irp);
+    NTSTATUS status = STATUS_SUCCESS;
+    ULONG bytesReturned = 0;
+    PVOID inputBuffer = Irp->AssociatedIrp.SystemBuffer;
+    PVOID outputBuffer = Irp->AssociatedIrp.SystemBuffer;
+    ULONG inputLen = irpSp->Parameters.DeviceIoControl.InputBufferLength;
+    ULONG outputLen = irpSp->Parameters.DeviceIoControl.OutputBufferLength;
+    ULONG ioctlCode = irpSp->Parameters.DeviceIoControl.IoControlCode;
+
+    PDREAM_V3_DEVICE_EXTENSION DevExt =
+        (PDREAM_V3_DEVICE_EXTENSION)DeviceObject->DeviceExtension;
+
+    if (DevExt == NULL) {
+        status = STATUS_INVALID_DEVICE_REQUEST;
+        goto Cleanup;
+    }
+
+    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_TRACE_LEVEL,
+               "AMDBC250-DREAM-V4.3: IOCTL 0x%08X received\n", ioctlCode));
+
+    switch (ioctlCode) {
+
+    /* --- Get Caps --- */
+    case 0x80000800: { /* IOCTL_AMDBC250_GET_CAPS */
+        if (outputLen >= sizeof(ULONG) * 7) {
+            PULONG Data = (PULONG)outputBuffer;
+            Data[0] = AMDBC250_DREAM_V3_VERSION_MAJOR * 100 +
+                      AMDBC250_DREAM_V3_VERSION_MINOR * 10 +
+                      AMDBC250_DREAM_V3_VERSION_PATCH; /* Version */
+            Data[1] = 0x05;  /* Caps: D3D12 + DISPLAY + RT */
+            Data[2] = DevExt->GpuClockMhz;  /* MaxClockMhz */
+            Data[3] = DevExt->MemoryClockMhz; /* MemoryClockMhz */
+            Data[4] = AMDBC250_MAX_COMPUTE_UNITS;
+            Data[5] = AMDBC250_STREAM_PROCESSORS;
+            Data[6] = AMDBC250_RT_ACCELERATORS;
+            bytesReturned = sizeof(ULONG) * 7;
+        } else {
+            status = STATUS_BUFFER_TOO_SMALL;
+        }
+        break;
+    }
+
+    /* --- Get VRAM Info --- */
+    case 0x80000804: { /* IOCTL_AMDBC250_GET_VRAM_INFO */
+        if (outputLen >= sizeof(ULONG64) * 3 + sizeof(ULONG)) {
+            PULONG64 Data64 = (PULONG64)outputBuffer;
+            PULONG Data32 = (PULONG)(Data64 + 3);
+            Data64[0] = DevExt->TotalVramBytes;
+            Data64[1] = DevExt->VisibleVramBytes;
+            Data64[2] = DevExt->UsedVramBytes;
+            *Data32 = 2; /* SegmentCount */
+            bytesReturned = sizeof(ULONG64) * 3 + sizeof(ULONG);
+        } else {
+            status = STATUS_BUFFER_TOO_SMALL;
+        }
+        break;
+    }
+
+    /* --- Get Temp Info --- */
+    case 0x80000808: { /* IOCTL_AMDBC250_GET_TEMP_INFO */
+        if (outputLen >= sizeof(ULONG) * 4 + sizeof(BOOLEAN)) {
+            PLONG TempData = (PLONG)outputBuffer;
+            TempData[0] = DevExt->CurrentTemperatureC; /* Edge */
+            TempData[1] = DevExt->CurrentTemperatureC + 12; /* Junction */
+            TempData[2] = DevExt->CurrentTemperatureC + 5; /* VRM */
+            PULONG UData = (PULONG)(TempData + 3);
+            *UData = DevExt->PowerState.CurrentFanSpeedPercent;
+            PBOOLEAN BData = (PBOOLEAN)(UData + 1);
+            *BData = DevExt->PowerState.ThermalThrottleActive;
+            bytesReturned = sizeof(ULONG) * 4 + sizeof(BOOLEAN);
+        } else {
+            status = STATUS_BUFFER_TOO_SMALL;
+        }
+        break;
+    }
+
+    /* --- Allocate Video Memory --- */
+    case 0x80000840: { /* IOCTL_AMDBC250_ALLOC_VIDMEM */
+        if (inputLen >= sizeof(ULONG) * 3 && outputLen >= sizeof(ULONG64) * 3) {
+            PULONG InData = (PULONG)inputBuffer;
+            ULONG SizeLo = InData[0];
+            ULONG SizeHi = InData[1];
+            ULONG Flags = InData[2];
+            ULONG SegmentId = (inputLen >= sizeof(ULONG) * 4) ? InData[3] : 0;
+            SIZE_T AllocSize = ((SIZE_T)SizeHi << 32) | SizeLo;
+
+            UNREFERENCED_PARAMETER(Flags);
+            UNREFERENCED_PARAMETER(SegmentId);
+
+            /* Allocate contiguous memory for GPU */
+            PHYSICAL_ADDRESS lowAddr, highAddr, skipBytes;
+            lowAddr.QuadPart = 0;
+            highAddr.QuadPart = 0xFFFFFFFFFFULL; /* 40-bit */
+            skipBytes.QuadPart = 0;
+
+            PVOID virtualAddr = MmAllocateContiguousMemorySpecifyCache(
+                AllocSize, lowAddr, highAddr, skipBytes, MmCached);
+
+            if (virtualAddr != NULL) {
+                PHYSICAL_ADDRESS physAddr = MmGetPhysicalAddress(virtualAddr);
+                PULONG64 OutData = (PULONG64)outputBuffer;
+                OutData[0] = DevExt->NextGpuVa; /* GPU VA */
+                OutData[1] = physAddr.QuadPart;  /* Physical */
+                OutData[2] = (ULONG64)(UINT_PTR)virtualAddr; /* CPU handle */
+                DevExt->NextGpuVa += (AllocSize + 0xFFF) & ~0xFFFULL;
+                bytesReturned = sizeof(ULONG64) * 3;
+
+                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                    "AMDBC250-DREAM-V4.3: AllocVidMem: %llu bytes, PA=0x%llX\n",
+                    AllocSize, physAddr.QuadPart));
+            } else {
+                status = STATUS_INSUFFICIENT_RESOURCES;
+            }
+        } else {
+            status = STATUS_BUFFER_TOO_SMALL;
+        }
+        break;
+    }
+
+    /* --- Free Video Memory --- */
+    case 0x80000844: { /* IOCTL_AMDBC250_FREE_VIDMEM */
+        if (inputLen >= sizeof(ULONG64)) {
+            PULONG64 InData = (PULONG64)inputBuffer;
+            PVOID handle = (PVOID)(UINT_PTR)InData[0];
+            if (handle != NULL) {
+                MmFreeContiguousMemory(handle);
+                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                    "AMDBC250-DREAM-V4.3: FreeVidMem OK\n"));
+            }
+        }
+        break;
+    }
+
+    /* --- Map Video Memory (CPU access) --- */
+    case 0x80000848: { /* IOCTL_AMDBC250_MAP_VIDMEM */
+        if (inputLen >= sizeof(ULONG64) * 3 && outputLen >= sizeof(ULONG64) * 2) {
+            PULONG64 InData = (PULONG64)inputBuffer;
+            PVOID handle = (PVOID)(UINT_PTR)InData[0];
+            ULONG64 offset = InData[1];
+            ULONG64 size = InData[2];
+            UNREFERENCED_PARAMETER(offset);
+            UNREFERENCED_PARAMETER(size);
+
+            PULONG64 OutData = (PULONG64)outputBuffer;
+            OutData[0] = (ULONG64)(UINT_PTR)handle; /* CPU address */
+            OutData[1] = 0; /* Physical (not needed for CPU map) */
+            bytesReturned = sizeof(ULONG64) * 2;
+        } else {
+            status = STATUS_BUFFER_TOO_SMALL;
+        }
+        break;
+    }
+
+    /* --- Submit Commands --- */
+    case 0x80000880: { /* IOCTL_AMDBC250_SUBMIT_COMMANDS */
+        if (inputLen >= sizeof(ULONG) * 4) {
+            PULONG InData = (PULONG)inputBuffer;
+            ULONG fenceValue = InData[2];
+
+            /* Write fence to hardware */
+            DreamV3WriteEopFence(DevExt, (ULONG64)fenceValue);
+            DreamV3SubmitGfxRing(DevExt);
+
+            /* Update fence */
+            DevExt->GlobalFence.LastSubmittedValue = (ULONG64)fenceValue;
+
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_TRACE_LEVEL,
+                "AMDBC250-DREAM-V4.3: SubmitCommands fence=%u\n", fenceValue));
+        }
+        break;
+    }
+
+    /* --- Wait Fence --- */
+    case 0x80000884: { /* IOCTL_AMDBC250_WAIT_FENCE */
+        if (inputLen >= sizeof(ULONG) * 2) {
+            PULONG InData = (PULONG)inputBuffer;
+            ULONG targetFence = InData[0];
+            ULONG timeoutMs = InData[1];
+            ULONG elapsed = 0;
+
+            while (DevExt->GlobalFence.LastSignaledValue < (ULONG64)targetFence &&
+                   elapsed < timeoutMs) {
+                KeStallExecutionProcessor(100);
+                elapsed += 100;
+
+                /* Check if GPU signaled the fence */
+                if (DevExt->GlobalFence.VirtualAddress != NULL) {
+                    ULONG64 currentFence = *DevExt->GlobalFence.VirtualAddress;
+                    if (currentFence > DevExt->GlobalFence.LastSignaledValue) {
+                        DevExt->GlobalFence.LastSignaledValue = currentFence;
+                    }
+                }
+            }
+
+            if (DevExt->GlobalFence.LastSignaledValue >= (ULONG64)targetFence) {
+                status = STATUS_SUCCESS;
+            } else {
+                status = STATUS_TIMEOUT;
+            }
+        }
+        break;
+    }
+
+    /* --- Signal Fence --- */
+    case 0x80000888: { /* IOCTL_AMDBC250_SIGNAL_FENCE */
+        if (inputLen >= sizeof(ULONG)) {
+            PULONG InData = (PULONG)inputBuffer;
+            ULONG fenceValue = InData[0];
+            DevExt->GlobalFence.LastSignaledValue = (ULONG64)fenceValue;
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_TRACE_LEVEL,
+                "AMDBC250-DREAM-V4.3: SignalFence=%u\n", fenceValue));
+        }
+        break;
+    }
+
+    /* --- Reset Device --- */
+    case 0x8000088C: { /* IOCTL_AMDBC250_RESET_DEVICE */
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+            "AMDBC250-DREAM-V4.3: ResetDevice requested\n"));
+        DreamV3HwReset(DevExt);
+        break;
+    }
+
+    /* --- Set Display Mode --- */
+    case 0x800008C0: { /* IOCTL_AMDBC250_SET_DISPLAY_MODE */
+        if (inputLen >= sizeof(ULONG) * 4) {
+            PULONG InData = (PULONG)inputBuffer;
+            DevExt->CurrentMode.Width = InData[0];
+            DevExt->CurrentMode.Height = InData[1];
+            DevExt->CurrentMode.RefreshRate = InData[2];
+            DevExt->CurrentMode.BitsPerPixel = InData[3];
+
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                "AMDBC250-DREAM-V4.3: SetDisplayMode %ux%u@%uHz\n",
+                InData[0], InData[1], InData[2]));
+
+            DreamV3HwInitDisplay(DevExt);
+        }
+        break;
+    }
+
+    /* --- Flip Display --- */
+    case 0x800008C4: { /* IOCTL_AMDBC250_FLIP_DISPLAY */
+        if (inputLen >= sizeof(ULONG) * 7) {
+            PULONG InData = (PULONG)inputBuffer;
+            ULONG64 physAddr = ((ULONG64)InData[1] << 32) | InData[0];
+
+            if (physAddr != 0) {
+                DreamV3WriteRegister(DevExt,
+                    AMDBC250_REG_HUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS,
+                    (ULONG)(physAddr & 0xFFFFFFFF));
+                DreamV3WriteRegister(DevExt,
+                    AMDBC250_REG_HUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS_HIGH,
+                    (ULONG)(physAddr >> 32));
+            }
+
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_TRACE_LEVEL,
+                "AMDBC250-DREAM-V4.3: FlipDisplay PA=0x%llX\n", physAddr));
+        }
+        break;
+    }
+
+    /* --- Get Display Info --- */
+    case 0x800008C8: { /* IOCTL_AMDBC250_GET_DISPLAY_INFO */
+        if (outputLen >= sizeof(ULONG) * 7) {
+            PULONG OutData = (PULONG)outputBuffer;
+            OutData[0] = DevExt->CurrentMode.Width;
+            OutData[1] = DevExt->CurrentMode.Height;
+            OutData[2] = DevExt->CurrentMode.RefreshRate;
+            OutData[3] = 7680;  /* MaxWidth */
+            OutData[4] = 4320;  /* MaxHeight */
+            OutData[5] = 0x03;  /* OutputTypes: DP + HDMI */
+            OutData[6] = DevExt->NumDisplayPipes;
+            bytesReturned = sizeof(ULONG) * 7;
+        } else {
+            status = STATUS_BUFFER_TOO_SMALL;
+        }
+        break;
+    }
+
+    /* --- Set Power State --- */
+    case 0x80000900: { /* IOCTL_AMDBC250_SET_POWER_STATE */
+        if (inputLen >= sizeof(ULONG) * 3) {
+            PULONG InData = (PULONG)inputBuffer;
+            ULONG powerState = InData[0];
+            ULONG gpuClock = InData[1];
+            ULONG memClock = InData[2];
+
+            if (gpuClock > 0) DevExt->GpuClockMhz = gpuClock;
+            if (memClock > 0) DevExt->MemoryClockMhz = memClock;
+
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                "AMDBC250-DREAM-V4.3: SetPowerState D%u, SCLK=%u, MCLK=%u\n",
+                powerState, gpuClock, memClock));
+        }
+        break;
+    }
+
+    /* --- Get Power Telemetry --- */
+    case 0x80000904: { /* IOCTL_AMDBC250_GET_POWER_TELEMETRY */
+        if (outputLen >= sizeof(ULONG) * 9) {
+            PULONG OutData = (PULONG)outputBuffer;
+            OutData[0] = 0; /* PowerMilliwatts (stub) */
+            OutData[1] = DevExt->PowerState.PowerLimitWatts;
+            OutData[2] = DevExt->GpuClockMhz;
+            OutData[3] = DevExt->MemoryClockMhz;
+            OutData[4] = DevExt->PowerState.CurrentFanSpeedPercent;
+            OutData[5] = (ULONG)DevExt->CurrentTemperatureC;
+            OutData[6] = (ULONG)(DevExt->CurrentTemperatureC + 12);
+            OutData[7] = DevExt->PowerState.ThermalThrottleActive ? 1 : 0;
+            OutData[8] = DevExt->ThermalThrottleCount;
+            bytesReturned = sizeof(ULONG) * 9;
+        } else {
+            status = STATUS_BUFFER_TOO_SMALL;
+        }
+        break;
+    }
+
+    default:
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+                   "AMDBC250-DREAM-V4.3: Unknown IOCTL 0x%08X\n", ioctlCode));
+        status = STATUS_INVALID_DEVICE_REQUEST;
+        break;
+    }
+
+Cleanup:
+    Irp->IoStatus.Status = status;
+    Irp->IoStatus.Information = bytesReturned;
+    IoCompleteRequest(Irp, IO_NO_INCREMENT);
+    return status;
+}

@@ -377,6 +377,9 @@ typedef struct _DREAM_V3_DEVICE_EXTENSION {
     ULONG               ErrorCount;
     ULONG               ThermalThrottleCount;
 
+    /* GPU VA management */
+    UINT64              NextGpuVa;
+
 } DREAM_V3_DEVICE_EXTENSION, *PDREAM_V3_DEVICE_EXTENSION;
 
 /*===========================================================================
