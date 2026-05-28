@@ -526,10 +526,49 @@ typedef struct _BC250_D3D9_DEVICE {
     UINT                CommandBufferSize;
     UINT                CmdBufferUsed;
     UINT64              FenceValue;
+    UINT64              FramebufferGpuVa;  /* GPU VA of current back buffer */
+    HANDLE              KmdDevice;         /* Handle to KMD for IOCTL */
     CRITICAL_SECTION    Lock;
 } BC250_D3D9_DEVICE, *PBC250_D3D9_DEVICE;
 
 static BC250_D3D9_DEVICE g_D3D9Device = {0};
+
+/* KMD communication helper */
+static HANDLE Bc250OpenKmd(void)
+{
+    return CreateFileW(L"\\\\.\\AMDBC250DreamV43", GENERIC_READ | GENERIC_WRITE,
+                       0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+}
+
+static BOOL Bc250Ioctl(HANDLE h, DWORD code, PVOID in, DWORD inSz, PVOID out, DWORD outSz)
+{
+    DWORD ret = 0;
+    return DeviceIoControl(h, code, in, inSz, out, outSz, &ret, NULL);
+}
+
+/* Allocate DMA command buffer from KMD */
+static PVOID Bc250AllocDmaBuffer(HANDLE hKmd, UINT size, UINT64* outGpuVa)
+{
+    ULONG allocIn[1] = {size};
+    ULONG64 allocOut[2] = {0};
+    DWORD ret = 0;
+
+    if (!DeviceIoControl(hKmd, 0x80000930, allocIn, sizeof(allocIn),
+                         allocOut, sizeof(allocOut), &ret, NULL)) {
+        return NULL;
+    }
+
+    *outGpuVa = allocOut[0];
+    return (PVOID)(UINT_PTR)allocOut[1];
+}
+
+/* Free DMA buffer */
+static void Bc250FreeDmaBuffer(HANDLE hKmd, PVOID cpuAddr)
+{
+    ULONG64 freeIn[1] = {(ULONG64)(UINT_PTR)cpuAddr};
+    DWORD ret = 0;
+    DeviceIoControl(hKmd, 0x80000934, freeIn, sizeof(freeIn), NULL, 0, &ret, NULL);
+}
 
 /* D3D9 DDI: OpenAdapter */
 static HRESULT APIENTRY D3D9_CreateDevice(HANDLE, D3DDDIARG_CREATEDEVICE*);
@@ -583,6 +622,25 @@ static HRESULT APIENTRY D3D9_CreateDevice(HANDLE hAdapter, D3DDDIARG_CREATEDEVIC
     InitializeCriticalSection(&dev->Lock);
     dev->hDevice = pArgs->hDevice;
     dev->FenceValue = 1;
+
+    /* Open KMD communication channel */
+    dev->KmdDevice = Bc250OpenKmd();
+    if (dev->KmdDevice == INVALID_HANDLE_VALUE) {
+        OutputDebugStringA("BC-250 UMD: WARNING - KMD not available\n");
+    }
+
+    /* Allocate DMA command buffer (256KB) via KMD IOCTL */
+    dev->CommandBufferSize = 256 * 1024;
+    if (dev->KmdDevice != INVALID_HANDLE_VALUE) {
+        dev->CommandBuffer = Bc250AllocDmaBuffer(dev->KmdDevice, dev->CommandBufferSize, &dev->FramebufferGpuVa);
+    }
+    if (dev->CommandBuffer == NULL) {
+        /* Fallback: VirtualAlloc */
+        dev->CommandBuffer = VirtualAlloc(NULL, dev->CommandBufferSize, MEM_COMMIT, PAGE_READWRITE);
+    }
+    dev->CmdBufferUsed = 0;
+
+    OutputDebugStringA("BC-250 UMD: D3D9 CreateDevice OK (cmd buf allocated)\n");
 
     /* Fill D3D9 DDI function table */
     D3DDDI_DEVICEFUNCS* f = pArgs->pDeviceFuncs;
@@ -662,7 +720,7 @@ static HRESULT APIENTRY D3D9_DrawIndexedPrimitive(HANDLE hDev, CONST D3DDDIARG_D
     return S_OK;
 }
 
-/* D3D9 DDI: Present — D3DKMTPresent */
+/* D3D9 DDI: Present — Flush + Flip display */
 static HRESULT APIENTRY D3D9_Present(HANDLE hDev, CONST D3DDDIARG_PRESENT* pArgs)
 {
     PBC250_D3D9_DEVICE dev = &g_D3D9Device;
@@ -670,6 +728,25 @@ static HRESULT APIENTRY D3D9_Present(HANDLE hDev, CONST D3DDDIARG_PRESENT* pArgs
 
     /* Flush pending commands first */
     D3D9_Flush(hDev);
+
+    /* Flip display via KMD IOCTL if we have a framebuffer */
+    if (dev->KmdDevice != INVALID_HANDLE_VALUE && dev->FramebufferGpuVa != 0) {
+        /* Build flip parameters: width, height, pitch, format */
+        ULONG flipData[7] = {0};
+        flipData[0] = (ULONG)(dev->FramebufferGpuVa & 0xFFFFFFFF);  /* PA low */
+        flipData[1] = (ULONG)(dev->FramebufferGpuVa >> 32);         /* PA high */
+        flipData[2] = dev->BackBufferWidth;
+        flipData[3] = dev->BackBufferHeight;
+        flipData[4] = dev->BackBufferWidth * 4;  /* Pitch (RGBA) */
+        flipData[5] = 22;  /* D3DDDIFMT_A8R8G8B8 */
+        flipData[6] = 1;   /* VSync */
+
+        DWORD ret = 0;
+        DeviceIoControl(dev->KmdDevice, 0x800008C4, flipData, sizeof(flipData),
+                        NULL, 0, &ret, NULL);
+
+        OutputDebugStringA("BC-250 UMD: Present - flip submitted\n");
+    }
 
     dev->FenceValue++;
     return S_OK;
