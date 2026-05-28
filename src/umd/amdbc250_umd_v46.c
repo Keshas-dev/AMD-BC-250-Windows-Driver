@@ -571,6 +571,7 @@ static void Bc250FreeDmaBuffer(HANDLE hKmd, PVOID cpuAddr)
 }
 
 /* D3D9 DDI: OpenAdapter */
+static HRESULT APIENTRY D3D9_GetCaps(HANDLE hAdapter, CONST D3DDDIARG_GETCAPS* pCaps);
 static HRESULT APIENTRY D3D9_CreateDevice(HANDLE, D3DDDIARG_CREATEDEVICE*);
 static HRESULT APIENTRY D3D9_CloseAdapter(HANDLE);
 static HRESULT APIENTRY D3D9_CreateResource(HANDLE, D3DDDIARG_CREATERESOURCE*);
@@ -631,8 +632,22 @@ static HRESULT APIENTRY D3D9_OpenAdapter(D3DDDIARG_OPENADAPTER* pArgs)
 {
     if (!pArgs) return E_INVALIDARG;
     OutputDebugStringA("BC-250 UMD: D3D9 OpenAdapter\n");
+    pArgs->pAdapterFuncs->pfnGetCaps = D3D9_GetCaps;
     pArgs->pAdapterFuncs->pfnCreateDevice = D3D9_CreateDevice;
     pArgs->pAdapterFuncs->pfnCloseAdapter = D3D9_CloseAdapter;
+    pArgs->DriverVersion = D3D_UMD_INTERFACE_VERSION;
+    return S_OK;
+}
+
+static HRESULT APIENTRY D3D9_GetCaps(HANDLE hAdapter, CONST D3DDDIARG_GETCAPS* pCaps)
+{
+    UNREFERENCED_PARAMETER(hAdapter);
+    if (!pCaps) return E_INVALIDARG;
+
+    /* Report basic D3D9 capabilities */
+    RtlZeroMemory(pCaps->pData, pCaps->DataSize);
+
+    OutputDebugStringA("BC-250 UMD: D3D9 GetCaps\n");
     return S_OK;
 }
 
