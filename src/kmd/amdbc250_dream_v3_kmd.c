@@ -62,20 +62,30 @@ DreamV3DxgkInitialize(
     _In_ PDRIVER_INITIALIZATION_DATA DriverInitializationData
     )
 {
-    UNREFERENCED_PARAMETER(RegistryPath);
+    NTSTATUS Status;
 
     if (DriverInitializationData == NULL) {
         return STATUS_INVALID_PARAMETER;
     }
 
-    /* Store the initialization data for later use */
-    RtlCopyMemory(&g_InitData, DriverInitializationData, sizeof(DRIVER_INITIALIZATION_DATA));
-
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-               "AMDBC250-DREAM-V4.3: DreamV3DxgkInitialize called, DDI version=%u\n",
+               "AMDBC250-DREAM-V4.3: DreamV3DxgkInitialize calling DxgkInitialize, DDI version=%u\n",
                DriverInitializationData->Version));
 
-    return STATUS_SUCCESS;
+    /* Call the real DxgkInitialize from dxgkrnl.sys
+       This registers our DDI callbacks with DXGKRNL so the D3D runtime
+       can enumerate our adapter and load our UMD */
+    Status = DxgkInitialize(DriverObject, RegistryPath, DriverInitializationData);
+
+    if (NT_SUCCESS(Status)) {
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                   "AMDBC250-DREAM-V4.3: DxgkInitialize SUCCESS - adapter registered with DXGKRNL\n"));
+    } else {
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
+                   "AMDBC250-DREAM-V4.3: DxgkInitialize FAILED: 0x%08X\n", Status));
+    }
+
+    return Status;
 }
 
 /*===========================================================================
@@ -1263,8 +1273,48 @@ DreamV3DdiPresent(
     _Inout_ DXGKARG_PRESENT     *pPresent
     )
 {
+    PDREAM_V3_DEVICE_EXTENSION DevExt;
+    DXGK_ALLOCATIONLIST *pSrcAlloc = NULL;
+
     UNREFERENCED_PARAMETER(hContext);
-    UNREFERENCED_PARAMETER(pPresent);
+
+    if (pPresent == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    /* Get device extension */
+    DevExt = (PDREAM_V3_DEVICE_EXTENSION)g_ControlDevice->DeviceExtension;
+    if (DevExt == NULL || !DevExt->HardwareInitialized) {
+        return STATUS_SUCCESS;
+    }
+
+    /* Get the source allocation from the allocation list */
+    if (pPresent->pAllocationList != NULL && pPresent->NumSrcAllocations > 0) {
+        pSrcAlloc = &pPresent->pAllocationList[0];
+    }
+
+    if (pSrcAlloc != NULL && pSrcAlloc->PhysicalAddress.QuadPart != 0) {
+        /* Program HUBPREQ primary surface address */
+        DreamV3WriteRegister(DevExt,
+            AMDBC250_REG_HUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS,
+            (ULONG)(pSrcAlloc->PhysicalAddress.QuadPart & 0xFFFFFFFF));
+        DreamV3WriteRegister(DevExt,
+            AMDBC250_REG_HUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS_HIGH,
+            (ULONG)(pSrcAlloc->PhysicalAddress.QuadPart >> 32));
+
+        /* Set surface pitch (default 800*4 = 3200 for 800x600, or use current mode) */
+        DreamV3WriteRegister(DevExt,
+            AMDBC250_REG_HUBPREQ0_DCSURF_SURFACE_PITCH,
+            DevExt->CurrentMode.Width * (DevExt->CurrentMode.BitsPerPixel / 8));
+
+        /* Trigger flip */
+        DreamV3WriteRegister(DevExt,
+            AMDBC250_REG_HUBPREQ0_DCSURF_FLIP_CONTROL, 0x1);
+
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+            "AMDBC250-DREAM-V4.3: Present PA=0x%llX\n", pSrcAlloc->PhysicalAddress.QuadPart));
+    }
+
     return STATUS_SUCCESS;
 }
 
@@ -1613,9 +1663,34 @@ DreamV3DdiQueryChildRelations(
     _In_ ULONG ChildRelationsSize
     )
 {
-    UNREFERENCED_PARAMETER(MiniportDeviceContext);
-    UNREFERENCED_PARAMETER(ChildRelations);
+    PDREAM_V3_DEVICE_EXTENSION DevExt = (PDREAM_V3_DEVICE_EXTENSION)MiniportDeviceContext;
+    ULONG i;
+    ULONG NumChildren;
+
     UNREFERENCED_PARAMETER(ChildRelationsSize);
+
+    if (DevExt == NULL || ChildRelations == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    /* Report our display outputs:
+       BC-250 has DCN 2.1 with up to 4 display pipes.
+       We report 1 child (the primary display output). */
+    NumChildren = 1;
+    if (ChildRelationsSize / sizeof(DXGK_CHILD_DESCRIPTOR) < NumChildren) {
+        NumChildren = ChildRelationsSize / sizeof(DXGK_CHILD_DESCRIPTOR);
+    }
+
+    for (i = 0; i < NumChildren; i++) {
+        RtlZeroMemory(&ChildRelations[i], sizeof(DXGK_CHILD_DESCRIPTOR));
+        ChildRelations[i].ChildUid = i;
+        ChildRelations[i].ChildDeviceType = TypeVideoOutput;
+        ChildRelations[i].ChildCapabilities.HpdAwareness = HpdAwarenessAlwaysConnected;
+    }
+
+    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+        "AMDBC250-DREAM-V4.3: QueryChildRelations - %u children reported\n", NumChildren));
+
     return STATUS_SUCCESS;
 }
 

@@ -109,7 +109,7 @@ echo Linking KMD...
 link.exe /DRIVER /SUBSYSTEM:NATIVE /ENTRY:DriverEntry ^
   /OUT:"%OUTPUT_DIR%\atikmdag.sys" ^
   amdbc250_dream_v3_kmd.obj amdbc250_dream_v3_hw_init.obj amdbc250_dream_v3_power.obj amdbc250_dream_v3_vm.obj ^
-  ntoskrnl.lib wdm.lib win32k.lib ntstrsafe.lib BufferOverflowK.lib ^
+  ntoskrnl.lib wdm.lib win32k.lib ntstrsafe.lib BufferOverflowK.lib dxgkrnl.lib ^
   /LIBPATH:"%WDK_ROOT%\Lib\%WDK_VERSION%\km\x64"
 
 if errorlevel 1 (
