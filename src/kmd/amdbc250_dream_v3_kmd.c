@@ -1962,20 +1962,55 @@ DreamV3DeviceControl(
     case 0x80000880: { /* IOCTL_AMDBC250_SUBMIT_COMMANDS */
         if (inputLen >= sizeof(ULONG) * 4) {
             PULONG InData = (PULONG)inputBuffer;
-            ULONG fenceValue = InData[2];
+            ULONG fenceValue;
+            ULONG ibAddrLo = InData[0];
+            ULONG ibAddrHi = InData[1];
+            ULONG ibSize;
 
-            /* Write fence to hardware */
+            /* Dual-format compatibility:
+               Old format (Vulkan ICD): {0, 0, fence, 0}  — fence at InData[2]
+               New format (D3D9):       {PA_lo, PA_hi, size, fence} — fence at InData[3] */
+            if (InData[0] == 0) {
+                fenceValue = InData[2];  /* Old format: fence at field 2 */
+                ibSize = 0;
+            } else {
+                fenceValue = InData[3];  /* New format: fence at field 3 */
+                ibSize = InData[2];      /* New format: size at field 2 */
+            }
+
+            /* If IB provided, write INDIRECT_BUFFER packet into ring */
+            if (ibAddrLo != 0 && ibSize > 0 &&
+                DevExt->GfxRing.VirtualAddress != NULL) {
+                volatile PULONG Ring = (volatile PULONG)DevExt->GfxRing.VirtualAddress;
+                ULONG WPtr = DevExt->GfxRing.WritePointer;
+                ULONG RingSize = (ULONG)DevExt->GfxRing.SizeInBytes;
+                ULONG NeededSpace = (4 + 7) * sizeof(ULONG);
+
+                if (WPtr + NeededSpace > RingSize) {
+                    ULONG SpaceLeft = RingSize - WPtr;
+                    for (ULONG i = 0; i < SpaceLeft / sizeof(ULONG); i++) {
+                        Ring[WPtr / sizeof(ULONG)] = PM4_TYPE3_HDR(IT_NOP, 0);
+                        WPtr += sizeof(ULONG);
+                    }
+                    WPtr = 0;
+                }
+
+                Ring[WPtr / sizeof(ULONG) + 0] = PM4_TYPE3_HDR(IT_INDIRECT_BUFFER, 4);
+                Ring[WPtr / sizeof(ULONG) + 1] = ibAddrLo & 0xFFFFFFFC;
+                Ring[WPtr / sizeof(ULONG) + 2] = ibAddrHi;
+                Ring[WPtr / sizeof(ULONG) + 3] = (ibSize + 3) / sizeof(ULONG);
+                WPtr += 4 * sizeof(ULONG);
+                DevExt->GfxRing.WritePointer = WPtr;
+            }
+
             DreamV3WriteEopFence(DevExt, (ULONG64)fenceValue);
-            DreamV3SubmitGfxRing(DevExt);
-
-            /* Update fence */
             DevExt->GlobalFence.LastSubmittedValue = (ULONG64)fenceValue;
-
-            /* Signal fence event for WaitFence */
+            DreamV3SubmitGfxRing(DevExt);
             KeSetEvent(&DevExt->GlobalFence.FenceEvent, 0, FALSE);
 
             KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_TRACE_LEVEL,
-                "AMDBC250-DREAM-V4.3: SubmitCommands fence=%u\n", fenceValue));
+                "AMDBC250-DREAM-V4.3: SubmitCommands fence=%u ib=%s\n",
+                fenceValue, (ibAddrLo != 0) ? "yes" : "no"));
         }
         break;
     }

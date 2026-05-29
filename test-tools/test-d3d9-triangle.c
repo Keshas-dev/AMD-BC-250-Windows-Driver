@@ -17,8 +17,59 @@ HRESULT InitD3D(HWND hWnd)
     /* Create D3D9 object */
     g_pD3D = Direct3DCreate9(D3D_SDK_VERSION);
     if (!g_pD3D) {
+        MessageBoxA(hWnd, "Direct3DCreate9 returned NULL.\nD3D9 runtime may not be available.", "Error - Step 1", MB_OK);
         OutputDebugStringA("BC-250 Test: Failed to create D3D9\n");
         return E_FAIL;
+    }
+
+    /* Enumerate all adapters */
+    UINT adapterCount = IDirect3D9_GetAdapterCount(g_pD3D);
+    char buf[1024];
+    int pos = 0;
+    pos += snprintf(buf + pos, sizeof(buf) - pos, "Adapter count: %u\n", adapterCount);
+
+    UINT selectedAdapter = D3DADAPTER_DEFAULT;
+    for (UINT i = 0; i < adapterCount; i++) {
+        D3DADAPTER_IDENTIFIER9 id;
+        HRESULT hrId = IDirect3D9_GetAdapterIdentifier(g_pD3D, i, 0, &id);
+        if (SUCCEEDED(hrId)) {
+            pos += snprintf(buf + pos, sizeof(buf) - pos,
+                "[%u] %s (Vendor=0x%04X Device=0x%04X)\n",
+                i, id.Description, id.VendorId, id.DeviceId);
+            /* Check if this is our BC-250 adapter */
+            if (id.VendorId == 0x1002 && (id.DeviceId == 0x13FE || id.DeviceId == 0x143F ||
+                id.DeviceId == 0x13DB || id.DeviceId == 0x13F9 || id.DeviceId == 0x13FA ||
+                id.DeviceId == 0x13FB || id.DeviceId == 0x13FC)) {
+                selectedAdapter = i;
+            }
+        }
+    }
+
+    /* Show adapter list to user */
+    MessageBoxA(hWnd, buf, "Adapters Found - Step 2", MB_OK);
+
+    /* Check adapter identifier for selected adapter */
+    D3DADAPTER_IDENTIFIER9 id;
+    HRESULT hrGetId = IDirect3D9_GetAdapterIdentifier(g_pD3D, selectedAdapter, 0, &id);
+    if (FAILED(hrGetId)) {
+        snprintf(buf, sizeof(buf), "GetAdapterIdentifier failed: 0x%08X", hrGetId);
+        MessageBoxA(hWnd, buf, "Error - Step 3", MB_OK);
+        return hrGetId;
+    }
+
+    /* Check device caps for D3DDEVTYPE_HAL */
+    D3DCAPS9 caps;
+    HRESULT hrCaps = IDirect3D9_GetDeviceCaps(g_pD3D, selectedAdapter, D3DDEVTYPE_HAL, &caps);
+    if (FAILED(hrCaps)) {
+        snprintf(buf, sizeof(buf), "GetDeviceCaps(adapter=%u, HAL) failed: 0x%08X\nTrying REF instead...", selectedAdapter, hrCaps);
+        MessageBoxA(hWnd, buf, "Step 4 - Warning", MB_OK);
+        /* Try REF instead of HAL */
+        hrCaps = IDirect3D9_GetDeviceCaps(g_pD3D, selectedAdapter, D3DDEVTYPE_REF, &caps);
+        if (FAILED(hrCaps)) {
+            snprintf(buf, sizeof(buf), "GetDeviceCaps REF also failed: 0x%08X", hrCaps);
+            MessageBoxA(hWnd, buf, "Error - Step 4", MB_OK);
+            return hrCaps;
+        }
     }
 
     /* Setup present parameters */
@@ -34,11 +85,12 @@ HRESULT InitD3D(HWND hWnd)
     d3dpp.Flags = D3DPRESENTFLAG_DISCARD_DEPTHSTENCIL;
     d3dpp.PresentationInterval = D3DPRESENT_INTERVAL_ONE;
 
-    /* Create device using vtable */
+    /* Try HAL first, then REF on selected adapter */
+    D3DDEVTYPE devType = D3DDEVTYPE_HAL;
     HRESULT hr = IDirect3D9_CreateDevice(
         g_pD3D,
-        D3DADAPTER_DEFAULT,
-        D3DDEVTYPE_HAL,
+        selectedAdapter,
+        devType,
         hWnd,
         D3DCREATE_SOFTWARE_VERTEXPROCESSING,
         &d3dpp,
@@ -46,8 +98,25 @@ HRESULT InitD3D(HWND hWnd)
     );
 
     if (FAILED(hr)) {
-        char buf[128];
-        snprintf(buf, sizeof(buf), "BC-250 Test: CreateDevice failed: 0x%08X\n", hr);
+        /* If HAL fails, try REF before giving up */
+        snprintf(buf, sizeof(buf), "HAL CreateDevice failed: 0x%08X\nTrying REF...", hr);
+        MessageBoxA(hWnd, buf, "Step 5 - Retry", MB_OK);
+        devType = D3DDEVTYPE_REF;
+        hr = IDirect3D9_CreateDevice(
+            g_pD3D,
+            selectedAdapter,
+            devType,
+            hWnd,
+            D3DCREATE_SOFTWARE_VERTEXPROCESSING,
+            &d3dpp,
+            &g_pd3dDevice
+        );
+    }
+
+    if (FAILED(hr)) {
+        char buf[256];
+        snprintf(buf, sizeof(buf), "CreateDevice(adapter=%u, type=%d) failed: 0x%08X\n",
+                 selectedAdapter, devType, hr);
         OutputDebugStringA(buf);
         return hr;
     }
@@ -150,7 +219,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
     /* Initialize D3D9 */
     HRESULT hr = InitD3D(hWnd);
     if (FAILED(hr)) {
-        MessageBox(hWnd, "Failed to initialize Direct3D 9", "Error", MB_OK);
+        char buf[128];
+        snprintf(buf, sizeof(buf), "Failed to initialize Direct3D 9 (HR=0x%08lX).\nCheck OutputDebugString for details.", hr);
+        MessageBoxA(hWnd, buf, "Error", MB_OK);
         return 1;
     }
 

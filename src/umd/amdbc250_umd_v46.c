@@ -1,6 +1,6 @@
 /*++
 
-Copyright (c) 2026 AMD BC-250 "Dream Drivers" Project GÇö Version 4.3
+Copyright (c) 2026 AMD BC-250 "Dream Drivers" Project Gï¿½ï¿½ Version 4.3
 
 Module Name:
     amdbc250_umd_v46.c
@@ -478,7 +478,7 @@ static void APIENTRY UmdDestroyPipelineLibrary(D3D12DDI_HDEVICE h, D3D12DDI_HPIP
    OpenAdapter12 - Main Entry Point
    ============================================================================ */
 
-__declspec(dllexport) HRESULT APIENTRY OpenAdapter12(_Inout_ D3D12DDIARG_OPENADAPTER* pOpenData)
+extern "C" HRESULT APIENTRY OpenAdapter12(_Inout_ D3D12DDIARG_OPENADAPTER* pOpenData)
 {
     if (!pOpenData || !pOpenData->pAdapterFuncs) return E_INVALIDARG;
 
@@ -496,17 +496,30 @@ __declspec(dllexport) HRESULT APIENTRY OpenAdapter12(_Inout_ D3D12DDIARG_OPENADA
     OutputDebugStringA("BC-250 UMD: OpenAdapter12 OK\n");
     return S_OK;
 }
+extern "C" HRESULT APIENTRY OpenAdapter10(_Inout_ D3D10DDIARG_OPENADAPTER* p) { UNREFERENCED_PARAMETER(p); return S_OK; }
 
-__declspec(dllexport) HRESULT APIENTRY OpenAdapter10(_Inout_ D3D10DDIARG_OPENADAPTER* p) { UNREFERENCED_PARAMETER(p); return S_OK; }
-__declspec(dllexport) HRESULT APIENTRY OpenAdapter10_2(_Inout_ D3D10DDIARG_OPENADAPTER* p) { UNREFERENCED_PARAMETER(p); return S_OK; }
+extern "C" HRESULT APIENTRY OpenAdapter10_2(_Inout_ D3D10DDIARG_OPENADAPTER* p) { UNREFERENCED_PARAMETER(p); return S_OK; }
 
 /* ============================================================================
-   D3D9 DDI Support GÇö DrawPrimitive with PM4 packets
+   D3D9 DDI Support Gï¿½ï¿½ DrawPrimitive with PM4 packets
    Based on ZEROAESQUERDA/BC250-windowsDriverTest approach
    ============================================================================ */
 
 #include <d3dumddi.h>
 #include <d3dkmthk.h>
+#include <d3d9types.h>
+#include <d3d9caps.h>
+
+/* Missing D3D9 caps constants (not in WDK d3d9caps.h) */
+#ifndef D3DCAPS2_CANRENDERWINDOWED
+#define D3DCAPS2_CANRENDERWINDOWED        0x00080000L
+#endif
+#ifndef D3DPSHADECAPS_COLORFLATRGB
+#define D3DPSHADECAPS_COLORFLATRGB        0x00000002L
+#endif
+#ifndef D3DPSHADECAPS_SPECULARFLATRGB
+#define D3DPSHADECAPS_SPECULARFLATRGB     0x00000040L
+#endif
 
 /* PM4 opcodes (from amdbc250_hw.h) */
 #define PM4_TYPE3_HDR_D3D9(opcode, cnt) ((3u << 30) | (((cnt) - 1) << 16) | ((opcode) << 8))
@@ -628,24 +641,109 @@ static HRESULT APIENTRY D3D9_SetVertexShaderConstB(HANDLE, CONST D3DDDIARG_SETVE
 static HRESULT APIENTRY D3D9_SetPixelShaderConstI(HANDLE, CONST D3DDDIARG_SETPIXELSHADERCONSTI*, CONST INT*);
 static HRESULT APIENTRY D3D9_SetPixelShaderConstB(HANDLE, CONST D3DDDIARG_SETPIXELSHADERCONSTB*, CONST BOOL*);
 
-static HRESULT APIENTRY D3D9_OpenAdapter(D3DDDIARG_OPENADAPTER* pArgs)
-{
-    if (!pArgs) return E_INVALIDARG;
-    OutputDebugStringA("BC-250 UMD: D3D9 OpenAdapter\n");
-    pArgs->pAdapterFuncs->pfnGetCaps = D3D9_GetCaps;
-    pArgs->pAdapterFuncs->pfnCreateDevice = D3D9_CreateDevice;
-    pArgs->pAdapterFuncs->pfnCloseAdapter = D3D9_CloseAdapter;
-    pArgs->DriverVersion = D3D_UMD_INTERFACE_VERSION;
-    return S_OK;
-}
-
 static HRESULT APIENTRY D3D9_GetCaps(HANDLE hAdapter, CONST D3DDDIARG_GETCAPS* pCaps)
 {
     UNREFERENCED_PARAMETER(hAdapter);
-    if (!pCaps) return E_INVALIDARG;
+    if (!pCaps || !pCaps->pData) return E_INVALIDARG;
 
-    /* Report basic D3D9 capabilities */
-    RtlZeroMemory(pCaps->pData, pCaps->DataSize);
+    switch (pCaps->Type) {
+    case D3DDDICAPS_GETD3D9CAPS:
+        if (pCaps->DataSize >= sizeof(D3DCAPS9)) {
+            D3DCAPS9* c = (D3DCAPS9*)pCaps->pData;
+            RtlZeroMemory(c, sizeof(D3DCAPS9));
+            c->DeviceType = D3DDEVTYPE_HAL;
+            c->AdapterOrdinal = 0;
+            c->Caps = D3DCAPS_READ_SCANLINE;
+            c->Caps2 = D3DCAPS2_FULLSCREENGAMMA | D3DCAPS2_CANRENDERWINDOWED;
+            c->PresentationIntervals = D3DPRESENT_INTERVAL_IMMEDIATE | D3DPRESENT_INTERVAL_ONE;
+            c->DevCaps = D3DDEVCAPS_DRAWPRIMITIVES2 | D3DDEVCAPS_DRAWPRIMITIVES2EX |
+                         D3DDEVCAPS_HWTRANSFORMANDLIGHT | D3DDEVCAPS_HWRASTERIZATION |
+                         D3DDEVCAPS_PUREDEVICE | D3DDEVCAPS_CANRENDERAFTERFLIP |
+                         D3DDEVCAPS_TEXTURESYSTEMMEMORY | D3DDEVCAPS_TEXTUREVIDEOMEMORY;
+            c->PrimitiveMiscCaps = D3DPMISCCAPS_MASKZ | D3DPMISCCAPS_CULLNONE |
+                                   D3DPMISCCAPS_COLORWRITEENABLE | D3DPMISCCAPS_CLIPTLVERTS;
+            c->RasterCaps = D3DPRASTERCAPS_DITHER | D3DPRASTERCAPS_DEPTHBIAS |
+                            D3DPRASTERCAPS_SCISSORTEST | D3DPRASTERCAPS_SLOPESCALEDEPTHBIAS;
+            c->ZCmpCaps = D3DPCMPCAPS_NEVER | D3DPCMPCAPS_LESS | D3DPCMPCAPS_EQUAL |
+                          D3DPCMPCAPS_LESSEQUAL | D3DPCMPCAPS_GREATER | D3DPCMPCAPS_NOTEQUAL |
+                          D3DPCMPCAPS_GREATEREQUAL | D3DPCMPCAPS_ALWAYS;
+            c->SrcBlendCaps = D3DPBLENDCAPS_ZERO | D3DPBLENDCAPS_ONE |
+                              D3DPBLENDCAPS_SRCALPHA | D3DPBLENDCAPS_INVSRCALPHA |
+                              D3DPBLENDCAPS_DESTALPHA | D3DPBLENDCAPS_INVDESTALPHA |
+                              D3DPBLENDCAPS_SRCCOLOR | D3DPBLENDCAPS_INVSRCCOLOR |
+                              D3DPBLENDCAPS_DESTCOLOR | D3DPBLENDCAPS_INVDESTCOLOR |
+                              D3DPBLENDCAPS_SRCALPHASAT;
+            c->DestBlendCaps = c->SrcBlendCaps;
+            c->ShadeCaps = D3DPSHADECAPS_COLORFLATRGB | D3DPSHADECAPS_COLORGOURAUDRGB |
+                           D3DPSHADECAPS_SPECULARFLATRGB | D3DPSHADECAPS_SPECULARGOURAUDRGB;
+            c->TextureCaps = D3DPTEXTURECAPS_ALPHA | D3DPTEXTURECAPS_PERSPECTIVE |
+                             D3DPTEXTURECAPS_POW2 | D3DPTEXTURECAPS_NONPOW2CONDITIONAL |
+                             D3DPTEXTURECAPS_CUBEMAP | D3DPTEXTURECAPS_VOLUMEMAP;
+            c->TextureFilterCaps = D3DPTFILTERCAPS_MINFLINEAR | D3DPTFILTERCAPS_MAGFLINEAR |
+                                   D3DPTFILTERCAPS_MINFPOINT | D3DPTFILTERCAPS_MAGFPOINT;
+            c->MaxTextureWidth = 16384; c->MaxTextureHeight = 16384;
+            c->MaxTextureRepeat = 8192;
+            c->MaxTextureAspectRatio = 16384;
+            c->MaxAnisotropy = 16;
+            c->MaxVertexW = 1e10f;
+            c->GuardBandLeft = -1.0f; c->GuardBandTop = -1.0f;
+            c->GuardBandRight = 1.0f; c->GuardBandBottom = 1.0f;
+            c->StencilCaps = D3DSTENCILCAPS_KEEP | D3DSTENCILCAPS_ZERO |
+                             D3DSTENCILCAPS_REPLACE | D3DSTENCILCAPS_INCRSAT |
+                             D3DSTENCILCAPS_DECRSAT | D3DSTENCILCAPS_INVERT |
+                             D3DSTENCILCAPS_INCR | D3DSTENCILCAPS_DECR;
+            c->FVFCaps = D3DFVFCAPS_PSIZE;
+            c->MaxTextureBlendStages = 8;
+            c->MaxSimultaneousTextures = 8;
+            c->MaxActiveLights = 8;
+            c->MaxUserClipPlanes = 6;
+            c->MaxVertexBlendMatrices = 4;
+            c->MaxVertexBlendMatrixIndex = 0xFFFF;
+            c->MaxPointSize = 256.0f;
+            c->MaxPrimitiveCount = 0x1FFFFF;
+            c->MaxVertexIndex = 0x00FFFFFF;
+            c->MaxStreams = 16;
+            c->MaxStreamStride = 255;
+            c->VertexShaderVersion = D3DVS_VERSION(3, 0);
+            c->MaxVertexShaderConst = 256;
+            c->PixelShaderVersion = D3DPS_VERSION(3, 0);
+            c->PixelShader1xMaxValue = 1.0f;
+            c->DevCaps2 = D3DDEVCAPS2_STREAMOFFSET | D3DDEVCAPS2_CAN_STRETCHRECT_FROM_TEXTURES;
+            c->NumSimultaneousRTs = 4;
+            c->DeclTypes = 0x1F;
+            c->VS20Caps.Caps = D3DVS20CAPS_PREDICATION;
+            c->VS20Caps.DynamicFlowControlDepth = 24;
+            c->VS20Caps.NumTemps = 32;
+            c->VS20Caps.StaticFlowControlDepth = 4;
+            c->PS20Caps.Caps = D3DPS20CAPS_ARBITRARYSWIZZLE |
+                               D3DPS20CAPS_GRADIENTINSTRUCTIONS |
+                               D3DPS20CAPS_PREDICATION |
+                               D3DPS20CAPS_NODEPENDENTREADLIMIT;
+            c->PS20Caps.DynamicFlowControlDepth = 24;
+            c->PS20Caps.NumTemps = 32;
+            c->PS20Caps.StaticFlowControlDepth = 4;
+            c->PS20Caps.NumInstructionSlots = 512;
+            c->MaxVShaderInstructionsExecuted = 65535;
+            c->MaxPShaderInstructionsExecuted = 65535;
+            c->MaxVertexShader30InstructionSlots = 32768;
+            c->MaxPixelShader30InstructionSlots = 32768;
+            c->VertexTextureFilterCaps = D3DPTFILTERCAPS_MINFLINEAR | D3DPTFILTERCAPS_MAGFLINEAR;
+            c->StretchRectFilterCaps = D3DPTFILTERCAPS_MINFLINEAR | D3DPTFILTERCAPS_MAGFLINEAR;
+        }
+        break;
+    case D3DDDICAPS_GETFORMATCOUNT:
+        if (pCaps->DataSize >= sizeof(UINT)) {
+            *(UINT*)pCaps->pData = 0;
+        }
+        break;
+    case D3DDDICAPS_GETD3DQUERYCOUNT:
+        if (pCaps->DataSize >= sizeof(DWORD)) {
+            *(DWORD*)pCaps->pData = 0;
+        }
+        break;
+    default:
+        break;
+    }
 
     OutputDebugStringA("BC-250 UMD: D3D9 GetCaps\n");
     return S_OK;
@@ -783,11 +881,12 @@ static HRESULT APIENTRY D3D9_CreateResource(HANDLE hDev, D3DDDIARG_CREATERESOURC
         ULONG allocIn[4] = {0};
         ULONG64 allocOut[3] = {0};
         DWORD ret = 0;
+        UINT64 allocSize = 4096;  /* Default 4KB */
         
-        allocIn[0] = 4096;  /* Default 4KB */
-        allocIn[1] = 256;   /* Alignment */
-        allocIn[2] = 0x3;   /* Flags: READ|WRITE */
-        allocIn[3] = 0;     /* Segment: VRAM */
+        allocIn[0] = (ULONG)(allocSize & 0xFFFFFFFF);         /* SizeLo */
+        allocIn[1] = (ULONG)(allocSize >> 32);                 /* SizeHi */
+        allocIn[2] = 0x3;                                      /* Flags */
+        allocIn[3] = 0;                                        /* Segment */
         
         if (DeviceIoControl(dev->KmdDevice, 0x80000840,
                            allocIn, sizeof(allocIn),
@@ -803,7 +902,7 @@ static HRESULT APIENTRY D3D9_CreateResource(HANDLE hDev, D3DDDIARG_CREATERESOURC
 
 static HRESULT APIENTRY D3D9_DestroyResource(HANDLE hDev, HANDLE hRes) { UNREFERENCED_PARAMETER(hDev); UNREFERENCED_PARAMETER(hRes); return S_OK; }
 
-/* D3D9 DDI: DrawPrimitive GÇö PM4 DRAW_INDEX_AUTO */
+/* D3D9 DDI: DrawPrimitive Gï¿½ï¿½ PM4 DRAW_INDEX_AUTO */
 static HRESULT APIENTRY D3D9_DrawPrimitive(HANDLE hDev, CONST D3DDDIARG_DRAWPRIMITIVE* pArgs, CONST UINT* pFlagBuffer)
 {
     PBC250_D3D9_DEVICE dev = &g_D3D9Device;
@@ -853,7 +952,7 @@ static HRESULT APIENTRY D3D9_DrawIndexedPrimitive(HANDLE hDev, CONST D3DDDIARG_D
     return S_OK;
 }
 
-/* D3D9 DDI: Present GÇö Flush + Flip display */
+/* D3D9 DDI: Present Gï¿½ï¿½ Flush + Flip display */
 static HRESULT APIENTRY D3D9_Present(HANDLE hDev, CONST D3DDDIARG_PRESENT* pArgs)
 {
     PBC250_D3D9_DEVICE dev = &g_D3D9Device;
@@ -885,7 +984,7 @@ static HRESULT APIENTRY D3D9_Present(HANDLE hDev, CONST D3DDDIARG_PRESENT* pArgs
     return S_OK;
 }
 
-/* D3D9 DDI: Flush GÇö submit command buffer */
+/* D3D9 DDI: Flush Gï¿½ï¿½ submit command buffer */
 static HRESULT APIENTRY D3D9_Flush(HANDLE hDev)
 {
     PBC250_D3D9_DEVICE dev = &g_D3D9Device;
@@ -894,15 +993,19 @@ static HRESULT APIENTRY D3D9_Flush(HANDLE hDev)
     if (dev->CmdBufferUsed == 0) return S_OK;
 
     /* Submit command buffer via IOCTL to KMD */
-    if (dev->KmdDevice != INVALID_HANDLE_VALUE) {
+    /* Format: { PA_lo, PA_hi, size_bytes, fence } */
+    if (dev->KmdDevice != INVALID_HANDLE_VALUE && dev->FramebufferGpuVa != 0) {
         ULONG submitData[4] = {0};
-        submitData[0] = (ULONG)(ULONG_PTR)dev->CommandBuffer;
-        submitData[1] = dev->CmdBufferUsed;
-        submitData[2] = (ULONG)dev->FenceValue;
-        submitData[3] = 0; /* GFX queue */
+        submitData[0] = (ULONG)(dev->FramebufferGpuVa & 0xFFFFFFFF);
+        submitData[1] = (ULONG)(dev->FramebufferGpuVa >> 32);
+        submitData[2] = dev->CmdBufferUsed;
+        submitData[3] = (ULONG)dev->FenceValue;
 
         DWORD ret = 0;
         DeviceIoControl(dev->KmdDevice, 0x80000880, submitData, sizeof(submitData), NULL, 0, &ret, NULL);
+
+        dev->FenceValue++;
+        dev->CmdBufferUsed = 0;
     }
 
     dev->CmdBufferUsed = 0;
@@ -923,13 +1026,13 @@ static HRESULT APIENTRY D3D9_Lock(HANDLE hDev, D3DDDIARG_LOCK* pArgs)
 
     /* Map GPU memory for CPU access via KMD IOCTL 0x80000848 */
     if (dev->KmdDevice != INVALID_HANDLE_VALUE) {
-        ULONG mapIn[3] = {0};
+        ULONG64 mapIn[3] = {0};
         ULONG64 mapOut[2] = {0};
         DWORD ret = 0;
         
-        mapIn[0] = (ULONG)(ULONG_PTR)pArgs->hResource;
-        mapIn[1] = 0;      /* Offset */
-        mapIn[2] = 4096;   /* Size */
+        mapIn[0] = (ULONG64)(UINT_PTR)pArgs->hResource;  /* Handle */
+        mapIn[1] = 0;                                      /* Offset */
+        mapIn[2] = 4096;                                   /* Size */
         
         if (DeviceIoControl(dev->KmdDevice, 0x80000848,
                            mapIn, sizeof(mapIn),
@@ -1044,17 +1147,19 @@ static HRESULT APIENTRY D3D9_DestroyQuery(HANDLE h, HANDLE q) { UNREFERENCED_PAR
 static HRESULT APIENTRY D3D9_IssueQuery(HANDLE h, CONST D3DDDIARG_ISSUEQUERY* p) { UNREFERENCED_PARAMETER(h); UNREFERENCED_PARAMETER(p); return S_OK; }
 
 /* D3D9 entry point */
-__declspec(dllexport) HRESULT APIENTRY OpenAdapter(D3DDDIARG_OPENADAPTER* pArgs)
+extern "C" HRESULT APIENTRY OpenAdapter(D3DDDIARG_OPENADAPTER* pArgs)
 {
-    if (!pArgs) return E_INVALIDARG;
+    if (!pArgs || !pArgs->pAdapterFuncs) return E_INVALIDARG;
     OutputDebugStringA("BC-250 UMD: D3D9 OpenAdapter\n");
+    pArgs->pAdapterFuncs->pfnGetCaps = D3D9_GetCaps;
     pArgs->pAdapterFuncs->pfnCreateDevice = D3D9_CreateDevice;
     pArgs->pAdapterFuncs->pfnCloseAdapter = D3D9_CloseAdapter;
+    pArgs->DriverVersion = D3D_UMD_INTERFACE_VERSION;
     return S_OK;
 }
 
 /* ============================================================================
-   PM4 State Packets GÇö GPU render state configuration
+   PM4 State Packets Gï¿½ï¿½ GPU render state configuration
    
    These packets tell the GPU how to render:
    - Viewport: screen region for rendering
@@ -1103,7 +1208,7 @@ static void Bc250WritePm4State(PBC250_D3D9_DEVICE dev, ULONG opcode, ULONG reg, 
     dev->CmdBufferUsed += (2 + count) * sizeof(ULONG);
 }
 
-/* D3D9 DDI: SetViewport GÇö PM4 SET_CONTEXT_REG for viewport */
+/* D3D9 DDI: SetViewport Gï¿½ï¿½ PM4 SET_CONTEXT_REG for viewport */
 static HRESULT APIENTRY D3D9_SetViewport(HANDLE hDev, CONST D3DDDIARG_VIEWPORTINFO* pArgs)
 {
     PBC250_D3D9_DEVICE dev = &g_D3D9Device;
@@ -1137,7 +1242,7 @@ static HRESULT APIENTRY D3D9_SetViewport(HANDLE hDev, CONST D3DDDIARG_VIEWPORTIN
     return S_OK;
 }
 
-/* D3D9 DDI: SetScissorRect GÇö PM4 scissor rectangle */
+/* D3D9 DDI: SetScissorRect Gï¿½ï¿½ PM4 scissor rectangle */
 static HRESULT APIENTRY D3D9_SetScissorRect(HANDLE hDev, CONST RECT* pRect)
 {
     PBC250_D3D9_DEVICE dev = &g_D3D9Device;
@@ -1160,7 +1265,7 @@ static HRESULT APIENTRY D3D9_SetScissorRect(HANDLE hDev, CONST RECT* pRect)
     return S_OK;
 }
 
-/* D3D9 DDI: SetRenderTarget GÇö set render target */
+/* D3D9 DDI: SetRenderTarget Gï¿½ï¿½ set render target */
 static HRESULT APIENTRY D3D9_SetRenderTarget(HANDLE hDev, CONST D3DDDIARG_SETRENDERTARGET* pArgs)
 {
     PBC250_D3D9_DEVICE dev = &g_D3D9Device;
@@ -1176,7 +1281,7 @@ static HRESULT APIENTRY D3D9_SetRenderTarget(HANDLE hDev, CONST D3DDDIARG_SETREN
     return S_OK;
 }
 
-/* D3D9 DDI: Clear GÇö clear render target / depth buffer */
+/* D3D9 DDI: Clear Gï¿½ï¿½ clear render target / depth buffer */
 static HRESULT APIENTRY D3D9_Clear(HANDLE hDev, CONST D3DDDIARG_CLEAR* pArgs, UINT NumRect, CONST RECT* pRect)
 {
     PBC250_D3D9_DEVICE dev = &g_D3D9Device;
@@ -1213,7 +1318,7 @@ static HRESULT APIENTRY D3D9_Clear(HANDLE hDev, CONST D3DDDIARG_CLEAR* pArgs, UI
 }
 
 /* ============================================================================
-   Display Mode Enumeration GÇö Supported resolutions and refresh rates
+   Display Mode Enumeration Gï¿½ï¿½ Supported resolutions and refresh rates
 =========================================================================== */
 
 typedef struct _BC250_DISPLAY_MODE {
@@ -1248,7 +1353,7 @@ static const BC250_DISPLAY_MODE g_SupportedModes[] = {
 #define BC250_NUM_MODES (sizeof(g_SupportedModes) / sizeof(g_SupportedModes[0]))
 
 /* ============================================================================
-   Shader Parse Stub GÇö DXBC header detection and logging
+   Shader Parse Stub Gï¿½ï¿½ DXBC header detection and logging
 =========================================================================== */
 
 #define DXBC_MAGIC  0x43425844  /* 'DXBC' */

@@ -138,7 +138,7 @@ if errorlevel 1 (
 )
 
 echo Linking UMD...
-link.exe /DLL /OUT:"%OUTPUT_DIR%\amdbc250umd64.dll" amdbc250_umd_v46.obj ^
+link.exe /DLL /DEF:"%SRC_DIR%\umd\amdbc250_umd.def" /OUT:"%OUTPUT_DIR%\amdbc250umd64.dll" amdbc250_umd_v46.obj ^
   d3d12.lib dxgi.lib dxguid.lib user32.lib ^
   /LIBPATH:"%WDK_ROOT%\Lib\%WDK_VERSION%\um\x64" ^
   /LIBPATH:"%WDK_ROOT%\Lib\%WDK_VERSION%\ucrt\x64"
