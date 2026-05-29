@@ -1,97 +1,102 @@
 # AMD BC-250 Windows Driver - Status Report
 
-**Data:** 2026-05-28
+**Data:** 2026-05-29
 **Versija:** v4.3.0.0
+**Projektas:** Windows GPU driver for AMD BC-250 (Cyan Skillfish / RDNA2 / GFX1013)
 
 ---
 
-## ✅ Ką padarėme (15 komponentų)
+## ✅ Ką padarėme (30 komponentų)
 
 ### KMD (Kernel-Mode Driver) — `atikmdag.sys` (40 KB)
+
 | # | Komponentas | Failas | Statusas |
 |---|-------------|--------|----------|
-| 1 | WDDM DDI callbacks | `kmd.c` | ✅ Pilnas |
+| 1 | WDDM 2.x DDI callbacks | `kmd.c` | ✅ Pilnas |
 | 2 | Hardware init (GFX10, DCN 2.1) | `hw_init.c` | ✅ Pilnas |
-| 3 | IOCTL dispatch (22 handler) | `kmd.c` | ✅ Pilnas |
+| 3 | IOCTL dispatch (24 handler) | `kmd.c` | ✅ Pilnas |
 | 4 | Ring buffers + interrupts | `kmd.c` | ✅ Pilnas |
 | 5 | SDMA copy engine | `kmd.c` | ✅ Pilnas |
 | 6 | TDR reset (6 žingsnių) | `kmd.c` | ✅ Pilnas |
 | 7 | EDID parsing | `kmd.c` | ✅ Pilnas |
 | 8 | Hotplug detection | `kmd.c` | ✅ Pilnas |
-| 9 | Power/thermal management | `power.c` | ✅ Pilnas |
-| 10 | GPU virtual memory | `vm.c` | ✅ Pilnas |
-| 11 | 40 CU unlock | `kmd.c` | ✅ Pilnas |
+| 9 | VGA fallback (640x480) | `hw_init.c` | ✅ Pilnas |
+| 10 | 40 CU unlock | `kmd.c` | ✅ Pilnas |
+| 11 | Power/thermal management | `power.c` | ✅ Pilnas |
+| 12 | GPU virtual memory | `vm.c` | ✅ Pilnas |
+| 13 | PM4 Command Queue (fence event) | `kmd.c` | ✅ Pilnas |
 
 ### UMD (User-Mode Driver) — `amdbc250umd64.dll` (106 KB)
+
 | # | Komponentas | Statusas |
 |---|-------------|----------|
-| 12 | D3D9 DDI (DrawPrimitive + PM4) | ✅ Pilnas |
-| 13 | D3D12 DDI stub'ai | ✅ Pilnas |
-| 14 | DMA command buffer alloc | ✅ Pilnas |
-| 15 | Present flip | ✅ Pilnas |
+| 14 | D3D9 DDI (45+ funkcijų) | ✅ Pilnas |
+| 15 | DrawPrimitive + PM4 packets | ✅ Pilnas |
+| 16 | DMA command buffer alloc | ✅ Pilnas |
+| 17 | Present + display flip | ✅ Pilnas |
+| 18 | GetCaps (adapter capabilities) | ✅ Pilnas |
 
 ### Vulkan ICD — `amdbc250vulkan.dll` (133 KB)
+
 | # | Komponentas | Statusas |
 |---|-------------|----------|
-| 16 | Vulkan 1.4 ICD | ✅ Sukompiluotas |
-| 17 | ACO shader wrapper | ✅ Sukompiluotas |
-| 18 | Mesa ACO克隆inta | ✅ 32 cpp failai |
+| 19 | Vulkan 1.4 ICD | ✅ Pilnas |
+| 20 | ACO shader compiler | ✅ SPIR-V → GFX10 ISA |
+| 21 | QueueSubmit (KMD IOCTL) | ✅ Pilnas |
+| 22 | QueuePresentKHR (display flip) | ✅ Pilnas |
 
 ### Build & Test
+
 | # | Komponentas | Statusas |
 |---|-------------|----------|
-| 19 | Auto build (VS2022 + WDK) | ✅ build.bat |
-| 20 | Auto signing (catalog + cert) | ✅ Automatinis |
-| 21 | IOCTL test tool (15 testų) | ✅ test-gpu-ioctls.c |
-| 22 | Vulkan ICD test | ✅ simple_test.exe |
+| 23 | Auto build (VS2022 + WDK) | ✅ build.bat |
+| 24 | Auto signing (catalog + cert) | ✅ Automatinis |
+| 25 | IOCTL test tool (15 testų) | ✅ test-gpu-ioctls.c |
+| 26 | Vulkan ICD test | ✅ simple_test.exe |
+| 27 | D3D9 triangle test | ✅ test-d3d9-triangle.c |
+
+### Documentation
+
+| # | Komponentas | Statusas |
+|---|-------------|----------|
+| 28 | README.md | ✅ Atnaujinta |
+| 29 | QUICK-START.md | ✅ Atnaujinta |
+| 30 | STATUS.md | ✅ Šis failas |
 
 ---
 
-## ⏳ Ką reikia padaryti (likę TODO)
+## ⏳ Ką darome DABAR
 
-### Aukščiausios svarbos
-| # | Užduotis | Sudėtingumas | Impact |
-|---|----------|-------------|--------|
-| 1 | **ACO pilna integracija** - pakeisti stub'ą tikru SPIR-V → ISA | Vidutinis | Didelis |
-| 2 | **DXVK integracija** - D3D9/10/11 → Vulkan translation | Vidutinis | Didelis |
-| 3 | **QueueSubmit pilna implementacija** - PM4 command recording | Vidutinis | Didelis |
-
-### Vidutinės svarbos
-| # | Užduotis | Sudėtingumas | Impact |
-|---|----------|-------------|--------|
-| 4 | **CreateBuffer/Image pilna** - GPU memory allocation per IOCTL | Lengvas | Vidutinis |
-| 5 | **Display mode enumeration** - IOCTL grąžina palaikomas rezoliucijas | Lengvas | Vidutinis |
-| 6 | **Shader cache** - diskuoti kompiliuotus shader'us | Vidutinis | Vidutinis |
-| 7 | **VKD3D-Proton integracija** - D3D12 → Vulkan | Sudėtingas | Didelis |
-
-### Žemos svarbos
-| # | Užduotis | Sudėtingumas | Impact |
-|---|----------|-------------|--------|
-| 8 | **Multi-monitor** - 4 display pipes palaikymas | Vidutinis | Žemas |
-| 9 | **Ray tracing** - RT core palaikymas | Labai sudėtingas | Žemas |
-| 10 | **GPU compute** - SDMA compute queue | Vidutinis | Žemas |
+### D3D9 UMD tobulinimas (kritinis)
+| Užduotis | Statusas | Svarba |
+|----------|----------|--------|
+| Pilnas CreateResource su teisingais parametrais | ⏳ Laukia | 🔴 |
+| Pilnas DrawPrimitive su tikrais PM4 | ⏳ Laukia | 🔴 |
+| Pilnas Present su framebuffer flip | ⏳ Laukia | 🔴 |
+| Shader compilation (DXBC → GFX10) | ⏳ Laukia | 🔴 |
+| Texture management | ⏳ Laukia | 🟡 |
+| Render target setup | ⏳ Laukia | 🟡 |
 
 ---
 
-## 💡 Ką dar galėtume padaryti
+## 📋 Planai (ateitis)
 
-### Trumpo laikotarpio (1-2 savaitės)
-1. **Pridėti `vkGetPhysicalDeviceProperties`** - GPU info grąžinimas
-2. **Pridėti `vkGetPhysicalDeviceMemoryProperties`** - atminties info
-3. **Pridėti `vkEnumerateDeviceExtensionProperties`** - palaikomos ext
-4. **Sukurti `vulkaninfo` testą** - patikrinti visus Vulkan capabilities
+### Trumpas laikotarpis (1-2 savaitės)
+1. **D3D9 UMD pilnas** - kad žaidimai veiktų per Windows D3D9 runtime
+2. **Vulkan ICD patobulinimas** - daugiau extensions ir features
+3. **Testavimas** - testuoti su realiais D3D9 žaidimais
 
-### Vidutinio laikotarpio (1-2 mėnesiai)
-1. **Integruoti DXVK** - D3D9/10/11 → Vulkan translation
-2. **Pilna QueueSubmit** - PM4 command recording + fence sync
-3. **Shader cache** - diskuoti kompiliuotus shader'us
-4. **VKD3D-Proton** - D3D12 → Vulkan translation
+### Vidutinis laikotarpis (2-4 savaitės)
+1. **D3D11 UMD** - D3D11 palaikymas
+2. **D3D12 UMD pilnas** - D3D12 palaikymas
+3. **Display mode enumeration** - daugiau rezoliucijų
+4. **Multi-monitor** - 4 display pipes palaikymas
 
-### Ilgo laikotarpio (3+ mėnesiai)
-1. **Pilnas Vulkan ICD** - visi 180+ extensions
-2. **OpenGL ICD** - Mesa radeonsi portas
+### Ilgas laikotarpis (1+ mėnesiai)
+1. **OpenGL ICD** - Mesa radeonsi portas
+2. **Ray tracing** - RT core palaikymas
 3. **GPU compute** - SDMA compute queue
-4. **Ray tracing** - RT core palaikymas
+4. **VKD3D-Proton** - D3D12 → Vulkan translation
 
 ---
 
@@ -100,12 +105,12 @@
 | Komponentas | Failai | Bendras dydis |
 |-------------|--------|---------------|
 | KMD source | 4 .c + 4 .h | ~215 KB |
-| UMD source | 1 .c | ~46 KB |
-| Vulkan ICD | 2 .c + 2 .h + 1 .def | ~42 KB |
-| Build output | 6 failai | ~290 KB |
+| UMD source | 1 .c | ~50 KB |
+| Vulkan ICD | 3 .c + 3 .h + 1 .def | ~65 KB |
+| Build output | 7 failai | ~300 KB |
 | Test tools | 5 failai | ~430 KB |
 | Docs | 4 .md | ~60 KB |
-| **Iš viso** | **~25 failai** | **~1.1 MB** |
+| **Iš viso** | **~30 failų** | **~1.1 MB** |
 
 ---
 
@@ -115,21 +120,24 @@
 ┌─────────────────────────────────────────────────────┐
 │              D3D9/10/11/12 Application               │
 ├─────────────────────────────────────────────────────┤
-│         DXVK / VKD3D-Proton (translation)            │
+│         Windows D3D9 Runtime (d3d9.dll)              │
+├─────────────────────────────────────────────────────┤
+│         BC-250 D3D9 UMD (amdbc250umd64.dll)         │
+│         ├── 45+ DDI functions                        │
+│         ├── DrawPrimitive → PM4 packets              │
+│         └── Present → KMD IOCTL flip                 │
 ├─────────────────────────────────────────────────────┤
 │         BC-250 Vulkan ICD (amdbc250vulkan.dll)       │
-│         ├── vkCreateGraphicsPipelines → ACO          │
-│         ├── vkQueueSubmit → KMD IOCTL                │
-│         └── vkCmdDraw → PM4 packets                  │
+│         ├── Shader compilation (SPIR-V → GFX10)     │
+│         ├── QueueSubmit → KMD IOCTL                  │
+│         └── QueuePresentKHR → display flip           │
 ├─────────────────────────────────────────────────────┤
 │         ACO Shader Compiler (Mesa)                   │
 │         └── SPIR-V → GFX10 ISA                      │
 ├─────────────────────────────────────────────────────┤
-│         BC-250 D3D9 UMD (amdbc250umd64.dll)          │
-│         └── DrawPrimitive → PM4                      │
-├─────────────────────────────────────────────────────┤
 │         BC-250 KMD (atikmdag.sys)                    │
-│         ├── IOCTL dispatch (22 handlers)             │
+│         ├── 24 IOCTL handlers                       │
+│         ├── PM4 Command Queue (fence event)          │
 │         ├── Ring buffers + interrupts                │
 │         ├── SDMA copy engine                         │
 │         ├── 40 CU unlock                             │
@@ -141,22 +149,10 @@
 
 ---
 
-## 📈 Projekto progresas
-
-| Data | Pasiekimas |
-|------|------------|
-| 2026-05-28 | Pradžia: KMD + UMD stub'ai |
-| 2026-05-28 | IOCTL dispatch (22 handler) |
-| 2026-05-28 | D3D9 DDI + PM4 DrawPrimitive |
-| 2026-05-28 | 40 CU unlock |
-| 2026-05-28 | Vulkan ICD + ACO wrapper |
-| 2026-05-28 | Visas build + sign pipeline |
-
----
-
 ## 🎯 Kitas žingsnis
 
-**Integruoti DXVK** - tai leistų D3D9/10/11 žaidimams veikti per Vulkan:
-1. Paimti DXVK source (zlib licencija)
-2. Susieti su mūsų Vulkan ICD
-3. Testuoti su paprastu D3D9 žaidimu
+**Tobulinti D3D9 UMD** kad žaidimai veiktų per Windows D3D9 runtime:
+1. Pilnas `CreateResource` su teisingais parametrais
+2. Pilnas `DrawPrimitive` su tikrais PM4 paketais
+3. Pilnas `Present` su framebuffer flip
+4. Shader compilation (DXBC → GFX10)

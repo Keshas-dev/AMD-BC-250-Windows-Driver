@@ -19,28 +19,32 @@ Windows GPU driver for AMD BC-250 (Cyan Skillfish / RDNA2 / GFX1013).
 ### Kernel-Mode Driver (KMD) — `atikmdag.sys`
 - WDDM 2.x DDI callbacks
 - GFX10 command processor initialization
-- 22 IOCTL handlers for UMD communication
+- 24 IOCTL handlers for UMD communication
 - SDMA copy engine
 - TDR reset recovery
 - EDID parsing + hotplug detection
 - 40 CU unlock (from duggasco/bc250-40cu-unlock)
 - Power/thermal management
+- PM4 Command Queue with fence event signaling
 
 ### User-Mode Driver (UMD) — `amdbc250umd64.dll`
-- D3D9 DDI with PM4 DrawPrimitive
-- D3D12 DDI stubs
-- DMA command buffer allocation
+- D3D9 DDI with 45+ functions
+- DrawPrimitive with PM4 packets
+- DMA command buffer allocation via KMD IOCTL
 - Display flip via KMD IOCTL
+- GetCaps for adapter capabilities
 
 ### Vulkan ICD — `amdbc250vulkan.dll`
-- Vulkan 1.4 API (stubs)
-- ACO shader compiler wrapper (Mesa)
-- QueueSubmit → KMD IOCTL
+- Vulkan 1.4 API (5 core functions)
+- ACO shader compiler (SPIR-V → GFX10 ISA)
+- QueueSubmit with KMD IOCTL + fence event
+- QueuePresentKHR with display flip
+- Buffer/Image creation via KMD IOCTL
 
-### Build System
-- Auto-detect Visual Studio 2022 + WDK
-- Auto catalog generation + signing
-- One-command build: `build.bat`
+### Shader Compiler — `bc250_shader.c`
+- SPIR-V → GFX10 ISA compilation
+- Vertex/Fragment/Compute/Geometry support
+- GFX10 ISA opcode definitions
 
 ## Quick Start
 
@@ -62,48 +66,18 @@ reg add "HKLM\SYSTEM\CurrentControlSet\Services\AMDBC250DreamV43" /v Enable40CU 
 # Reboot for 40 CUs (1.61x performance boost)
 ```
 
-## Project Structure
-
-```
-AMD-BC-250-Windows-Driver/
-├── src/
-│   ├── kmd/                    Kernel-Mode Driver (4 .c files)
-│   ├── umd/                    User-Mode Driver (D3D9 + D3D12)
-│   └── vulkan/                 Vulkan ICD + ACO wrapper
-├── inc/                        Headers (KMD, HW, IOCTL, D3D)
-├── inf/                        Driver installation
-├── output/                     Build output (signed)
-├── test-tools/                 Test applications
-├── docs/                       Documentation
-├── mesa-aco/                   Mesa ACO compiler (submodule)
-├── build.bat                   Build + sign script
-└── README.md
-```
-
 ## Architecture
 
 ```
-App → Vulkan/D3D9 → UMD → KMD IOCTL → GPU
-                  ↓
-            ACO Compiler (SPIR-V → GFX10 ISA)
+App → D3D9 Runtime → UMD D3D9 → KMD IOCTL → GPU
+App → Vulkan ICD → ACO Compiler → KMD IOCTL → GPU
 ```
 
 ## Known Limitations
 
-- Vulkan ICD: stub implementations (need full API)
-- ACO: placeholder (need Mesa integration)
-- D3D9: DrawPrimitive works, but no shader compilation
+- D3D9 UMD: 45+ DDI functions, but rendering pipeline incomplete
+- Vulkan ICD: 5 core functions, need more extensions
 - Display: VGA fallback + 1080p (needs tuning)
-
-## Linux Comparison
-
-| Feature | Linux (amdgpu) | Windows (Dream) |
-|---------|---------------|-----------------|
-| Vulkan | RADV ✅ | ICD stub ⚠️ |
-| OpenGL | radeonsi ✅ | Not implemented ❌ |
-| D3D12 | DXVK ✅ | Stub ⚠️ |
-| D3D9 | Gallium Nine ✅ | D3D9 DDI ⚠️ |
-| Compute | Broken HW ❌ | Disabled (quirk) |
 
 ## License
 
