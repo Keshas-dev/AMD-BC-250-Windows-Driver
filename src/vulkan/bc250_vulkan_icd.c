@@ -49,7 +49,13 @@ static VkResult bc250_init_device(VkDevice device)
     
     dev->kmdDevice = bc250_open_kmd();
     if (dev->kmdDevice == INVALID_HANDLE_VALUE) {
-        OutputDebugStringA("BC-250 Vulkan: WARNING - KMD not available\n");
+        DWORD err = GetLastError();
+        char buf[256];
+        snprintf(buf, sizeof(buf), "BC-250 Vulkan: KMD open FAILED (error %lu, handle=%p)\n",
+                 err, (void*)dev->kmdDevice);
+        OutputDebugStringA(buf);
+    } else {
+        OutputDebugStringA("BC-250 Vulkan: KMD opened OK\n");
     }
     
     dev->nextGpuVa = 0x100000000ULL;
@@ -480,7 +486,38 @@ VkResult VKAPI_CALL bc250_vkResetCommandBuffer(VkCommandBuffer commandBuffer, Vk
 #define IT_EVENT_WRITE_EOP  0x47
 #define IT_NOP              0x10
 
-/* Queue Submit with PM4 command recording */
+/* KMD IOCTL codes */
+#define IOCTL_AMDBC250_ALLOC_DMA_BUFFER  0x80000930
+#define IOCTL_AMDBC250_FREE_DMA_BUFFER   0x80000934
+#define IOCTL_AMDBC250_SUBMIT_COMMANDS   0x80000880
+#define IOCTL_AMDBC250_WAIT_FENCE        0x80000884
+
+/* Allocate DMA buffer from KMD: returns CPU VA and GPU PA */
+static PVOID bc250_alloc_dma(HANDLE kmd, ULONG size, uint64_t *outPa)
+{
+    ULONG allocIn[1] = {size};
+    ULONG64 allocOut[2] = {0};
+    DWORD ret = 0;
+    BOOL ok = DeviceIoControl(kmd, IOCTL_AMDBC250_ALLOC_DMA_BUFFER,
+                        allocIn, sizeof(allocIn), allocOut, sizeof(allocOut), &ret, NULL);
+    if (!ok) {
+        char buf[128];
+        snprintf(buf, sizeof(buf), "BC-250 Vulkan: AllocDMA IOCTL failed (err=%lu)\n", GetLastError());
+        OutputDebugStringA(buf);
+        return NULL;
+    }
+    *outPa = allocOut[0];
+    return (PVOID)(UINT_PTR)allocOut[1];
+}
+
+static void bc250_free_dma(HANDLE kmd, PVOID va)
+{
+    ULONG64 freeIn[1] = {(ULONG64)(UINT_PTR)va};
+    DWORD ret = 0;
+    DeviceIoControl(kmd, IOCTL_AMDBC250_FREE_DMA_BUFFER, freeIn, sizeof(freeIn), NULL, 0, &ret, NULL);
+}
+
+/* Queue Submit — writes PM4 commands to DMA buffer and submits as IB */
 VkResult VKAPI_CALL bc250_vkQueueSubmit(
     VkQueue queue,
     uint32_t submitCount,
@@ -494,24 +531,53 @@ VkResult VKAPI_CALL bc250_vkQueueSubmit(
     
     BC250_VK_DEVICE* dev = &g_Device;
     
-    /* Build PM4 EOP fence packet */
-    if (dev->kmdDevice != INVALID_HANDLE_VALUE) {
-        ULONG submitData[4] = {0};
-        submitData[0] = 0;  /* DmaBufferGpuVa */
-        submitData[1] = 0;  /* DmaBufferSize */
-        submitData[2] = dev->fenceValue;
-        submitData[3] = 0;  /* GFX queue */
-        
-        DWORD ret = 0;
-        DeviceIoControl(dev->kmdDevice, 0x80000880, submitData, sizeof(submitData),
-                        NULL, 0, &ret, NULL);
-        
-        dev->fenceValue++;
-        
-        char buf[128];
-        snprintf(buf, sizeof(buf), "BC-250 Vulkan: QueueSubmit fence=%u\n", dev->fenceValue - 1);
-        OutputDebugStringA(buf);
+    if (dev->kmdDevice == INVALID_HANDLE_VALUE) return VK_SUCCESS;
+    
+    /* Allocate DMA buffer for PM4 commands (4KB) */
+    uint64_t bufPa = 0;
+    PVOID bufVa = bc250_alloc_dma(dev->kmdDevice, 4096, &bufPa);
+    if (!bufVa) {
+        OutputDebugStringA("BC-250 Vulkan: QueueSubmit - DMA alloc failed\n");
+        return VK_ERROR_OUT_OF_DEVICE_MEMORY;
     }
+    
+    /* Write PM4 commands to buffer */
+    volatile PULONG cmd = (volatile PULONG)bufVa;
+    ULONG offset = 0;
+    
+    /* NOP padding */
+    cmd[offset++] = PM4_TYPE3_HDR(IT_NOP, 0);
+    
+    /* EOP fence packet — signals completion */
+    cmd[offset++] = PM4_TYPE3_HDR(IT_EVENT_WRITE_EOP, 4);
+    cmd[offset++] = 0xA0000246;  /* EVENT_TYPE=EOP, EVENT_INDEX=5, DATA_SEL=1, INT_SEL=1 */
+    cmd[offset++] = 0;           /* Fence addr low (KMD handles this) */
+    cmd[offset++] = 0;           /* Fence addr high */
+    cmd[offset++] = (ULONG)((uint64_t)dev->fenceValue & 0xFFFFFFFF);  /* Fence data low */
+    cmd[offset++] = (ULONG)((uint64_t)dev->fenceValue >> 32);          /* Fence data high */
+    
+    ULONG cmdBytes = offset * sizeof(ULONG);
+    
+    /* Submit IB: {PA_lo, PA_hi, size, fence} */
+    ULONG submitData[4] = {0};
+    submitData[0] = (ULONG)(bufPa & 0xFFFFFFFF);
+    submitData[1] = (ULONG)(bufPa >> 32);
+    submitData[2] = cmdBytes;
+    submitData[3] = dev->fenceValue;
+    
+    DWORD ret = 0;
+    DeviceIoControl(dev->kmdDevice, IOCTL_AMDBC250_SUBMIT_COMMANDS,
+                    submitData, sizeof(submitData), NULL, 0, &ret, NULL);
+    
+    dev->fenceValue++;
+    
+    char buf[128];
+    snprintf(buf, sizeof(buf), "BC-250 Vulkan: QueueSubmit IB PA=0x%llX size=%u fence=%u\n",
+             bufPa, cmdBytes, dev->fenceValue - 1);
+    OutputDebugStringA(buf);
+    
+    /* Free DMA buffer after submit */
+    bc250_free_dma(dev->kmdDevice, bufVa);
     
     return VK_SUCCESS;
 }
