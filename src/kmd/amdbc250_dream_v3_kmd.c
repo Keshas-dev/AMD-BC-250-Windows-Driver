@@ -186,6 +186,9 @@ DriverEntry(
         RtlCopyMemory(&g_DeviceName, &devName, sizeof(UNICODE_STRING));
         RtlCopyMemory(&g_SymlinkName, &symLink, sizeof(UNICODE_STRING));
 
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                   "AMDBC250-DREAM-V4.3: Creating control device...\n"));
+
         Status = IoCreateDevice(
             DriverObject,
             sizeof(DREAM_V3_DEVICE_EXTENSION),
@@ -205,8 +208,20 @@ DriverEntry(
             KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                        "AMDBC250-DREAM-V4.3: Control device created: %wZ\n", &devName));
         } else {
-            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
-                       "AMDBC250-DREAM-V4.3: Control device creation failed: 0x%08X\n", Status));
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
+                       "AMDBC250-DREAM-V4.3: IoCreateDevice FAILED: 0x%08X\n", Status));
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
+                       "AMDBC250-DREAM-V4.3: DriverObject=%p, DevExtSize=%u\n",
+                       DriverObject, sizeof(DREAM_V3_DEVICE_EXTENSION)));
+
+            /* Write error to registry so user-mode can read it */
+            {
+                UNICODE_STRING valName;
+                RtlInitUnicodeString(&valName, L"IoCreateDeviceFailed");
+                ULONG errorVal = (ULONG)Status;
+                ZwSetValueKey(RegistryPath, &valName, 0, REG_DWORD, &errorVal, sizeof(errorVal));
+            }
+
             Status = STATUS_SUCCESS; /* Non-fatal */
         }
     }
