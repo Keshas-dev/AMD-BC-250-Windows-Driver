@@ -1076,7 +1076,7 @@ DreamV3WriteEopFence(
     volatile PULONG Ring = (volatile PULONG)DevExt->GfxRing.VirtualAddress;
     ULONG WPtr = DevExt->GfxRing.WritePointer;
     PHYSICAL_ADDRESS FencePA = DevExt->GlobalFence.PhysicalAddress;
-    ULONG TotalSize = 7 * sizeof(ULONG);  /* EOP packet is 7 DWORDs */
+    ULONG TotalSize = 6 * sizeof(ULONG);  /* EOP packet is 6 DWORDs */
 
     if (Ring == NULL) return;
 
@@ -1092,16 +1092,24 @@ DreamV3WriteEopFence(
         WPtr = 0;
     }
 
-    /* IT_EVENT_WRITE_EOP packet */
-    ULONG Header = PM4_TYPE3_HDR(IT_EVENT_WRITE_EOP, 6);
+    /* IT_EVENT_WRITE_EOP packet — 6 DWORDs total (count=4 in header = 5 payload + 1 header = 6)
+     * Format per AMD GPU ISA:
+     *   DWORD 0: PM4 header
+     *   DWORD 1: Control (EVENT_TYPE | EVENT_INDEX | DATA_SEL | INT_SEL)
+     *   DWORD 2: Address low
+     *   DWORD 3: Address high
+     *   DWORD 4: Data low (fence value low)
+     *   DWORD 5: Data high (fence value high)
+     */
+    ULONG Header = PM4_TYPE3_HDR(IT_EVENT_WRITE_EOP, 4);
     Ring[WPtr / sizeof(ULONG)] = Header;
     WPtr += sizeof(ULONG);
     
-    /* Event type: EOP */
-    Ring[WPtr / sizeof(ULONG)] = EVENT_TYPE_EOP;
+    /* Control: EVENT_TYPE=0x46(EOP) | EVENT_INDEX=5 | DATA_SEL=1(write fence) | INT_SEL=1(interrupt) */
+    Ring[WPtr / sizeof(ULONG)] = 0xA0000246;
     WPtr += sizeof(ULONG);
     
-    /* Address (64-bit physical) */
+    /* Address (64-bit physical, DWORD aligned) */
     Ring[WPtr / sizeof(ULONG)] = (ULONG)(FencePA.QuadPart & 0xFFFFFFFC);
     WPtr += sizeof(ULONG);
     Ring[WPtr / sizeof(ULONG)] = (ULONG)(FencePA.QuadPart >> 32);
