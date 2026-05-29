@@ -1,0 +1,29 @@
+DLL_PROCESS_ATTACH
+NegotiateLoaderICDInterfaceVersion: version=4
+NegotiateLoaderICDInterfaceVersion: version=4
+EnumInstanceExtProps called: pLayerName=(null) pPropertyCount=00000094AF368460 pProperties=0000000000000000
+NegotiateLoaderICDInterfaceVersion: version=4
+EnumInstanceExtProps called: pLayerName=(null) pPropertyCount=00000094AF36BE50 pProperties=0000000000000000
+EnumInstanceExtProps called: pLayerName=(null) pPropertyCount=00000094AF36BCE0 pProperties=0000000000000000
+DLL_PROCESS_ATTACH
+NegotiateLoaderICDInterfaceVersion: version=4
+NegotiateLoaderICDInterfaceVersion: version=4
+EnumInstanceExtProps called: pLayerName=(null) pPropertyCount=000000A1D5DF8380 pProperties=0000000000000000
+NegotiateLoaderICDInterfaceVersion: version=4
+EnumInstanceExtProps called: pLayerName=(null) pPropertyCount=000000A1D5DFBD70 pProperties=0000000000000000
+EnumInstanceExtProps called: pLayerName=(null) pPropertyCount=000000A1D5DFBC00 pProperties=0000000000000000
+DLL_PROCESS_DETACH
+DLL_PROCESS_ATTACH
+NegotiateLoaderICDInterfaceVersion: version=4
+NegotiateLoaderICDInterfaceVersion: version=4
+EnumInstanceExtProps called: pLayerName=(null) pPropertyCount=000000AA552F8520 pProperties=0000000000000000
+NegotiateLoaderICDInterfaceVersion: version=4
+EnumInstanceExtProps called: pLayerName=(null) pPropertyCount=000000AA552FBF10 pProperties=0000000000000000
+EnumInstanceExtProps called: pLayerName=(null) pPropertyCount=000000AA552FBDA0 pProperties=0000000000000000
+DLL_PROCESS_ATTACH
+NegotiateLoaderICDInterfaceVersion: version=4
+NegotiateLoaderICDInterfaceVersion: version=4
+EnumInstanceExtProps called: pLayerName=(null) pPropertyCount=000000275BAF8460 pProperties=0000000000000000
+NegotiateLoaderICDInterfaceVersion: version=4
+EnumInstanceExtProps called: pLayerName=(null) pPropertyCount=000000275BAFBE50 pProperties=0000000000000000
+EnumInstanceExtProps called: pLayerName=(null) pPropertyCount=000000275BAFBCE0 pProperties=0000000000000000

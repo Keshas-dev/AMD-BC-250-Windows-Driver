@@ -1,8 +1,8 @@
 {
     "file_format_version": "1.0.0",
     "ICD": {
-        "library_path": "amdbc250vulkan.dll",
-        "api_version": "1.4.0",
+        "library_path": "C:\\AMD-BC-250\\AMD-BC-250-Windows-Driver-main\\output\\amdbc250vulkan.dll",
+        "api_version": "1.0.0",
         "is_portability_driver": false
     }
 }
