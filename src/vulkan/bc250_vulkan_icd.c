@@ -945,62 +945,68 @@ typedef struct VkIcdDispatchTable {
 } VkIcdDispatchTable;
 
 /* Exported dispatch table for ICD loading */
-__declspec(dllexport) VkIcdDispatchTable* VKAPI_CALL vk_icdGetInstanceProcAddr(VkInstance instance, const char* pName)
+__declspec(dllexport) void* VKAPI_CALL vk_icdGetInstanceProcAddr(VkInstance instance, const char* pName)
 {
-    static VkIcdDispatchTable table = {0};
+    UNREFERENCED_PARAMETER(instance);
     
-    if (!table.CreateInstance) {
-        table.CreateInstance = bc250_vkCreateInstance;
-        table.DestroyInstance = bc250_vkDestroyInstance;
-        table.EnumeratePhysicalDevices = bc250_vkEnumeratePhysicalDevices;
-        table.CreateDevice = bc250_vkCreateDevice;
-        table.DestroyDevice = bc250_vkDestroyDevice;
-        table.GetDeviceQueue = bc250_vkGetDeviceQueue;
-        table.AllocateMemory = bc250_vkAllocateMemory;
-        table.FreeMemory = bc250_vkFreeMemory;
-        table.MapMemory = bc250_vkMapMemory;
-        table.UnmapMemory = bc250_vkUnmapMemory;
-        table.CreateBuffer = bc250_vkCreateBuffer;
-        table.DestroyBuffer = bc250_vkDestroyBuffer;
-        table.CreateFence = bc250_vkCreateFence;
-        table.DestroyFence = bc250_vkDestroyFence;
-        table.GetFenceStatus = bc250_vkGetFenceStatus;
-        table.WaitForFences = bc250_vkWaitForFences;
-        table.ResetFences = bc250_vkResetFences;
-        table.CreateCommandPool = bc250_vkCreateCommandPool;
-        table.DestroyCommandPool = bc250_vkDestroyCommandPool;
-        table.AllocateCommandBuffers = bc250_vkAllocateCommandBuffers;
-        table.FreeCommandBuffers = bc250_vkFreeCommandBuffers;
-        table.BeginCommandBuffer = bc250_vkBeginCommandBuffer;
-        table.EndCommandBuffer = bc250_vkEndCommandBuffer;
-        table.ResetCommandBuffer = bc250_vkResetCommandBuffer;
-        table.QueueSubmit = bc250_vkQueueSubmit;
-        table.QueueWaitIdle = bc250_vkQueueWaitIdle;
-        table.DeviceWaitIdle = bc250_vkDeviceWaitIdle;
-        table.CreateGraphicsPipelines = bc250_vkCreateGraphicsPipelines;
-        table.DestroyPipeline = bc250_vkDestroyPipeline;
-        table.QueuePresentKHR = bc250_vkQueuePresentKHR;
-        table.CmdPipelineBarrier = bc250_vkCmdPipelineBarrier;
-        table.CmdBindPipeline = bc250_vkCmdBindPipeline;
-        table.CmdDraw = bc250_vkCmdDraw;
-        table.CmdDrawIndexed = bc250_vkCmdDrawIndexed;
-        table.CmdDispatch = bc250_vkCmdDispatch;
-        table.CmdCopyBuffer = bc250_vkCmdCopyBuffer;
-        table.CmdCopyImage = bc250_vkCmdCopyImage;
-        table.CmdClearColorImage = bc250_vkCmdClearColorImage;
-        table.CmdClearDepthStencilImage = bc250_vkCmdClearDepthStencilImage;
-        table.CmdSetViewport = bc250_vkCmdSetViewport;
-        table.CmdSetScissor = bc250_vkCmdSetScissor;
-        table.CmdBindVertexBuffers = bc250_vkCmdBindVertexBuffers;
-        table.CmdBindIndexBuffer = bc250_vkCmdBindIndexBuffer;
-        table.CmdBindDescriptorSets = bc250_vkCmdBindDescriptorSets;
-        table.CmdPushConstants = bc250_vkCmdPushConstants;
-    }
+    if (!pName) return NULL;
     
-    return &table;
+    /* Global-level functions */
+    if (!strcmp(pName, "vkCreateInstance"))            return (void*)bc250_vkCreateInstance;
+    if (!strcmp(pName, "vkEnumerateInstanceExtensionProperties")) return NULL;
+    if (!strcmp(pName, "vkEnumerateInstanceLayerProperties")) return NULL;
+    
+    /* Instance-level functions */
+    if (!strcmp(pName, "vkDestroyInstance"))           return (void*)bc250_vkDestroyInstance;
+    if (!strcmp(pName, "vkEnumeratePhysicalDevices"))  return (void*)bc250_vkEnumeratePhysicalDevices;
+    if (!strcmp(pName, "vkCreateDevice"))              return (void*)bc250_vkCreateDevice;
+    if (!strcmp(pName, "vkDestroyDevice"))             return (void*)bc250_vkDestroyDevice;
+    if (!strcmp(pName, "vkGetDeviceQueue"))            return (void*)bc250_vkGetDeviceQueue;
+    if (!strcmp(pName, "vkAllocateMemory"))            return (void*)bc250_vkAllocateMemory;
+    if (!strcmp(pName, "vkFreeMemory"))                return (void*)bc250_vkFreeMemory;
+    if (!strcmp(pName, "vkMapMemory"))                 return (void*)bc250_vkMapMemory;
+    if (!strcmp(pName, "vkUnmapMemory"))               return (void*)bc250_vkUnmapMemory;
+    if (!strcmp(pName, "vkCreateBuffer"))              return (void*)bc250_vkCreateBuffer;
+    if (!strcmp(pName, "vkDestroyBuffer"))             return (void*)bc250_vkDestroyBuffer;
+    if (!strcmp(pName, "vkCreateFence"))               return (void*)bc250_vkCreateFence;
+    if (!strcmp(pName, "vkDestroyFence"))              return (void*)bc250_vkDestroyFence;
+    if (!strcmp(pName, "vkGetFenceStatus"))            return (void*)bc250_vkGetFenceStatus;
+    if (!strcmp(pName, "vkWaitForFences"))             return (void*)bc250_vkWaitForFences;
+    if (!strcmp(pName, "vkResetFences"))               return (void*)bc250_vkResetFences;
+    if (!strcmp(pName, "vkCreateCommandPool"))         return (void*)bc250_vkCreateCommandPool;
+    if (!strcmp(pName, "vkDestroyCommandPool"))        return (void*)bc250_vkDestroyCommandPool;
+    if (!strcmp(pName, "vkAllocateCommandBuffers"))    return (void*)bc250_vkAllocateCommandBuffers;
+    if (!strcmp(pName, "vkFreeCommandBuffers"))        return (void*)bc250_vkFreeCommandBuffers;
+    if (!strcmp(pName, "vkBeginCommandBuffer"))        return (void*)bc250_vkBeginCommandBuffer;
+    if (!strcmp(pName, "vkEndCommandBuffer"))          return (void*)bc250_vkEndCommandBuffer;
+    if (!strcmp(pName, "vkResetCommandBuffer"))        return (void*)bc250_vkResetCommandBuffer;
+    if (!strcmp(pName, "vkQueueSubmit"))               return (void*)bc250_vkQueueSubmit;
+    if (!strcmp(pName, "vkQueueWaitIdle"))             return (void*)bc250_vkQueueWaitIdle;
+    if (!strcmp(pName, "vkDeviceWaitIdle"))            return (void*)bc250_vkDeviceWaitIdle;
+    if (!strcmp(pName, "vkCreateGraphicsPipelines"))   return (void*)bc250_vkCreateGraphicsPipelines;
+    if (!strcmp(pName, "vkDestroyPipeline"))           return (void*)bc250_vkDestroyPipeline;
+    if (!strcmp(pName, "vkQueuePresentKHR"))           return (void*)bc250_vkQueuePresentKHR;
+    if (!strcmp(pName, "vkCmdPipelineBarrier"))        return (void*)bc250_vkCmdPipelineBarrier;
+    if (!strcmp(pName, "vkCmdBindPipeline"))           return (void*)bc250_vkCmdBindPipeline;
+    if (!strcmp(pName, "vkCmdDraw"))                   return (void*)bc250_vkCmdDraw;
+    if (!strcmp(pName, "vkCmdDrawIndexed"))            return (void*)bc250_vkCmdDrawIndexed;
+    if (!strcmp(pName, "vkCmdDispatch"))               return (void*)bc250_vkCmdDispatch;
+    if (!strcmp(pName, "vkCmdCopyBuffer"))             return (void*)bc250_vkCmdCopyBuffer;
+    if (!strcmp(pName, "vkCmdCopyImage"))              return (void*)bc250_vkCmdCopyImage;
+    if (!strcmp(pName, "vkCmdClearColorImage"))        return (void*)bc250_vkCmdClearColorImage;
+    if (!strcmp(pName, "vkCmdClearDepthStencilImage")) return (void*)bc250_vkCmdClearDepthStencilImage;
+    if (!strcmp(pName, "vkCmdSetViewport"))            return (void*)bc250_vkCmdSetViewport;
+    if (!strcmp(pName, "vkCmdSetScissor"))             return (void*)bc250_vkCmdSetScissor;
+    if (!strcmp(pName, "vkCmdBindVertexBuffers"))      return (void*)bc250_vkCmdBindVertexBuffers;
+    if (!strcmp(pName, "vkCmdBindIndexBuffer"))        return (void*)bc250_vkCmdBindIndexBuffer;
+    if (!strcmp(pName, "vkCmdBindDescriptorSets"))     return (void*)bc250_vkCmdBindDescriptorSets;
+    if (!strcmp(pName, "vkCmdPushConstants"))          return (void*)bc250_vkCmdPushConstants;
+    
+    OutputDebugStringA("BC-250 Vulkan: Unknown function requested\n");
+    return NULL;
 }
 
-__declspec(dllexport) VkIcdDispatchTable* VKAPI_CALL vk_icdGetDeviceProcAddr(VkDevice device, const char* pName)
+__declspec(dllexport) void* VKAPI_CALL vk_icdGetDeviceProcAddr(VkDevice device, const char* pName)
 {
     UNREFERENCED_PARAMETER(device);
     return vk_icdGetInstanceProcAddr(NULL, pName);
