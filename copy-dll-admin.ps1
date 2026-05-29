@@ -1,0 +1,1 @@
+Start-Process -Verb RunAs powershell -ArgumentList '-NoProfile -Command "Copy-Item -LiteralPath ''C:\AMD-BC-250\AMD-BC-250-Windows-Driver-main\output\amdbc250umd64.dll'' -Destination ''C:\Windows\System32\amdbc250umd64.dll'' -Force; Write-Host ''Done! DLL copied.''; pause"'

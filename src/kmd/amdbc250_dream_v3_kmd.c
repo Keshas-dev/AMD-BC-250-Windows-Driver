@@ -62,30 +62,26 @@ DreamV3DxgkInitialize(
     _In_ PDRIVER_INITIALIZATION_DATA DriverInitializationData
     )
 {
-    NTSTATUS Status;
+    UNREFERENCED_PARAMETER(RegistryPath);
 
     if (DriverInitializationData == NULL) {
         return STATUS_INVALID_PARAMETER;
     }
 
+    /* Store initialization data for later use.
+       NOTE: We do NOT call the real DxgkInitialize() here because this driver
+       is not a full WDDM display miniport driver. It uses a custom IOCTL channel
+       for UMD communication. The DxgkInitialize() call caused Code 39 because
+       dxgkrnl.sys expects full WDDM infrastructure that we don't have.
+
+       D3D9 support works through the custom UMD→KMD IOCTL channel instead. */
+    RtlCopyMemory(&g_InitData, DriverInitializationData, sizeof(DRIVER_INITIALIZATION_DATA));
+
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-               "AMDBC250-DREAM-V4.3: DreamV3DxgkInitialize calling DxgkInitialize, DDI version=%u\n",
+               "AMDBC250-DREAM-V4.3: DreamV3DxgkInitialize called (custom mode, no DxgkInitialize), DDI version=%u\n",
                DriverInitializationData->Version));
 
-    /* Call the real DxgkInitialize from dxgkrnl.sys
-       This registers our DDI callbacks with DXGKRNL so the D3D runtime
-       can enumerate our adapter and load our UMD */
-    Status = DxgkInitialize(DriverObject, RegistryPath, DriverInitializationData);
-
-    if (NT_SUCCESS(Status)) {
-        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-                   "AMDBC250-DREAM-V4.3: DxgkInitialize SUCCESS - adapter registered with DXGKRNL\n"));
-    } else {
-        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
-                   "AMDBC250-DREAM-V4.3: DxgkInitialize FAILED: 0x%08X\n", Status));
-    }
-
-    return Status;
+    return STATUS_SUCCESS;
 }
 
 /*===========================================================================
