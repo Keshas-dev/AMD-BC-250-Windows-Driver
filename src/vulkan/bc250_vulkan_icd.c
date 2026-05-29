@@ -12,6 +12,7 @@
 #include "bc250_shader.h"
 #include <windows.h>
 #include <stdio.h>
+#include <string.h>
 
 /* Forward declaration */
 static void bc250_DestroyDevice(VkDevice device);

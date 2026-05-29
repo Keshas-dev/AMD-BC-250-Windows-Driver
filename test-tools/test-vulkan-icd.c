@@ -105,6 +105,13 @@ static int LoadIcd(void)
     pfnDestroyPipeline = (PFN_vkDestroyPipeline)pfnGetInstanceProcAddr(NULL, "vkDestroyPipeline");
     
     printf("[OK] ICD loaded and functions resolved\n");
+    
+    /* Check which function pointers are NULL */
+    printf("  CreateInstance=%p\n", (void*)pfnCreateInstance);
+    printf("  CreateDevice=%p\n", (void*)pfnCreateDevice);
+    printf("  QueueSubmit=%p\n", (void*)pfnQueueSubmit);
+    fflush(stdout);
+    
     return 1;
 }
 
@@ -122,6 +129,7 @@ int main(void)
     if (LoadIcd()) {
         passCount++;
         printf("[PASS] Load ICD\n\n");
+        fflush(stdout);
     } else {
         printf("[FAIL] Load ICD\n\n");
         return 1;
@@ -129,17 +137,22 @@ int main(void)
     
     /* Test 2: Create Instance */
     testCount++;
+    printf("Calling CreateInstance...\n"); fflush(stdout);
     VkInstance instance = NULL;
     VkResult result = pfnCreateInstance(NULL, NULL, &instance);
+    printf("  result=%d instance=%p\n", result, (void*)instance); fflush(stdout);
     if (result == VK_SUCCESS && instance) {
         passCount++;
         printf("[PASS] CreateInstance\n\n");
+        fflush(stdout);
     } else {
         printf("[FAIL] CreateInstance (result=%d)\n\n", result);
+        fflush(stdout);
     }
     
     /* Test 3: Create Device */
     testCount++;
+    printf("Calling CreateDevice...\n"); fflush(stdout);
     VkDevice device = NULL;
     result = pfnCreateDevice(NULL, NULL, NULL, &device);
     if (result == VK_SUCCESS && device) {
