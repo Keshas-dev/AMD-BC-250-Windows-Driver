@@ -1,20 +1,20 @@
 # AMD BC-250 Windows Driver - Status Report
 
 **Data:** 2026-05-29
-**Versija:** v4.3.1.0
+**Versija:** v4.3.2.0
 **Projektas:** Windows GPU driver for AMD BC-250 (Cyan Skillfish / RDNA2 / GFX1013)
 
 ---
 
 ## ✅ Ką padarėme (30+ komponentų)
 
-### KMD (Kernel-Mode Driver) — `atikmdag.sys` (40 KB)
+### KMD (Kernel-Mode Driver) — `atikmdag.sys` (41 KB)
 
 | # | Komponentas | Failas | Statusas |
 |---|-------------|--------|----------|
-| 1 | WDDM 2.x DDI callbacks | `kmd.c` | ✅ Pilnas |
+| 1 | WDDM 2.x DDI callbacks | `kmd.c` | ✅ Pilnas (bet ne WDDM režime) |
 | 2 | Hardware init (GFX10, DCN 2.1) | `hw_init.c` | ✅ Pilnas |
-| 3 | IOCTL dispatch (24 handler) | `kmd.c` | ✅ Pilnas |
+| 3 | IOCTL dispatch (24+ handler) | `kmd.c` | ✅ Pilnas |
 | 4 | Ring buffers + interrupts | `kmd.c` | ✅ Pilnas |
 | 5 | SDMA copy engine | `kmd.c` | ✅ Pilnas |
 | 6 | TDR reset (6 žingsnių) | `kmd.c` | ✅ Pilnas |
@@ -25,85 +25,100 @@
 | 11 | Power/thermal management | `power.c` | ✅ Pilnas |
 | 12 | GPU virtual memory | `vm.c` | ✅ Pilnas |
 | 13 | PM4 Command Queue (fence event) | `kmd.c` | ✅ Pilnas |
-| 14 | **SubmitCommands IOCTL: IB packet** | `kmd.c` | ✅ **TAISYTA** |
+| 14 | SubmitCommands: dual-format IB | `kmd.c` | ✅ **TAISYTA** |
+| 15 | DxgkDdiPresent (HUBPREQ) | `kmd.c` | ✅ Naujas |
+| 16 | DxgkDdiQueryChildRelations | `kmd.c` | ✅ Naujas |
 
-### UMD (User-Mode Driver) — `amdbc250umd64.dll` (108 KB)
-
-| # | Komponentas | Statusas |
-|---|-------------|----------|
-| 15 | D3D9 DDI (45+ funkcijų) | ✅ Pilnas |
-| 16 | **D3D9 GetCaps (nebe zero)** | ✅ **TAISYTA** |
-| 17 | **OpenAdapter export (pfnGetCaps)** | ✅ **TAISYTA** |
-| 18 | DrawPrimitive + PM4 packets | ✅ Pilnas |
-| 19 | DMA command buffer alloc | ✅ Pilnas |
-| 20 | Present + display flip | ✅ Pilnas |
-| 21 | **Flush: GPU VA, ne CPU adresas** | ✅ **TAISYTA** |
-| 22 | **CreateResource/Lock: teisingi IOCTL** | ✅ **TAISYTA** |
-
-### Vulkan ICD — `amdbc250vulkan.dll` (133 KB)
+### UMD (User-Mode Driver) — `amdbc250umd64.dll` (140 KB)
 
 | # | Komponentas | Statusas |
 |---|-------------|----------|
-| 23 | Vulkan 1.4 ICD | ✅ Pilnas |
-| 24 | ACO shader compiler | ✅ SPIR-V → GFX10 ISA |
-| 25 | QueueSubmit (KMD IOCTL) | ✅ Pilnas |
-| 26 | QueuePresentKHR (display flip) | ✅ Pilnas |
+| 17 | D3D9 DDI (45+ funkcijų) | ✅ Pilnas |
+| 18 | **D3D9 GetCaps (nebe zero)** | ✅ **TAISYTA** |
+| 19 | **OpenAdapter (ordinal 1)** | ✅ **TAISYTA** |
+| 20 | DrawPrimitive + PM4 packets | ✅ Pilnas |
+| 21 | DMA command buffer alloc | ✅ Pilnas |
+| 22 | Present + display flip | ✅ Pilnas |
+| 23 | **Flush: GPU PA, ne CPU adresas** | ✅ **TAISYTA** |
+| 24 | **CreateResource/Lock: teisingi IOCTL** | ✅ **TAISYTA** |
+| 25 | extern C + .def exports | ✅ **TAISYTA** |
+
+### Vulkan ICD — `amdbc250vulkan.dll` (137 KB)
+
+| # | Komponentas | Statusas |
+|---|-------------|----------|
+| 26 | Vulkan 1.4 ICD | ✅ Pilnas |
+| 27 | ACO shader compiler | ✅ SPIR-V → GFX10 ISA |
+| 28 | QueueSubmit (KMD IOCTL) | ✅ Pilnas |
+| 29 | QueuePresentKHR (display flip) | ✅ Pilnas |
 
 ### Build & Test
 
 | # | Komponentas | Statusas |
 |---|-------------|----------|
-| 27 | Auto build (VS2022 + WDK) | ✅ build.bat |
-| 28 | Auto signing (catalog + cert) | ✅ Automatinis |
-| 29 | IOCTL test tool (15 testų) | ✅ test-gpu-ioctls.c |
-| 30 | Vulkan ICD test | ✅ simple_test.exe |
-| 31 | D3D9 triangle test | ✅ test-d3d9-triangle.c |
-
-### Documentation
-
-| # | Komponentas | Statusas |
-|---|-------------|----------|
-| 32 | README.md | ✅ Atnaujinta |
-| 33 | QUICK-START.md | ✅ Atnaujinta |
-| 34 | STATUS.md | ✅ Šis failas |
+| 30 | Auto build (VS2022 + WDK) | ✅ build.bat |
+| 31 | Auto signing (catalog + cert) | ✅ Automatinis |
+| 32 | IOCTL test tool (15 testų) | ✅ test-gpu-ioctls.c |
+| 33 | Vulkan ICD test | ✅ simple_test.exe |
+| 34 | D3D9 triangle test | ✅ test-d3d9-triangle.c |
 
 ---
 
-## ⏳ Ką darome DABAR
+## 🔴 Kritinė problema: D3D9 nepasiekiamas per D3D9On12
 
-### D3D9 UMD tobulinimas (kritinis)
-| Užduotis | Statusas | Svarba | Pastabos |
-|----------|----------|--------|----------|
-| D3D9 GetCaps grąžina realius duomenis | ✅ Padaryta | 🔴 | D3DCAPS9 su RDNA2 savybėmis |
-| OpenAdapter exportas su pfnGetCaps | ✅ Padaryta | 🔴 | Trūko GetCaps, runtime negavo capsų |
-| SubmitCommands IOCTL: IB packet | ✅ Padaryta | 🔴 | KMD dabar rašo INDIRECT_BUFFER į ringą |
-| Flush: teisingas GPU VA | ✅ Padaryta | 🔴 | Buvo CPU adresas, dabar fizinis adresas |
-| CreateResource/Lock IOCTL parametrai | ✅ Padaryta | 🔴 | Neteisingi SizeHi/SizeLo, ULONG vs ULONG64 |
-| Shader compilation (DXBC → GFX10) | ⏳ Laukia | 🔴 | ACO wrapper stub |
-| Texture management | ⏳ Laukia | 🟡 | |
-| Render target setup | ⏳ Laukia | 🟡 | |
-| ioctl.h IOCTL_INDEX fix | ⏳ Laukia | 🟡 | KMD naudoja 0x200, header turi 0x800 |
+### Kodėl D3D9 neveikia:
+
+Mūsų KMD **yra WDM driver su IOCTL kanalu**, NE WDDM display miniport driver.
+D3D9On12 (numatytasis Windows 10/11 kelias) reikalauja WDDM adapterio, kurį
+dxgkrnl.sys registruoja per `DxgkInitialize()`.
+
+Bandėme kviesti `DxgkInitialize()` → **Code 39 klaida** (Driver Entry Point Not Found),
+nes mūsų KMD neturi pilnos WDDM infrastruktūros.
+
+### Du galimi sprendimai:
+
+| Kelas | Darbo apimtis | Rezultatas |
+|-------|--------------|------------|
+| **A) Pilnas WDDM driver** | ~2000 eilučių KMD + INF keitimai | D3D9/D3D11/D3D12 veiks nativiai |
+| **B) D3D9 per IOCTL** | ~500 eilučių UMD test tool | D3D9 veiks per custom kelią |
+
+**Rekomendacija:** Kelias B (greitesnis) — parašyti D3D9 testą kuris naudoja
+mūsų UMD IOCTL kanatą tiesiogiai, apeinant D3D9 runtime.
+
+---
+
+## ⏳ Ką padarėme šiandien
+
+| Užduotis | Statusas | Pastabos |
+|----------|----------|----------|
+| D3D9 GetCaps grąžina realius duomenis | ✅ Padaryta | D3DCAPS9 su RDNA2 |
+| OpenAdapter = ordinal 1 | ✅ Padaryta | .def + extern C |
+| Submit dual-format (D3D9 + Vulkan) | ✅ Padaryta | {PA_lo,PA_hi,size,fence} |
+| Flush: GPU PA vietoj CPU VA | ✅ Padaryta | |
+| DxgkInitialize bandymas | ❌ Code 39 | KMD nėra WDDM miniport |
+| DxgkDdiPresent implementacija | ✅ Padaryta | HUBPREQ registrų programavimas |
+| DxgkDdiQueryChildRelations | ✅ Padaryta | 1 video output child |
+| dxgkrnl.lib import library | ✅ Sukurta | ateities WDDM integracijai |
+| D3D9 adapter enumeration test | ✅ Padaryta | rodo adapterius + HAL/REF fallback |
 
 ---
 
 ## 📋 Planai (ateitis)
 
-### Trumpas laikotarpis (1-2 savaitės)
-1. **Testuoti D3D9 triadą** po GetCaps + OpenAdapter fix
-2. **Vulkan ICD patobulinimas** - daugiau extensions ir features
-3. **DXBC → GFX10 shader kompiliatorius** - realus ACO wrapper
+### Trumpas laikotarpis (šiandien/rytoj)
+1. **Perkrauti su pataisytu driveriu** (Code 39 revert)
+2. **Parašyti D3D9 IOCTL testą** — apeiti D3D9 runtime, naudoti UMD tiesiogiai
+3. **Tobulinti Vulkan ICD** — daugiau extensions
 
-### Vidutinis laikotarpis (2-4 savaitės)
-1. **D3D11 UMD** - D3D11 palaikymas
-2. **D3D12 UMD pilnas** - D3D12 palaikymas
-3. **Display mode enumeration** - daugiau rezoliucijų
-4. **Multi-monitor** - 4 display pipes palaikymas
+### Vidutinis laikotarpis (1-2 savaitės)
+1. **Pilnas WDDM display miniport driver** — DxgkInitialize + visi DDI
+2. **D3D11/D3D12 UMD** — realūs stubs kurie veikia
+3. **DXBC → GFX10 shader kompiliatorius**
 
 ### Ilgas laikotarpis (1+ mėnesiai)
-1. **OpenGL ICD** - Mesa radeonsi portas
-2. **Ray tracing** - RT core palaikymas
-3. **GPU compute** - SDMA compute queue
-4. **VKD3D-Proton** - D3D12 → Vulkan translation
+1. **OpenGL ICD** — Mesa radeonsi portas
+2. **Ray tracing** — RT core palaikymas
+3. **GPU compute** — SDMA compute queue
 
 ---
 
@@ -111,13 +126,13 @@
 
 | Komponentas | Failai | Bendras dydis |
 |-------------|--------|---------------|
-| KMD source | 4 .c + 4 .h | ~220 KB |
-| UMD source | 1 .c | ~55 KB |
+| KMD source | 4 .c + 4 .h + 1 .def | ~225 KB |
+| UMD source | 1 .c + 1 .def | ~55 KB |
 | Vulkan ICD | 3 .c + 3 .h + 1 .def | ~65 KB |
-| Build output | 7 failai | ~300 KB |
+| Build output | 8 failai | ~310 KB |
 | Test tools | 5 failai | ~430 KB |
 | Docs | 4 .md | ~60 KB |
-| **Iš viso** | **~30 failų** | **~1.1 MB** |
+| **Iš viso** | **~35 failų** | **~1.1 MB** |
 
 ---
 
@@ -128,6 +143,7 @@
 │              D3D9/10/11/12 Application               │
 ├─────────────────────────────────────────────────────┤
 │         Windows D3D9 Runtime (d3d9.dll)              │
+│         ⚠️ Nemato mūsų adapterio (nėra WDDM)        │
 ├─────────────────────────────────────────────────────┤
 │         BC-250 D3D9 UMD (amdbc250umd64.dll)         │
 │         ├── 45+ DDI functions                        │
@@ -144,7 +160,7 @@
 │         └── SPIR-V → GFX10 ISA                      │
 ├─────────────────────────────────────────────────────┤
 │         BC-250 KMD (atikmdag.sys)                    │
-│         ├── 24 IOCTL handlers                       │
+│         ├── IOCTL channel (\\.\AMDBC250DreamV43)    │
 │         ├── PM4 Command Queue + IB packets           │
 │         ├── Ring buffers + interrupts                │
 │         ├── SDMA copy engine                         │
@@ -159,8 +175,6 @@
 
 ## 🎯 Kitas žingsnis
 
-**Testuoti D3D9 triadą** po šių pataisymų:
-1. Perkrauti kompiuterį
-2. Įdiegti naują driverį (output\ per Device Manager)
-3. Paleisti `test-d3d9-triangle.exe` (OutputDebugString sekimas)
-4. Jei veikia - tobulinti shader kompiliaciją ir state valdymą
+1. Perkrauti su pataisytu driveriu (Code 39 revert — driveris veikia)
+2. Parašyti D3D9 IOCTL testą kuris naudoja UMD tiesiogiai
+3. Arba pradėti pilną WDDM integraciją
