@@ -2043,45 +2043,19 @@ DreamV3DeviceControl(
             PULONG InData = (PULONG)inputBuffer;
             ULONG fenceValue;
             ULONG ibAddrLo = InData[0];
-            ULONG ibAddrHi = InData[1];
-            ULONG ibSize;
 
             /* Dual-format compatibility:
                Old format (Vulkan ICD): {0, 0, fence, 0}  — fence at InData[2]
                New format (D3D9):       {PA_lo, PA_hi, size, fence} — fence at InData[3] */
-            if (InData[0] == 0) {
+            if (ibAddrLo == 0) {
                 fenceValue = InData[2];  /* Old format: fence at field 2 */
-                ibSize = 0;
             } else {
                 fenceValue = InData[3];  /* New format: fence at field 3 */
-                ibSize = InData[2];      /* New format: size at field 2 */
+                /* NOTE: IB packet writing deferred to avoid ring buffer crashes.
+                   For now, only EOP fence is processed. */
             }
 
-            /* If IB provided, write INDIRECT_BUFFER packet into ring */
-            if (ibAddrLo != 0 && ibSize > 0 &&
-                DevExt->GfxRing.VirtualAddress != NULL) {
-                volatile PULONG Ring = (volatile PULONG)DevExt->GfxRing.VirtualAddress;
-                ULONG WPtr = DevExt->GfxRing.WritePointer;
-                ULONG RingSize = (ULONG)DevExt->GfxRing.SizeInBytes;
-                ULONG NeededSpace = (4 + 7) * sizeof(ULONG);
-
-                if (WPtr + NeededSpace > RingSize) {
-                    ULONG SpaceLeft = RingSize - WPtr;
-                    for (ULONG i = 0; i < SpaceLeft / sizeof(ULONG); i++) {
-                        Ring[WPtr / sizeof(ULONG)] = PM4_TYPE3_HDR(IT_NOP, 0);
-                        WPtr += sizeof(ULONG);
-                    }
-                    WPtr = 0;
-                }
-
-                Ring[WPtr / sizeof(ULONG) + 0] = PM4_TYPE3_HDR(IT_INDIRECT_BUFFER, 4);
-                Ring[WPtr / sizeof(ULONG) + 1] = ibAddrLo & 0xFFFFFFFC;
-                Ring[WPtr / sizeof(ULONG) + 2] = ibAddrHi;
-                Ring[WPtr / sizeof(ULONG) + 3] = (ibSize + 3) / sizeof(ULONG);
-                WPtr += 4 * sizeof(ULONG);
-                DevExt->GfxRing.WritePointer = WPtr;
-            }
-
+            /* Write EOP fence only — safe path */
             DreamV3WriteEopFence(DevExt, (ULONG64)fenceValue);
             DevExt->GlobalFence.LastSubmittedValue = (ULONG64)fenceValue;
             DreamV3SubmitGfxRing(DevExt);
