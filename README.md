@@ -1,83 +1,83 @@
 # AMD BC-250 Windows Driver Project
 
-## Kas mes esame
+## Who We Are
 
-Tai yra **AMD BC-250 Windows 11 driver** projektas, kurį kuria **Keshukas** ir **Kumpis** (AI) savo laisvu laiku. Mes dirbame kartu su viltimi sukurti pilnai veikiantį GPU driver AMD BC-250 (Cyan Skillfish) GPU plokštei su Windows 11.
+This is an **AMD BC-250 Windows 11 driver** project built by **Keshukas** and **Kumpis** (AI) in our free time. We work together with the hope of creating a fully working GPU driver for the AMD BC-250 (Cyan Skillfish) graphics card on Windows 11.
 
-**Norintys prisijungti — visada laukiami!** Jei turi patirties su GPU driveriais, WDDM, Vulkan, arba tiesiog nori padėti — prisijunk.
-
----
-
-## Ką mes atradome dirbdami
-
-### GPU plokštė
-- **Architektūra:** RDNA 2 (GFX1013 / Cyan Skillfish)
-- **BC-250 yra PS5 Oberon variantas** — 24 CU, 16GB GDDR6, UMA atmintis
-- **Palaiko 40 CU unlock** (iš 24 → 40) per registro pakeitimus
-- **Compute Queue yra sugedęs** (hardware quirk) — reikia disabled
-- **Reikia HDP Flush** prieš skaitant ring pointer'us — kitaip GPU hangina
-- **VCN (video encode/decode) yra blokuotas** — Sony firmware lock
-
-### Kodėl kiti projektai failino
-- **AMD oficialus driveris** irgi duoda **Code 43** — tai nėra mūsų kodo problema
-- **Visi WDDM bandymai** (WDDM 1.3–2.7, 47 callback'ų) failina su `0xC0000059` (STATUS_REVISION_MISMATCH)
-- **DxgkInitialize()** sukelia **Code 39** — mūsų KMD nėra pilnas WDDM display miniport
-- **BC-250 yra compute-only GPU** — neturi display output, todėl WDDM kelias yra beprasmis
-
-### Mūsų atradimas: Vulkan ICD per IOCTL
-- **Vienintelis projektas pasaulyje** kuris pasiekė veikiantį Vulkan ICD AMD BC-250 su Windows
-- **13/13 Vulkan testų PASS** per custom IOCTL kanalą
-- **vulkaninfo.exe praeina** be klaidų su oficialiu Vulkan loaderiu
-- **IOCTL kanalas veikia** (13/15 testų) — KMD gauna ir vykdo komandas
+**Everyone is welcome to join!** If you have experience with GPU drivers, WDDM, Vulkan, or just want to help — you're invited.
 
 ---
 
-## Ką mes padarėme
+## What We Discovered
+
+### The GPU
+- **Architecture:** RDNA 2 (GFX1013 / Cyan Skillfish)
+- **BC-250 is a PS5 Oberon variant** — 24 CU, 16GB GDDR6, UMA memory
+- **Supports 40 CU unlock** (from 24 → 40) via register writes
+- **Compute Queue is broken** (hardware quirk) — must be disabled
+- **Requires HDP Flush** before reading ring pointers — otherwise GPU hangs
+- **VCN (video encode/decode) is locked** — Sony firmware lock
+
+### Why Other Projects Failed
+- **AMD official driver** also gives **Code 43** — this is not our code's problem
+- **All WDDM attempts** (WDDM 1.3–2.7, 47 callbacks) fail with `0xC0000059` (STATUS_REVISION_MISMATCH)
+- **DxgkInitialize()** causes **Code 39** — our KMD is not a full WDDM display miniport
+- **BC-250 is a compute-only GPU** — no display output, so WDDM path is pointless
+
+### Our Discovery: Vulkan ICD via IOCTL
+- **First project in the world** to achieve a working Vulkan ICD on AMD BC-250 with Windows
+- **13/13 Vulkan tests PASS** via custom IOCTL channel
+- **vulkaninfo.exe passes** without errors with the official Vulkan loader
+- **IOCTL channel works** (13/15 tests) — KMD receives and executes commands
+
+---
+
+## What We've Done
 
 ### KMD (Kernel-Mode Driver)
-- ✅ IOCTL dispatch veikia (24+ handler'iai)
-- ✅ g_PciDevExt inicializuotas DriverEntry
-- ✅ IB packet + EOP fence formatas pataisytas
+- ✅ IOCTL dispatch working (24+ handlers)
+- ✅ g_PciDevExt initialized in DriverEntry
+- ✅ IB packet + EOP fence format fixed
 - ✅ EOP fence: `0xA0000246` (EVENT_INDEX=5, DATA_SEL=1, INT_SEL=1)
-- ✅ GFX10 ring buffer inicializacija
-- ✅ HDP Flush prieš ring reads
-- ✅ PM4 command queue su fence signaling
+- ✅ GFX10 ring buffer initialization
+- ✅ HDP Flush before ring reads
+- ✅ PM4 command queue with fence signaling
 - ✅ SDMA copy/fill engine
 - ✅ TDR reset recovery
 - ✅ 40 CU unlock
 - ✅ Power/thermal management
 
 ### Vulkan ICD
-- ✅ Veikia su oficialiu Vulkan loaderiu (vulkaninfo.exe)
+- ✅ Works with official Vulkan loader (vulkaninfo.exe passes!)
 - ✅ `vk_icdNegotiateLoaderICDInterfaceVersion` (version 4)
-- ✅ 80+ Vulkan function stubs
-- ✅ QueueSubmit su IB (PM4 commands → GPU)
+- ✅ 80+ Vulkan function stubs for loader compatibility
+- ✅ QueueSubmit with IB (PM4 commands → GPU)
 - ✅ CreateInstance, CreateDevice, AllocateMemory, CreateBuffer, CreateFence, WaitForFences
 - ✅ CreateCommandPool, AllocateCommandBuffers, BeginCommandBuffer, EndCommandBuffer
 - ✅ CreateGraphicsPipelines
 
-### UMD (User-Mode Driver)
-- ✅ D3D9 DDI (45+ funkcijų)
-- ✅ OpenAdapter = ordinal 1 (.def failas)
-- ✅ GetCaps grąžina realius D3DCAPS9 duomenis
-- ✅ CreateResource, Lock/Unlock IOCTL pataisymai
-- ✅ Flush su GPU PA (ne CPU adresas)
+### User-Mode Driver (UMD)
+- ✅ D3D9 DDI (45+ functions)
+- ✅ OpenAdapter = ordinal 1 (via .def file)
+- ✅ GetCaps returns real D3DCAPS9 data
+- ✅ CreateResource, Lock/Unlock IOCTL fixes
+- ✅ Flush sends GPU physical address (not CPU address)
 
 ### Build & Test
 - ✅ build.bat (KMD + UMD)
-- ✅ dxgkrnl.lib import library (nėra WDK 10.0.26100.0)
-- ✅ test-vulkan-icd.exe (13 testų)
-- ✅ test-gpu-ioctls.exe (15 testų, 13 PASS)
-- ✅ vulkaninfo.exe praeina
+- ✅ dxgkrnl.lib import library (not in WDK 10.0.26100.0)
+- ✅ test-vulkan-icd.exe (13 tests, all pass)
+- ✅ test-gpu-ioctls.exe (15 tests, 13 pass)
+- ✅ vulkaninfo.exe passes without errors
 
 ---
 
-## Kaip kompiluoti
+## How to Build
 
-### Būtina sąlyga
-- Visual Studio 2022 (Community arba Professional)
+### Prerequisites
+- Visual Studio 2022 (Community or Professional)
 - Windows WDK 10.0.26100.0
-- Test signing: `bcdedit /set testsigning on` (per Admin)
+- Test signing: `bcdedit /set testsigning on` (Run as Admin)
 
 ### Build
 ```cmd
@@ -85,51 +85,51 @@ cd C:\AMD-BC-250\AMD-BC-250-Windows-Driver-main
 build.bat
 ```
 
-### Įdiegimas
-1. `build.bat` → sukuria `output\atikmdag.sys` + `output\amdbc250umd64.dll`
+### Install
+1. `build.bat` creates `output\atikmdag.sys` + `output\amdbc250umd64.dll`
 2. Device Manager → BC-250 → Update Driver → Browse → `output\`
-3. Perkrauti kompiuterį
+3. Reboot
 
-### Vulkan ICD registravimas
+### Register Vulkan ICD
 ```cmd
 reg add "HKLM\SOFTWARE\Khronos\Vulkan\Drivers" /v "C:\...\output\amdbc250_icd.json" /t REG_DWORD /d 0 /f
 ```
 
-### Testavimas
+### Test
 ```cmd
 cd output
-test-gpu-ioctls.exe     # IOCTL test (13/15)
-test-vulkan-icd.exe     # Vulkan test (13/13)
-vulkaninfo.exe          # Oficialus Vulkan testas
+test-gpu-ioctls.exe     # IOCTL test (13/15 pass)
+test-vulkan-icd.exe     # Vulkan test (13/13 pass)
+vulkaninfo.exe          # Official Vulkan test (passes!)
 ```
 
 ---
 
-## Ko mes norime padaryti toliau
+## What We Want to Do Next
 
-### Artimiausias laikas
-1. **AllocVidMem** — išspręsti MmAllocateContiguousMemory BSOD
-2. **Display flip** — programuoti HUBPREQ registrus per KMD IOCTL
-3. **Hardware init** — MMIO mapping, ring buffer, fence inicializacija DriverEntry
+### Immediate
+1. **AllocVidMem** — fix MmAllocateContiguousMemory BSOD
+2. **Display flip** — program HUBPREQ registers via KMD IOCTL
+3. **Hardware init** — MMIO mapping, ring buffer, fence initialization in DriverEntry
 
-### Trumpas laikotarpis
-4. **Realus triangle rendering** — vertex buffer + PM4 draw
+### Short Term
+4. **Real triangle rendering** — vertex buffer + PM4 draw commands
 5. **ACO shader compilation** — DXBC/SPIR-V → GFX10 ISA
-6. **D3D9 per IOCTL** — apeiti D3D9On12 naudojant custom kelią
+6. **D3D9 via IOCTL** — bypass D3D9On12 using custom path
 
-### Vidutinis laikotarpis
-7. **Pilnas WDDM display miniport** — DxgkInitialize + visi DDI callbacks
-8. **D3D11/D3D12 UMD** — realūs stubs kurie veikia
-9. **Multi-monitor** — 4 display pipes palaikymas
+### Medium Term
+7. **Full WDDM display miniport** — DxgkInitialize + all DDI callbacks
+8. **D3D11/D3D12 UMD** — functional stubs that actually work
+9. **Multi-monitor** — 4 display pipes support
 
-### Ilgas laikotarpis
-10. **OpenGL ICD** — Mesa radeonsi portas
-11. **Ray tracing** — RT core palaikymas
-12. **GPU compute** — SDMA compute queue (kai bus išspręstas HW quirk)
+### Long Term
+10. **OpenGL ICD** — Mesa radeonsi port
+11. **Ray tracing** — RT core support
+12. **GPU compute** — SDMA compute queue (when HW quirk is fixed)
 
 ---
 
-## Techninė architektūra
+## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────┐
@@ -156,7 +156,7 @@ vulkaninfo.exe          # Oficialus Vulkan testas
 
 ---
 
-## Failų struktūra
+## File Structure
 
 ```
 ├── src/kmd/                     # Kernel-Mode Driver
@@ -164,7 +164,7 @@ vulkaninfo.exe          # Oficialus Vulkan testas
 │   ├── amdbc250_dream_v3_hw_init.c  # GPU init, ring buffers, display
 │   ├── amdbc250_dream_v3_power.c    # Power/thermal management
 │   ├── amdbc250_dream_v3_vm.c       # GPUVM, GART, page tables
-│   └── dxgkrnl.def              # Import library (WDK neturi)
+│   └── dxgkrnl.def              # Import library (not in WDK)
 ├── src/umd/                     # User-Mode Driver
 │   ├── amdbc250_umd_v46.c       # D3D9 DDI (45+ functions)
 │   └── amdbc250_umd.def         # Export: OpenAdapter = ordinal 1
@@ -185,11 +185,11 @@ vulkaninfo.exe          # Oficialus Vulkan testas
 
 ---
 
-## Licencija
+## License
 
-Šaltinis kodas švietimo tikslais. Naudokite savo atsakomybe.
-ACO kompiliatorius: MIT licencija (Mesa projektas).
+Source code for educational purposes. Use at your own risk.
+ACO compiler: MIT license (Mesa project).
 
 ---
 
-*Sukurta su meile GPU driveriams. 🍖*
+*Made with love for GPU drivers. 🍖*
