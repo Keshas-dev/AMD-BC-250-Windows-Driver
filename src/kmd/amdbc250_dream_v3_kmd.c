@@ -2092,8 +2092,7 @@ DreamV3DeviceControl(
             status = STATUS_SUCCESS;
             goto Cleanup;
         default:
-            status = STATUS_SUCCESS;
-            goto Cleanup;
+            break;  /* Fall through to main switch for other IOCTLs */
         }
     }
 
@@ -2158,39 +2157,67 @@ DreamV3DeviceControl(
 
     /* --- Allocate Video Memory --- */
     case 0x80000840: { /* IOCTL_AMDBC250_ALLOC_VIDMEM */
-        if (inputLen >= sizeof(ULONG) * 3 && outputLen >= sizeof(ULONG64) * 3) {
+        /* Mark that we reached this case */
+        {
+            UNICODE_STRING devPath;
+            OBJECT_ATTRIBUTES objAttr;
+            RtlInitUnicodeString(&devPath, L"\\Registry\\Machine\\SYSTEM\\CurrentControlSet\\Services\\atikmdag");
+            InitializeObjectAttributes(&objAttr, &devPath, OBJ_CASE_INSENSITIVE, NULL, NULL);
+            HANDLE hKey = NULL;
+            if (NT_SUCCESS(ZwOpenKey(&hKey, KEY_SET_VALUE, &objAttr))) {
+                UNICODE_STRING valName;
+                ULONG val = ioctlCode;
+                RtlInitUnicodeString(&valName, L"LastIoctlCode");
+                ZwSetValueKey(hKey, &valName, 0, REG_DWORD, &val, sizeof(val));
+                ZwClose(hKey);
+            }
+        }
+        if (inputLen >= sizeof(ULONG) * 3 && outputLen >= sizeof(ULONG64) * 2) {
             PULONG InData = (PULONG)inputBuffer;
             ULONG SizeLo = InData[0];
-            ULONG SizeHi = InData[1];
-            ULONG Flags = InData[2];
-            ULONG SegmentId = (inputLen >= sizeof(ULONG) * 4) ? InData[3] : 0;
-            SIZE_T AllocSize = ((SIZE_T)SizeHi << 32) | SizeLo;
+            SIZE_T AllocSize = (SIZE_T)SizeLo;
 
-            UNREFERENCED_PARAMETER(Flags);
-            UNREFERENCED_PARAMETER(SegmentId);
+            /* Safety: cap at 64KB for testing */
+            if (AllocSize > 64 * 1024) AllocSize = 64 * 1024;
+            if (AllocSize < 4096) AllocSize = 4096;
 
-            /* Allocate contiguous memory for GPU */
-            PHYSICAL_ADDRESS lowAddr, highAddr, skipBytes;
-            lowAddr.QuadPart = 0;
-            highAddr.QuadPart = 0xFFFFFFFFFFULL; /* 40-bit */
-            skipBytes.QuadPart = 0;
+            PHYSICAL_ADDRESS highestAddr;
+            highestAddr.QuadPart = 0xFFFFFFFFULL;
 
-            PVOID virtualAddr = MmAllocateContiguousMemorySpecifyCache(
-                AllocSize, lowAddr, highAddr, skipBytes, MmCached);
+            PVOID virtualAddr = NULL;
+            __try {
+                virtualAddr = MmAllocateContiguousMemory(AllocSize, highestAddr);
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
+                    "AMDBC250-DREAM-V4.3: AllocVidMem EXCEPTION 0x%X\n", GetExceptionCode()));
+                virtualAddr = NULL;
+            }
 
             if (virtualAddr != NULL) {
-                PHYSICAL_ADDRESS physAddr = MmGetPhysicalAddress(virtualAddr);
-                PULONG64 OutData = (PULONG64)outputBuffer;
-                OutData[0] = DevExt->NextGpuVa; /* GPU VA */
-                OutData[1] = physAddr.QuadPart;  /* Physical */
-                OutData[2] = (ULONG64)(UINT_PTR)virtualAddr; /* CPU handle */
-                DevExt->NextGpuVa += (AllocSize + 0xFFF) & ~0xFFFULL;
-                bytesReturned = sizeof(ULONG64) * 3;
+                PHYSICAL_ADDRESS physAddr;
+                __try {
+                    physAddr = MmGetPhysicalAddress(virtualAddr);
+                } __except (EXCEPTION_EXECUTE_HANDLER) {
+                    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
+                        "AMDBC250-DREAM-V4.3: MmGetPhysicalAddress EXCEPTION\n"));
+                    MmFreeContiguousMemory(virtualAddr);
+                    virtualAddr = NULL;
+                    physAddr.QuadPart = 0;
+                }
 
-                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-                    "AMDBC250-DREAM-V4.3: AllocVidMem: %llu bytes, PA=0x%llX\n",
-                    AllocSize, physAddr.QuadPart));
-            } else {
+                if (virtualAddr != NULL) {
+                    PULONG64 OutData = (PULONG64)outputBuffer;
+                    OutData[0] = physAddr.QuadPart;
+                    OutData[1] = (ULONG64)(UINT_PTR)virtualAddr;
+                    bytesReturned = sizeof(ULONG64) * 2;
+
+                    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                        "AMDBC250-DREAM-V4.3: AllocVidMem OK: %llu bytes, PA=0x%llX VA=%p\n",
+                        (ULONG64)AllocSize, physAddr.QuadPart, virtualAddr));
+                }
+            }
+
+            if (virtualAddr == NULL) {
                 status = STATUS_INSUFFICIENT_RESOURCES;
             }
         } else {

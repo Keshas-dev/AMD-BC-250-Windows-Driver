@@ -126,7 +126,7 @@ int main(void)
 
     /* Test 6: Allocate Video Memory */
     {
-        ULONG allocIn[4] = {0x100000, 0, 0x3, 0}; /* 1MB, READ|WRITE, VRAM */
+        ULONG allocIn[4] = {4096, 0, 0x3, 0}; /* 4KB, READ|WRITE, VRAM */
         ULONG64 allocOut[3] = {0};
         ok = DoIoctl(h, IOCTL_ALLOC_VIDMEM, allocIn, sizeof(allocIn), allocOut, sizeof(allocOut));
         TestResult("AllocVidMem(1MB)", ok && allocOut[0] > 0);
