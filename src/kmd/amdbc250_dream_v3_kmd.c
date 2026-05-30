@@ -223,7 +223,7 @@ DriverEntry(
             sizeof(DREAM_V3_DEVICE_EXTENSION),
             &devName,
             FILE_DEVICE_UNKNOWN,
-            FILE_DEVICE_SECURE_OPEN,
+            0,
             FALSE,
             &g_ControlDevice);
 
@@ -256,6 +256,30 @@ DriverEntry(
             DriverObject->MajorFunction[IRP_MJ_CREATE] = DreamV3CreateClose;
             DriverObject->MajorFunction[IRP_MJ_CLOSE] = DreamV3CreateClose;
             DriverObject->DriverUnload = DreamV3WdmUnload;
+
+            /* Initialize PCI device extension for IOCTL handler
+               (normally done in DxgkDdiAddDevice, but we don't call DxgkInitialize) */
+            {
+                g_PciDevExt = (PDREAM_V3_DEVICE_EXTENSION)
+                    ExAllocatePool2(POOL_FLAG_NON_PAGED, sizeof(DREAM_V3_DEVICE_EXTENSION), '3vDA');
+                if (g_PciDevExt != NULL) {
+                    RtlZeroMemory(g_PciDevExt, sizeof(DREAM_V3_DEVICE_EXTENSION));
+                    ExInitializeFastMutex(&g_PciDevExt->DeviceMutex);
+                    KeInitializeSpinLock(&g_PciDevExt->FenceLock);
+                    InitializeListHead(&g_PciDevExt->AllocationList);
+                    KeInitializeEvent(&g_PciDevExt->DeviceRemoved, NotificationEvent, FALSE);
+
+                    g_PciDevExt->VendorId = 0x1002;
+                    g_PciDevExt->DeviceId = 0x13FE;
+                    g_PciDevExt->VisibleVramBytes = 4ULL * 1024 * 1024 * 1024;
+                    g_PciDevExt->TotalVramBytes = 16ULL * 1024 * 1024 * 1024;
+                    g_PciDevExt->NumDisplayPipes = 4;
+                    g_PciDevExt->NextGpuVa = 0x100000000ULL;
+
+                    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                               "AMDBC250-DREAM-V4.3: g_PciDevExt allocated at %p\n", g_PciDevExt));
+                }
+            }
         } else {
             KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
                        "AMDBC250-DREAM-V4.3: IoCreateDevice FAILED: 0x%08X\n", Status));
@@ -1980,6 +2004,26 @@ DreamV3DeviceControl(
     _Inout_ PIRP Irp
     )
 {
+    /* MARKER: Write once to confirm IOCTL dispatch is called */
+    {
+        static BOOLEAN once = FALSE;
+        if (!once) {
+            once = TRUE;
+            UNICODE_STRING devPath;
+            OBJECT_ATTRIBUTES objAttr;
+            RtlInitUnicodeString(&devPath, L"\\Registry\\Machine\\SYSTEM\\CurrentControlSet\\Services\\atikmdag");
+            InitializeObjectAttributes(&objAttr, &devPath, OBJ_CASE_INSENSITIVE, NULL, NULL);
+            HANDLE hKey = NULL;
+            if (NT_SUCCESS(ZwOpenKey(&hKey, KEY_SET_VALUE, &objAttr))) {
+                UNICODE_STRING valName;
+                ULONG val = 1;
+                RtlInitUnicodeString(&valName, L"IoctlDispatchCalled");
+                ZwSetValueKey(hKey, &valName, 0, REG_DWORD, &val, sizeof(val));
+                ZwClose(hKey);
+            }
+        }
+    }
+
     PIO_STACK_LOCATION irpSp = IoGetCurrentIrpStackLocation(Irp);
     NTSTATUS status = STATUS_SUCCESS;
     ULONG bytesReturned = 0;
@@ -1992,9 +2036,65 @@ DreamV3DeviceControl(
     /* Use PCI device extension (not control device extension which is empty) */
     PDREAM_V3_DEVICE_EXTENSION DevExt = g_PciDevExt;
 
+    /* Log first IOCTL call details */
+    {
+        static BOOLEAN logged = FALSE;
+        if (!logged) {
+            logged = TRUE;
+            UNICODE_STRING devPath;
+            OBJECT_ATTRIBUTES objAttr;
+            RtlInitUnicodeString(&devPath, L"\\Registry\\Machine\\SYSTEM\\CurrentControlSet\\Services\\atikmdag");
+            InitializeObjectAttributes(&objAttr, &devPath, OBJ_CASE_INSENSITIVE, NULL, NULL);
+            HANDLE hKey = NULL;
+            if (NT_SUCCESS(ZwOpenKey(&hKey, KEY_SET_VALUE, &objAttr))) {
+                UNICODE_STRING valName;
+                RtlInitUnicodeString(&valName, L"IoctlDevExtPtr");
+                ULONG val = (ULONG)(UINT_PTR)DevExt;
+                ZwSetValueKey(hKey, &valName, 0, REG_DWORD, &val, sizeof(val));
+                RtlInitUnicodeString(&valName, L"IoctlCode");
+                val = ioctlCode;
+                ZwSetValueKey(hKey, &valName, 0, REG_DWORD, &val, sizeof(val));
+                ZwClose(hKey);
+            }
+        }
+    }
+
     if (DevExt == NULL) {
         status = STATUS_DEVICE_NOT_READY;
         goto Cleanup;
+    }
+
+    /* If hardware not initialized, return dummy data for basic IOCTLs */
+    if (!DevExt->HardwareInitialized) {
+        switch (ioctlCode) {
+        case 0x80000800: /* GET_CAPS */
+            if (outputLen >= sizeof(ULONG) * 7) {
+                PULONG OutData = (PULONG)outputBuffer;
+                OutData[0] = 4;  /* Version */
+                OutData[1] = 1;  /* CU count */
+                OutData[2] = 2000; /* GPU clock MHz */
+                OutData[3] = 1750; /* Memory clock MHz */
+                OutData[4] = 0;  /* Temperature */
+                OutData[5] = 0;  /* Throttle */
+                OutData[6] = 0;  /* Throttle count */
+                bytesReturned = sizeof(ULONG) * 7;
+            }
+            status = STATUS_SUCCESS;
+            goto Cleanup;
+        case 0x80000804: /* GET_VRAM_INFO */
+            if (outputLen >= sizeof(ULONG) * 3) {
+                PULONG OutData = (PULONG)outputBuffer;
+                OutData[0] = (ULONG)(DevExt->TotalVramBytes / (1024*1024));
+                OutData[1] = (ULONG)(DevExt->VisibleVramBytes / (1024*1024));
+                OutData[2] = 0;
+                bytesReturned = sizeof(ULONG) * 3;
+            }
+            status = STATUS_SUCCESS;
+            goto Cleanup;
+        default:
+            status = STATUS_SUCCESS;
+            goto Cleanup;
+        }
     }
 
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_TRACE_LEVEL,

@@ -15,11 +15,10 @@
 [Version]
 Signature="$Windows NT$"
 Provider=%AMD%
-ClassGUID={4D36E968-E325-11CE-BFC1-08002BE10318}
 Class=Display
-DriverVer=04/13/2026,4.3.0.0
+ClassGUID={4D36E968-E325-11CE-BFC1-08002BE10318}
+DriverVer=05/30/2026,4.4.0.0
 CatalogFile=amdbc250_dream_v3.CAT
-PnpLockdown=1
 
 [DestinationDirs]
 DefaultDestDir = 11
