@@ -33,8 +33,14 @@ Environment:
 #include "amdbc250_ioctl.h"
 
 static PDRIVER_OBJECT g_DriverObject = NULL;
-static DRIVER_INITIALIZATION_DATA g_InitData = {0};
+
 static PDEVICE_OBJECT g_ControlDevice = NULL;
+
+/* PCI device extension (from DxgkDdiAddDevice) - used by IOCTL handler */
+static PDREAM_V3_DEVICE_EXTENSION g_PciDevExt = NULL;
+
+/* Stored DDI initialization data */
+static DRIVER_INITIALIZATION_DATA g_InitData = {0};
 static UNICODE_STRING g_DeviceName;
 static UNICODE_STRING g_SymlinkName;
 
@@ -84,8 +90,11 @@ DreamV3DxgkInitialize(
     return STATUS_SUCCESS;
 }
 
+/* Forward declaration */
+static VOID DreamV3WdmUnload(_In_ PDRIVER_OBJECT DriverObject);
+
 /*===========================================================================
-  DriverEntry — Main entry point (WDDM 2.x/3.x)
+   DriverEntry — Main entry point (WDDM 2.x/3.x)
 ===========================================================================*/
 
 NTSTATUS
@@ -222,11 +231,31 @@ DriverEntry(
             g_ControlDevice->Flags |= DO_BUFFERED_IO;
             g_ControlDevice->Flags &= ~DO_DEVICE_INITIALIZING;
             symStatus = IoCreateSymbolicLink(&symLink, &devName);
+
+            /* Mark that device was created */
+            {
+                UNICODE_STRING devPath2, valName2;
+                OBJECT_ATTRIBUTES objAttr2;
+                RtlInitUnicodeString(&devPath2, L"\\Registry\\Machine\\SYSTEM\\CurrentControlSet\\Services\\atikmdag");
+                InitializeObjectAttributes(&objAttr2, &devPath2, OBJ_CASE_INSENSITIVE, NULL, NULL);
+                HANDLE hKey2 = NULL;
+                if (NT_SUCCESS(ZwOpenKey(&hKey2, KEY_SET_VALUE, &objAttr2))) {
+                    ULONG devCreated = 1;
+                    RtlInitUnicodeString(&valName2, L"ControlDeviceCreated");
+                    ZwSetValueKey(hKey2, &valName2, 0, REG_DWORD, &devCreated, sizeof(devCreated));
+                    ULONG symVal = NT_SUCCESS(symStatus) ? 1 : 0;
+                    RtlInitUnicodeString(&valName2, L"SymlinkCreated");
+                    ZwSetValueKey(hKey2, &valName2, 0, REG_DWORD, &symVal, sizeof(symVal));
+                    ZwClose(hKey2);
+                }
+            }
+
             KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                        "AMDBC250-DREAM-V4.3: IoCreateDevice OK, symlink=0x%08X\n", symStatus));
             DriverObject->MajorFunction[IRP_MJ_DEVICE_CONTROL] = DreamV3DeviceControl;
             DriverObject->MajorFunction[IRP_MJ_CREATE] = DreamV3CreateClose;
             DriverObject->MajorFunction[IRP_MJ_CLOSE] = DreamV3CreateClose;
+            DriverObject->DriverUnload = DreamV3WdmUnload;
         } else {
             KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
                        "AMDBC250-DREAM-V4.3: IoCreateDevice FAILED: 0x%08X\n", Status));
@@ -297,6 +326,7 @@ DreamV3DdiAddDevice(
     DevExt->NextGpuVa = 0x100000000ULL; /* GPU VA starts at 4GB */
 
     *MiniportDeviceContext = DevExt;
+    g_PciDevExt = DevExt;  /* Store for IOCTL handler */
 
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                "AMDBC250-DREAM-V4.3: Device extension allocated at %p\n", DevExt));
@@ -609,6 +639,21 @@ DreamV3DdiResetDevice(
     DevExt->GpuResetInProgress = FALSE;
 }
 
+/* WDM DriverUnload — called by PnP when driver is unloaded */
+static VOID DreamV3WdmUnload(_In_ PDRIVER_OBJECT DriverObject)
+{
+    UNREFERENCED_PARAMETER(DriverObject);
+    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+               "AMDBC250-DREAM-V4.3: WDM Unload called\n"));
+    if (g_ControlDevice != NULL) {
+        IoDeleteSymbolicLink(&g_SymlinkName);
+        IoDeleteDevice(g_ControlDevice);
+        g_ControlDevice = NULL;
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                   "AMDBC250-DREAM-V4.3: Control device deleted by WDM unload\n"));
+    }
+}
+
 /*===========================================================================
   DxgkDdiUnload
 ===========================================================================*/
@@ -619,6 +664,22 @@ DreamV3DdiUnload(VOID)
 {
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                "AMDBC250-DREAM-V4.3: Driver unload\n"));
+
+    /* Mark that unload was called */
+    {
+        UNICODE_STRING devPath;
+        OBJECT_ATTRIBUTES objAttr;
+        RtlInitUnicodeString(&devPath, L"\\Registry\\Machine\\SYSTEM\\CurrentControlSet\\Services\\atikmdag");
+        InitializeObjectAttributes(&objAttr, &devPath, OBJ_CASE_INSENSITIVE, NULL, NULL);
+        HANDLE hKey = NULL;
+        if (NT_SUCCESS(ZwOpenKey(&hKey, KEY_SET_VALUE, &objAttr))) {
+            UNICODE_STRING valName;
+            ULONG val = 1;
+            RtlInitUnicodeString(&valName, L"UnloadCalled");
+            ZwSetValueKey(hKey, &valName, 0, REG_DWORD, &val, sizeof(val));
+            ZwClose(hKey);
+        }
+    }
 
     /* Cleanup control device */
     if (g_ControlDevice != NULL) {
@@ -1928,11 +1989,11 @@ DreamV3DeviceControl(
     ULONG outputLen = irpSp->Parameters.DeviceIoControl.OutputBufferLength;
     ULONG ioctlCode = irpSp->Parameters.DeviceIoControl.IoControlCode;
 
-    PDREAM_V3_DEVICE_EXTENSION DevExt =
-        (PDREAM_V3_DEVICE_EXTENSION)DeviceObject->DeviceExtension;
+    /* Use PCI device extension (not control device extension which is empty) */
+    PDREAM_V3_DEVICE_EXTENSION DevExt = g_PciDevExt;
 
     if (DevExt == NULL) {
-        status = STATUS_INVALID_DEVICE_REQUEST;
+        status = STATUS_DEVICE_NOT_READY;
         goto Cleanup;
     }
 
