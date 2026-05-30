@@ -104,3 +104,6 @@ NegotiateLoaderICDInterfaceVersion: version=4
 EnumInstanceExtProps called: pLayerName=(null) pPropertyCount=000000E3C6BC84A0 pProperties=0000000000000000
 NegotiateLoaderICDInterfaceVersion: version=4
 EnumInstanceExtProps called: pLayerName=(null) pPropertyCount=000000E3C6BCB870 pProperties=0000000000000000
+DLL_PROCESS_DETACH
+DLL_PROCESS_ATTACH
+DLL_PROCESS_DETACH

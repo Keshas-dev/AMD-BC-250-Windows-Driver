@@ -2139,6 +2139,8 @@ DreamV3DeviceControl(
             PULONG InData = (PULONG)inputBuffer;
             ULONG fenceValue;
             ULONG ibAddrLo = InData[0];
+            ULONG ibAddrHi = InData[1];
+            ULONG ibSize = 0;
 
             /* Dual-format compatibility:
                Old format (Vulkan ICD): {0, 0, fence, 0}  — fence at InData[2]
@@ -2147,11 +2149,32 @@ DreamV3DeviceControl(
                 fenceValue = InData[2];  /* Old format: fence at field 2 */
             } else {
                 fenceValue = InData[3];  /* New format: fence at field 3 */
-                /* NOTE: IB packet writing deferred to avoid ring buffer crashes.
-                   For now, only EOP fence is processed. */
+                ibSize = InData[2];      /* IB size in bytes */
             }
 
-            /* Write EOP fence only — safe path */
+            /* If IB provided, write INDIRECT_BUFFER packet into ring */
+            if (ibAddrLo != 0 && ibSize > 0 &&
+                DevExt->GfxRing.VirtualAddress != NULL &&
+                DevExt->HardwareInitialized) {
+                volatile PULONG Ring = (volatile PULONG)DevExt->GfxRing.VirtualAddress;
+                ULONG WPtr = DevExt->GfxRing.WritePointer;
+                ULONG RingSize = (ULONG)DevExt->GfxRing.SizeInBytes;
+                ULONG NeededSpace = 4 * sizeof(ULONG);
+
+                /* Ring wrap if needed */
+                if (WPtr + NeededSpace > RingSize) {
+                    WPtr = 0;
+                }
+
+                /* Write INDIRECT_BUFFER PM4 packet (4 DWORDs) */
+                Ring[WPtr / sizeof(ULONG) + 0] = PM4_TYPE3_HDR(IT_INDIRECT_BUFFER, 3);
+                Ring[WPtr / sizeof(ULONG) + 1] = ibAddrLo & 0xFFFFFFFC;
+                Ring[WPtr / sizeof(ULONG) + 2] = ibAddrHi;
+                Ring[WPtr / sizeof(ULONG) + 3] = (ibSize + 3) / sizeof(ULONG);
+                WPtr += 4 * sizeof(ULONG);
+                DevExt->GfxRing.WritePointer = WPtr;
+            }
+
             DreamV3WriteEopFence(DevExt, (ULONG64)fenceValue);
             DevExt->GlobalFence.LastSubmittedValue = (ULONG64)fenceValue;
             DreamV3SubmitGfxRing(DevExt);
