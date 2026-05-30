@@ -13,9 +13,6 @@
 *.ipdb
 *.iobj
 
-# Build output (keep output/ in git for prebuilt drivers)
-# output/
-
 # Temp files
 *.tmp
 *.bak
@@ -39,3 +36,8 @@ Desktop.ini
 testcert.*
 _cert_thumbprint.txt
 sign*.txt
+
+# Diagnostic output
+dxdiag-output.txt
+icd-log.txt
+d3d9-diag.txt
