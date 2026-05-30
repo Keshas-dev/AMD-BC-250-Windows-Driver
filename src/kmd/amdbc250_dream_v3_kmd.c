@@ -97,6 +97,25 @@ DriverEntry(
     DRIVER_INITIALIZATION_DATA InitData = {0};
     NTSTATUS Status;
 
+    /* MARKER: Write immediately so we know DriverEntry ran */
+    {
+        UNICODE_STRING devPath;
+        OBJECT_ATTRIBUTES objAttr;
+        UNICODE_STRING valName;
+        ULONG val = 1;
+
+        RtlInitUnicodeString(&devPath, L"\\Registry\\Machine\\SYSTEM\\CurrentControlSet\\Services\\atikmdag");
+        InitializeObjectAttributes(&objAttr, &devPath, OBJ_CASE_INSENSITIVE, NULL, NULL);
+
+        HANDLE hKey = NULL;
+        Status = ZwOpenKey(&hKey, KEY_SET_VALUE, &objAttr);
+        if (NT_SUCCESS(Status)) {
+            RtlInitUnicodeString(&valName, L"DriverEntryRan");
+            ZwSetValueKey(hKey, &valName, 0, REG_DWORD, &val, sizeof(val));
+            ZwClose(hKey);
+        }
+    }
+
     UNREFERENCED_PARAMETER(RegistryPath);
 
     g_DriverObject = DriverObject;
@@ -181,6 +200,7 @@ DriverEntry(
     /* Create control device for UMD IOCTL communication */
     {
         UNICODE_STRING devName, symLink;
+        NTSTATUS symStatus;
         RtlInitUnicodeString(&devName, L"\\Device\\AMDBC250DreamV43");
         RtlInitUnicodeString(&symLink, L"\\DosDevices\\AMDBC250DreamV43");
         RtlCopyMemory(&g_DeviceName, &devName, sizeof(UNICODE_STRING));
@@ -201,12 +221,12 @@ DriverEntry(
         if (NT_SUCCESS(Status)) {
             g_ControlDevice->Flags |= DO_BUFFERED_IO;
             g_ControlDevice->Flags &= ~DO_DEVICE_INITIALIZING;
-            IoCreateSymbolicLink(&symLink, &devName);
+            symStatus = IoCreateSymbolicLink(&symLink, &devName);
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                       "AMDBC250-DREAM-V4.3: IoCreateDevice OK, symlink=0x%08X\n", symStatus));
             DriverObject->MajorFunction[IRP_MJ_DEVICE_CONTROL] = DreamV3DeviceControl;
             DriverObject->MajorFunction[IRP_MJ_CREATE] = DreamV3CreateClose;
             DriverObject->MajorFunction[IRP_MJ_CLOSE] = DreamV3CreateClose;
-            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-                       "AMDBC250-DREAM-V4.3: Control device created: %wZ\n", &devName));
         } else {
             KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
                        "AMDBC250-DREAM-V4.3: IoCreateDevice FAILED: 0x%08X\n", Status));

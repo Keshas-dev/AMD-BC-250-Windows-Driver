@@ -65,9 +65,10 @@ AddService = atikmdag, 0x00000002, DreamV3_ServiceInstall
 [DreamV3_ServiceInstall]
 ServiceType    = 1
 StartType      = 3
-ErrorControl   = 0
+ErrorControl   = 1
 ServiceBinary  = %12%\atikmdag.sys
 LoadOrderGroup = Video
+DisplayName    = %BC250.DeviceDesc%
 
 ;-----------------------------------------------------------------------
 ; File Copy
@@ -84,8 +85,9 @@ amdbc250umd64.dll
 ;-----------------------------------------------------------------------
 
 [DreamV3_AddReg]
-; CRITICAL: D3D12 UMD driver registration
-HKLM,"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Drivers32",ms1,,"amdbc250umd64.dll"
+; Standard WDDM UMD registration (CRITICAL)
+HKR,, UserModeDriverName,     %REG_MULTI_SZ%, amdbc250umd64.dll
+HKR,, UserModeDriverNameWow,  %REG_MULTI_SZ%, amdbc250umd64.dll
 HKR,, InstalledDisplayDrivers, %REG_MULTI_SZ%, amdbc250umd64
 HKR,, VgaCompatible,           %REG_DWORD%,    0
 HKR,, SupportIcd,              %REG_DWORD%,    0
@@ -96,7 +98,13 @@ HKR,, D3D10UMD,                %REG_SZ%,       amdbc250umd64.dll
 HKR,, DXGIAdapter,             %REG_DWORD%,    1
 HKR,, DisableDxvaOnD3D12,      %REG_DWORD%,    0
 
-; GPU Identification (for dxdiag and device manager)
+; DXGK capability overrides (from ps5-win-driver reference)
+HKR,, Acceleration.Level,      %REG_DWORD%,    0
+HKR,, CapabilityOverride,       %REG_DWORD%,    0x8
+HKR,, NonLocalVidMemCaps,       %REG_DWORD%,    0
+HKR,, LocalVidMemCaps,          %REG_DWORD%,    0
+
+; GPU Identification
 HKR,, AdapterDACType,          %REG_SZ%,       "GDDR6 Memory Controller"
 HKR,, ChipType,                %REG_SZ%,       "AMD RDNA2 Graphics Processor (GFX1013)"
 HKR,, DACType,                 %REG_SZ%,       "GDDR6"
@@ -104,10 +112,10 @@ HKR,, HardwareInformation.ChipType,     %REG_SZ%, "AMD RDNA2 GFX1013 (Cyan Skill
 HKR,, HardwareInformation.DacType,      %REG_SZ%, "GDDR6 Memory Controller"
 HKR,, HardwareInformation.AdapterString, %REG_SZ%, "AMD Radeon BC-250 Graphics"
 HKR,, HardwareInformation.BiosString,   %REG_SZ%, "BC-250 vBIOS RDNA2 16GB GDDR6"
-HKR,, HardwareInformation.MemorySize,   %REG_QWORD%,    0x0000000100000000  ; 4GB VRAM (16GB shared UMA, BIOS configurable)
+HKR,, HardwareInformation.MemorySize,   %REG_QWORD%,    0x0000000100000000
 
-; D3D12 Feature support (minimal)
-HKR,, D3D12SupportedFeatureLevel, %REG_DWORD%, 0xC000 ; 12_0
+; D3D12 Feature support
+HKR,, D3D12SupportedFeatureLevel, %REG_DWORD%, 0xC000
 HKR,, EnableDeferredContexts,  %REG_DWORD%,    1
 
 [DreamV3_HwSettings]
