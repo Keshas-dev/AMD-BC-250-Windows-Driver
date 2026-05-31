@@ -701,15 +701,13 @@ static VOID DreamV3WdmUnload(_In_ PDRIVER_OBJECT DriverObject)
     UNREFERENCED_PARAMETER(DriverObject);
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                "AMDBC250-DREAM-V4.3: WDM Unload called\n"));
-
-    /* Cleanup shared memory resources */
+    
+    /* Free shared memory */
     if (g_SharedBuffer != NULL) {
         ExFreePoolWithTag(g_SharedBuffer, 'cmhS');
         g_SharedBuffer = NULL;
-        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-                   "AMDBC250-DREAM-V4.3: Shared buffer freed\n"));
     }
-
+    
     if (g_ControlDevice != NULL) {
         IoDeleteSymbolicLink(&g_SymlinkName);
         IoDeleteDevice(g_ControlDevice);
@@ -2153,15 +2151,40 @@ DreamV3DeviceControl(
             }
             status = STATUS_SUCCESS;
             goto Cleanup;
-        case 0x80000840: /* ALLOC_VIDMEM */
-            if (outputLen >= sizeof(ULONG64) * 2) {
-                PULONG64 d = (PULONG64)outputBuffer;
-                d[0] = 0x100000;  /* Fake GPU VA */
-                d[1] = 0x100000;  /* Fake CPU VA */
-                bytesReturned = sizeof(ULONG64) * 2;
+        case 0x80000840: { /* ALLOC_VIDMEM - proper MDL allocation */
+            if (inputLen >= sizeof(ULONG) * 3 && outputLen >= sizeof(ULONG64) * 2) {
+                PULONG InData = (PULONG)inputBuffer;
+                SIZE_T allocSize = (SIZE_T)InData[0];
+                allocSize = (allocSize + 0xFFF) & ~0xFFFULL; /* 4KB align */
+                if (allocSize < 4096) allocSize = 4096;
+                if (allocSize > 64 * 1024 * 1024) allocSize = 64 * 1024 * 1024;
+
+                PHYSICAL_ADDRESS low = {0}, high, skip = {0};
+                high.QuadPart = 0x3FFFFFFFFFULL; /* 40-bit */
+
+                PMDL mdl = MmAllocatePagesForMdlEx(low, high, skip, allocSize, MmCached, 0);
+                if (mdl != NULL) {
+                    PVOID va = MmMapLockedPagesSpecifyCache(mdl, KernelMode, MmCached,
+                                                           NULL, FALSE, NormalPagePriority);
+                    if (va != NULL) {
+                        PHYSICAL_ADDRESS pa = MmGetPhysicalAddress(va);
+                        PULONG64 OutData = (PULONG64)outputBuffer;
+                        OutData[0] = pa.QuadPart;
+                        OutData[1] = (ULONG64)(UINT_PTR)va;
+                        bytesReturned = sizeof(ULONG64) * 2;
+                        status = STATUS_SUCCESS;
+                    } else {
+                        MmFreePagesFromMdl(mdl);
+                        status = STATUS_INSUFFICIENT_RESOURCES;
+                    }
+                } else {
+                    status = STATUS_INSUFFICIENT_RESOURCES;
+                }
+            } else {
+                status = STATUS_BUFFER_TOO_SMALL;
             }
-            status = STATUS_SUCCESS;
             goto Cleanup;
+        }
         default:
             status = STATUS_SUCCESS;
             goto Cleanup;
