@@ -440,13 +440,8 @@ void VKAPI_CALL bc250_vkFreeMemory(
     UNREFERENCED_PARAMETER(pAllocator);
     uint32_t idx = (uint32_t)(uintptr_t)memory - 1;
     if (idx < MAX_ALLOCATIONS && g_Allocations[idx].cpuVa != NULL) {
-        BC250_VK_DEVICE* dev = (BC250_VK_DEVICE*)device;
-        /* Try KMD free first */
-        if (dev->kmdDevice != INVALID_HANDLE_VALUE) {
-            ULONG64 freeIn[1] = {g_Allocations[idx].gpuPa};
-            DWORD ret = 0;
-            DeviceIoControl(dev->kmdDevice, 0x80000934, freeIn, sizeof(freeIn), NULL, 0, &ret, NULL);
-        }
+        /* Just free CPU memory - do NOT call KMD FREE_DMA_BUFFER
+           because VirtualAlloc memory was not allocated by KMD */
         VirtualFree(g_Allocations[idx].cpuVa, 0, MEM_RELEASE);
         g_Allocations[idx].cpuVa = NULL;
         g_Allocations[idx].gpuPa = 0;

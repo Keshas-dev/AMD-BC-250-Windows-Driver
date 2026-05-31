@@ -116,7 +116,7 @@ int main(void) {
     /* Step 6: Free framebuffer */
     printf("\n--- Cleanup ---\n");
     {
-        ULONG64 freeIn[1] = {fbPa};
+        ULONG64 freeIn[1] = {(ULONG64)(UINT_PTR)fbVa};  /* Pass VA, NOT PA! */
         DWORD ret = 0;
         DeviceIoControl(kmd, IOCTL_AMDBC250_FREE_DMA_BUFFER, freeIn, sizeof(freeIn), NULL, 0, &ret, NULL);
         printf("[OK] Framebuffer freed\n");

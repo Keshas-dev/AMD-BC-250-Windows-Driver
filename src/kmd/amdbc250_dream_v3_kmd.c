@@ -2126,11 +2126,46 @@ DreamV3DeviceControl(
         goto Cleanup;
     }
 
-    /* If hardware not initialized, return dummy data for ALL IOCTLs */
+    /* If hardware not initialized, return safe dummy data */
     if (!DevExt->HardwareInitialized) {
-        /* Safe mode: return success for everything, no real work */
-        status = STATUS_SUCCESS;
-        goto Cleanup;
+        switch (ioctlCode) {
+        case 0x80000800: /* GET_CAPS */
+            if (outputLen >= sizeof(ULONG) * 7) {
+                PULONG d = (PULONG)outputBuffer;
+                d[0] = 430;  /* Version 4.3.0 */
+                d[1] = 24;   /* CUs */
+                d[2] = 2000; /* GPU clock MHz */
+                d[3] = 1750; /* Memory clock MHz */
+                d[4] = 0;    /* Temperature */
+                d[5] = 0;    /* Throttle */
+                d[6] = 0;    /* Throttle count */
+                bytesReturned = sizeof(ULONG) * 7;
+            }
+            status = STATUS_SUCCESS;
+            goto Cleanup;
+        case 0x80000804: /* GET_VRAM_INFO */
+            if (outputLen >= sizeof(ULONG) * 3) {
+                PULONG d = (PULONG)outputBuffer;
+                d[0] = 16384; /* Total MB */
+                d[1] = 4096;  /* Visible MB */
+                d[2] = 0;     /* Used MB */
+                bytesReturned = sizeof(ULONG) * 3;
+            }
+            status = STATUS_SUCCESS;
+            goto Cleanup;
+        case 0x80000840: /* ALLOC_VIDMEM */
+            if (outputLen >= sizeof(ULONG64) * 2) {
+                PULONG64 d = (PULONG64)outputBuffer;
+                d[0] = 0x100000;  /* Fake GPU VA */
+                d[1] = 0x100000;  /* Fake CPU VA */
+                bytesReturned = sizeof(ULONG64) * 2;
+            }
+            status = STATUS_SUCCESS;
+            goto Cleanup;
+        default:
+            status = STATUS_SUCCESS;
+            goto Cleanup;
+        }
     }
 
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_TRACE_LEVEL,
