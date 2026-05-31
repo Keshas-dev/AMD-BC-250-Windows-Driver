@@ -866,4 +866,64 @@ DreamV3DdiQueryInterface(
     _In_ PQUERY_INTERFACE   QueryInterface
     );
 
+/* ===== Memory Allocation Definitions ===== */
+#define GPU_PAGE_SIZE           0x1000              // 4KB
+#define GPU_PAGE_SHIFT          12
+#define GPU_PAGE_ALIGN(x)       (((x) + GPU_PAGE_SIZE - 1) & ~(GPU_PAGE_SIZE - 1))
+#define GPU_PAGE_MASK           (GPU_PAGE_SIZE - 1)
+
+#define GPU_MIN_ALLOC           GPU_PAGE_SIZE       // 4KB minimum
+#define GPU_MAX_ALLOC           (64 * 1024 * 1024)  // 64MB maximum
+
+/* Physical address limits (40-bit for BC-250) */
+#define GPU_LOWEST_PHYSICAL     0x0000000000000000ULL
+#define GPU_HIGHEST_PHYSICAL    0x0000003FFFFFFFFFULL  // 40-bit = 1TB
+
+/* Allocation entry for tracking */
+typedef struct {
+    LIST_ENTRY ListEntry;
+    PMDL Mdl;
+    PVOID VirtualAddress;
+    SIZE_T Size;
+    PHYSICAL_ADDRESS PhysicalAddress;
+    ULONG Flags;
+#define ALLOC_FLAG_VALID        0x00000001
+#define ALLOC_FLAG_LOCKED       0x00000002
+} GPU_ALLOCATION_ENTRY, *PGPU_ALLOCATION_ENTRY;
+
+/* Global allocation manager */
+typedef struct {
+    LIST_ENTRY AllocationList;
+    KSPIN_LOCK SpinLock;
+    ULONG AllocationCount;
+    ULONG64 TotalAllocatedBytes;
+} GPU_ALLOCATION_MANAGER, *PGPU_ALLOCATION_MANAGER;
+
+/* ===== DCN 2.1 Display Engine Registers ===== */
+
+/* HUBP (HUB Pipe) base addresses */
+#define HUBPREQ0_BASE                   0x1C00
+#define HUBPREQ_SURFACE_ADDRESS         (HUBPREQ0_BASE + 0x04)      // [31:0]
+#define HUBPREQ_SURFACE_ADDRESS_HIGH    (HUBPREQ0_BASE + 0x08)      // [39:32]
+#define HUBPREQ_SURFACE_PITCH           (HUBPREQ0_BASE + 0x0C)
+#define HUBPREQ_SURFACE_HEIGHT          (HUBPREQ0_BASE + 0x10)
+#define HUBPREQ_SURFACE_FORMAT          (HUBPREQ0_BASE + 0x14)
+#define HUBPREQ_ENABLE                  (HUBPREQ0_BASE + 0x18)
+#define HUBPREQ_FLIP_CONTROL            (HUBPREQ0_BASE + 0x1C)
+
+/* Pixel format constants */
+#define HUBPREQ_FORMAT_ARGB8888         0x00000004
+#define HUBPREQ_FORMAT_XRGB8888         0x00000001
+#define HUBPREQ_FORMAT_RGB565           0x00000000
+
+/* Display Flip Request Structure */
+typedef struct {
+    ULONG64 SurfaceGpuVa;       // GPU virtual address
+    ULONG Width;                // Width in pixels
+    ULONG Height;               // Height in pixels
+    ULONG Pitch;                // Pitch in bytes (optional, auto-calc if 0)
+    ULONG PixelFormat;          // HUBPREQ_FORMAT_*
+    ULONG VidPnSourceId;        // Display output ID
+} DISPLAY_FLIP_REQUEST, *PDISPLAY_FLIP_REQUEST;
+
 #endif /* _AMDBC250_DREAM_V3_KMD_H_ */

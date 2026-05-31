@@ -1,7 +1,0 @@
-=== D3D9 Diagnostic ===
-Direct3DCreate9: OK
-Adapter count: 1
-Adapter[0]: Microsoft Basic Render Driver (Vendor=0x1414 Device=0x008C)
-  HAL caps: OK (0x00000000)
-  REF caps: OK (0x00000000)
-CreateDevice[0] HAL: OK (0x00000000)

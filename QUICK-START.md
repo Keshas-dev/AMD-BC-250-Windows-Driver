@@ -41,11 +41,20 @@ reg add "HKLM\SYSTEM\CurrentControlSet\Services\AMDBC250DreamV43" /v Enable40CU 
 # Reboot
 ```
 
-## 6. Test
+## 6. Register Vulkan ICD
 
 ```cmd
-test-tools\test-gpu-ioctls.exe      # IOCTL communication test
-test-tools\simple_test.exe           # Vulkan ICD test
+tools\register-icd.bat
+```
+
+## 7. Test
+
+```cmd
+test-tools\test-gpu-ioctls.exe      # IOCTL test (14/15 pass)
+test-tools\test-vulkan-icd.exe      # Vulkan ICD test (13/13 pass)
+test-tools\test-gpu-hw-init.exe     # Hardware init test (5/7 pass)
+test-tools\test-d3d9-adapter.exe    # D3D9 adapter test (5/5 pass)
+vulkaninfo.exe                      # Official Vulkan test (passes!)
 ```
 
 ## Uninstall

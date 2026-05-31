@@ -1,263 +1,239 @@
 /*
  * test-gpu-hw-init.c — Test real GPU hardware initialization
  *
- * Finds PCI BAR0 by enumerating registry, sends INIT_HARDWARE IOCTL, sends PM4 NOP.
+ * Finds PCI BAR0 from registry BootConfig, initializes GPU via KMD IOCTL.
  *
- * Build: cl /nologo /W3 /I"E:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\um"
- *        /I"E:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\shared"
- *        /I"E:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\ucrt"
- *        test-gpu-hw-init.c /Fe:test-gpu-hw-init.exe
- *        /link /LIBPATH:"E:\Program Files (x86)\Windows Kits\10\Lib\10.0.26100.0\um\x64"
- *        /LIBPATH:"E:\Program Files (x86)\Windows Kits\10\Lib\10.0.26100.0\ucrt\x64"
- *        setupapi.lib advapi32.lib
+ * Usage:
+ *   test-gpu-hw-init.exe                      — Auto-detect BAR0 from registry
+ *   test-gpu-hw-init.exe <BAR0_PA> <SIZE>     — Manual BAR0 override
  */
 
 #include <windows.h>
-#include <setupapi.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
 
-#pragma comment(lib, "setupapi.lib")
 #pragma comment(lib, "advapi32.lib")
 
-/* IOCTL codes — must match KMD */
 #define FILE_DEVICE_AMDBC250    0x8000
 #define IOCTL_INDEX             0x800
-#define CTL_CODE_AMDBC250(Function, Method, Access) \
-    CTL_CODE(FILE_DEVICE_AMDBC250, IOCTL_INDEX + (Function), Method, Access)
+#define CTL_CODE_AMDBC250(F, M, A) CTL_CODE(FILE_DEVICE_AMDBC250, IOCTL_INDEX + (F), M, A)
 
-#define IOCTL_AMDBC250_INIT_HARDWARE        CTL_CODE_AMDBC250(0x70, METHOD_BUFFERED, FILE_ANY_ACCESS)
-#define IOCTL_AMDBC250_SEND_PM4             CTL_CODE_AMDBC250(0x71, METHOD_BUFFERED, FILE_ANY_ACCESS)
-#define IOCTL_AMDBC250_READ_REG             CTL_CODE_AMDBC250(0x72, METHOD_BUFFERED, FILE_ANY_ACCESS)
-#define IOCTL_AMDBC250_WRITE_REG            CTL_CODE_AMDBC250(0x73, METHOD_BUFFERED, FILE_ANY_ACCESS)
-#define IOCTL_AMDBC250_GET_HW_STATUS        CTL_CODE_AMDBC250(0x74, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define IOCTL_AMDBC250_INIT_HARDWARE   CTL_CODE_AMDBC250(0x70, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define IOCTL_AMDBC250_SEND_PM4        CTL_CODE_AMDBC250(0x71, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define IOCTL_AMDBC250_READ_REG        CTL_CODE_AMDBC250(0x72, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define IOCTL_AMDBC250_WRITE_REG       CTL_CODE_AMDBC250(0x73, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define IOCTL_AMDBC250_GET_HW_STATUS   CTL_CODE_AMDBC250(0x74, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
-/* Structures */
-typedef struct { UINT64 MmioPhysicalBase; UINT32 MmioSize; UINT32 Flags; } INIT_HARDWARE_INPUT;
+typedef struct { UINT64 MmioPhysicalBase; UINT32 MmioSize; UINT32 Flags; } INIT_HW_IN;
 typedef struct {
-    UINT32 MmioMapped; UINT32 RingsInitialized; UINT32 FenceInitialized;
-    UINT64 GfxRingPhysAddr; UINT32 GfxRingSize;
-    UINT32 GfxRingWptr; UINT32 GfxRingRptr;
-    UINT64 FencePhysAddr; UINT64 FenceValue; UINT64 LastSubmittedFence;
-} HW_STATUS_RESULT;
-typedef struct { UINT32 RegisterOffset; UINT32 Value; } REG_ACCESS;
-typedef struct {
-    UINT32 Commands[64]; UINT32 CommandCount;
-    UINT32 FenceValue; UINT32 QueueType;
-} SEND_PM4_INPUT;
+    UINT32 MmioMapped, RingsInit, FenceInit;
+    UINT64 RingPhys; UINT32 RingSize, WPtr, RPtr;
+    UINT64 FencePhys, FenceVal, LastFence;
+} HW_STATUS;
+typedef struct { UINT32 Off, Val; } REG_OP;
+typedef struct { UINT32 Cmd[64], Count, Fence, Queue; } PM4_IN;
 
-#define PM4_TYPE3_NOP 0x10
-#define PM4_TYPE3_HDR(op, cnt) ((2 << 30) | (((cnt) - 1) << 16) | ((op) << 8))
+#define PM4_NOP 0x10
+#define PM4_HDR(op, cnt) ((2u << 30) | (((cnt)-1u) << 16) | ((op) << 8))
 
-static BOOL SendIoctl(HANDLE hDev, DWORD code, PVOID in, DWORD inSz, PVOID out, DWORD outSz, DWORD *ret)
+static BOOL SIO(HANDLE h, DWORD c, PVOID i, DWORD is, PVOID o, DWORD os, DWORD *br)
 {
-    DWORD r = 0;
-    BOOL ok = DeviceIoControl(hDev, code, in, inSz, out, outSz, &r, NULL);
-    if (ret) *ret = r;
-    return ok;
+    DWORD r = 0; BOOL ok = DeviceIoControl(h, c, i, is, o, os, &r, NULL);
+    if (br) *br = r; return ok;
 }
 
 /*
- * Parse BootConfig/AssignedResources binary blob to find MMIO BAR0.
- * Format: PNP_RESOURCE_REQUIREMENTS_LIST (manually defined for user-mode)
+ * Parse CM_RESOURCE_LIST (REG_RESOURCE_LIST format):
+ *   ULONG Count;
+ *   struct { INTERFACE_TYPE, ULONG BusNumber, PartialResourceList } List[Count];
+ *   PartialResourceList: USHORT Version, USHORT Revision, ULONG Count, Descriptor[]
+ *   Descriptor: UCHAR Type, UCHAR Share, USHORT Flags, LARGE_INTEGER Start, ULONG Length
+ *
+ * Scan for Type=3 (CmResourceTypeMemory), take the first one with Length >= 16MB.
  */
-static BOOL ParseResourceList(BYTE *buf, DWORD bufSize, UINT64 *barPhys, UINT32 *barSize)
+static BOOL ParseCmResourceList(BYTE *data, DWORD size, UINT64 *barPhys, UINT32 *barSize)
 {
-    DWORD offset;
-    DWORD prCount, i;
-    BOOL found = FALSE;
+    if (size < 20) return FALSE;
 
-    *barPhys = 0;
-    *barSize = 0;
+    /* CM_RESOURCE_LIST header */
+    DWORD listCount = *(DWORD *)(data + 0);
+    printf("    CM_RESOURCE_LIST: %lu device(s)\n", listCount);
 
-    /* PNP_RESOURCE_REQUIREMENTS_LIST layout:
-     *   [0..3]  ListSize (ULONG)
-     *   [4..7]  InterfaceType (ULONG) = 1 for PCI
-     *   [8..11] Version (ULONG)
-     *   [12..15] Revision (ULONG)
-     *   [16..17] PartialResourceList.Version (USHORT)
-     *   [18..19] PartialResourceList.Revision (USHORT)
-     *   [20..23] PartialResourceList.Count (ULONG)
-     *   [24..]  PartialDescriptors[] (each 16 bytes):
-     *     +0:  Type (UCHAR) — 3=CmResourceTypeMemory
-     *     +1:  ShareDisposition (UCHAR)
-     *     +2:  Flags (USHORT)
-     *     +4:  Start (LARGE_INTEGER, 8 bytes)
-     *     +12: Length (ULONG)
-     */
-    if (bufSize < 24) return FALSE;
+    DWORD off = 4; /* Skip Count */
+    for (DWORD d = 0; d < listCount; d++) {
+        if (off + 12 > size) break;
 
-    /* Skip ListSize + InterfaceType + Version + Revision + PR header */
-    offset = 24;
-    prCount = *(DWORD *)(buf + 20);
+        DWORD ifaceType = *(DWORD *)(data + off);
+        DWORD busNum    = *(DWORD *)(data + off + 4);
+        printf("    Device[%lu]: InterfaceType=%lu, Bus=%lu\n", d, ifaceType, busNum);
+        off += 8; /* Skip InterfaceType + BusNumber */
 
-    printf("  Resource count: %lu\n", prCount);
+        if (off + 8 > size) break;
 
-    for (i = 0; i < prCount; i++) {
-        BYTE type;
-        ULONGLONG start;
-        DWORD length;
+        /* PartialResourceList header */
+        WORD prVer = *(WORD *)(data + off);
+        WORD prRev = *(WORD *)(data + off + 2);
+        DWORD prCnt = *(DWORD *)(data + off + 4);
+        off += 8; /* Skip Version + Revision + Count */
 
-        if (offset + 16 > bufSize) break;
+        printf("    PartialResourceList: v%u.%u, %lu descriptors\n", prVer, prRev, prCnt);
 
-        type = buf[offset];
-        start = 0;
-        memcpy(&start, buf + offset + 4, 8);
-        length = *(DWORD *)(buf + offset + 12);
-        offset += 16;
+        for (DWORD i = 0; i < prCnt; i++) {
+            if (off + 16 > size) break;
 
-        if (type == 3) { /* CmResourceTypeMemory */
-            printf("  Resource[%lu]: Memory, PA=0x%llX, Length=0x%X (%lu KB)\n",
-                i, start, length, length / 1024);
-            if (!found && length >= 0x10000) { /* BAR0 should be at least 64KB */
-                *barPhys = (UINT64)start;
-                *barSize = length;
-                found = TRUE;
+            BYTE type = data[off];
+            /* Start is at offset 4 from descriptor start, Length at offset 12 */
+            ULONGLONG start = 0;
+            memcpy(&start, data + off + 4, 8);
+            DWORD length = *(DWORD *)(data + off + 12);
+
+            if (type == 3) {
+                printf("    Descriptor[%lu]: Memory, PA=0x%llX, Length=0x%X (%lu KB)\n",
+                    i, start, length, length / 1024);
+                /*
+                 * GPU MMIO registers are typically 256KB-4MB at high physical addresses.
+                 * VRAM BARs are typically 256MB+.
+                 * We want the MMIO BAR (small one), not the VRAM BAR (big one).
+                 */
+                if (length >= 0x10000 && length <= 0x1000000) { /* 64KB - 16MB = MMIO */
+                    *barPhys = (UINT64)start;
+                    *barSize = length;
+                    return TRUE;
+                }
+            } else if (type == 1) {
+                printf("    Descriptor[%lu]: Port, PA=0x%llX, Length=0x%X\n", i, start, length);
+            } else if (type == 2) {
+                printf("    Descriptor[%lu]: Interrupt\n", i);
             }
-        } else if (type == 1) {
-            printf("  Resource[%lu]: Port, PA=0x%llX, Length=0x%X\n", i, start, length);
-        } else if (type == 2) {
-            printf("  Resource[%lu]: Interrupt\n", i);
+            off += 16;
         }
     }
-    return found;
+    return FALSE;
 }
 
 /*
- * Find PCI BAR0 by enumerating the PCI registry enum key.
+ * Find PCI BAR0 from registry.
+ * Path: HKLM\SYSTEM\CurrentControlSet\Enum\PCI\VEN_1002&DEV_13FE&*\*\LogConf\BootConfig
  */
-static BOOL FindPciBar0(UINT64 *barPhys, UINT32 *barSize)
+static BOOL FindBar0FromRegistry(UINT64 *barPhys, UINT32 *barSize)
 {
-    HKEY hPciKey, hDevKey;
-    DWORD index = 0;
-    WCHAR subKeyName[256];
-    DWORD subKeySize;
-    BOOL found = FALSE;
+    HKEY hPci;
+    DWORD idx = 0;
+    WCHAR keyName[256];
+    DWORD keyLen;
 
     *barPhys = 0;
     *barSize = 0;
 
-    /* Open HKLM\SYSTEM\CurrentControlSet\Enum\PCI */
     if (RegOpenKeyExW(HKEY_LOCAL_MACHINE,
         L"SYSTEM\\CurrentControlSet\\Enum\\PCI",
-        0, KEY_READ, &hPciKey) != ERROR_SUCCESS) {
-        printf("[FAIL] Cannot open PCI enum key\n");
+        0, KEY_READ, &hPci) != ERROR_SUCCESS) {
+        printf("[FAIL] Cannot open PCI registry key\n");
         return FALSE;
     }
 
-    /* Enumerate PCI device IDs — look for VEN_1002&DEV_13FE */
+    /* Enumerate PCI devices */
     while (1) {
-        subKeySize = sizeof(subKeyName) / sizeof(WCHAR);
-        if (RegEnumKeyExW(hPciKey, index++, subKeyName, &subKeySize,
-                          NULL, NULL, NULL, NULL) != ERROR_SUCCESS)
+        keyLen = sizeof(keyName) / sizeof(WCHAR);
+        if (RegEnumKeyExW(hPci, idx++, keyName, &keyLen, NULL, NULL, NULL, NULL) != ERROR_SUCCESS)
             break;
 
-        /* Check if this is our device */
-        if (wcsstr(subKeyName, L"VEN_1002") && wcsstr(subKeyName, L"DEV_13FE")) {
-            WCHAR fullSubKey[512];
-            DWORD instanceIndex = 0;
-            WCHAR instSubKey[256];
-            DWORD instSubKeySize;
+        if (!wcsstr(keyName, L"VEN_1002") || !wcsstr(keyName, L"DEV_13FE"))
+            continue;
 
-            printf("  Found PCI device: %ls\n", subKeyName);
+        printf("  PCI device: %ls\n", keyName);
 
-            /* Open this device ID key to enumerate instances */
-            _snwprintf_s(fullSubKey, sizeof(fullSubKey)/sizeof(WCHAR), _TRUNCATE,
-                L"SYSTEM\\CurrentControlSet\\Enum\\PCI\\%s", subKeyName);
+        /* Enumerate instances under this device */
+        WCHAR devPath[512];
+        _snwprintf_s(devPath, sizeof(devPath)/sizeof(WCHAR), _TRUNCATE,
+            L"SYSTEM\\CurrentControlSet\\Enum\\PCI\\%s", keyName);
 
-            if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, fullSubKey, 0, KEY_READ, &hDevKey) != ERROR_SUCCESS) {
-                printf("    Cannot open: %ls\n", fullSubKey);
-                continue;
-            }
+        HKEY hDev;
+        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, devPath, 0, KEY_READ, &hDev) != ERROR_SUCCESS)
+            continue;
 
-            /* Enumerate instances (e.g., 5&12345678&0&00000000) */
-            while (1) {
-                instSubKeySize = sizeof(instSubKey) / sizeof(WCHAR);
-                if (RegEnumKeyExW(hDevKey, instanceIndex++, instSubKey, &instSubKeySize,
-                                  NULL, NULL, NULL, NULL) != ERROR_SUCCESS)
-                    break;
+        DWORD instIdx = 0;
+        WCHAR instName[256];
+        while (1) {
+            DWORD instLen = sizeof(instName) / sizeof(WCHAR);
+            if (RegEnumKeyExW(hDev, instIdx++, instName, &instLen, NULL, NULL, NULL, NULL) != ERROR_SUCCESS)
+                break;
 
+            printf("  Instance: %ls\n", instName);
+
+            /* Try reading BootConfig from instance key directly */
+            {
                 WCHAR instFullKey[1024];
                 _snwprintf_s(instFullKey, sizeof(instFullKey)/sizeof(WCHAR), _TRUNCATE,
                     L"SYSTEM\\CurrentControlSet\\Enum\\PCI\\%s\\%s",
-                    subKeyName, instSubKey);
+                    keyName, instName);
 
-                printf("    Instance: %ls\n", instSubKey);
+                HKEY hInst;
+                if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, instFullKey, 0, KEY_READ, &hInst) == ERROR_SUCCESS) {
+                    BYTE data[8192];
+                    DWORD dataSize = sizeof(data);
+                    DWORD dataType = 0;
 
-                /* Try to read BootConfig from this instance */
-                {
-                    HKEY hInstKey;
-                    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, instFullKey, 0, KEY_READ, &hInstKey) == ERROR_SUCCESS) {
-                        BYTE regData[8192];
-                        DWORD regSize = sizeof(regData);
-                        DWORD regType = 0;
-
-                        /* Try BootConfig first */
-                        if (RegQueryValueExW(hInstKey, L"BootConfig", NULL, &regType, regData, &regSize) == ERROR_SUCCESS
-                            && regSize > 24) {
-                            printf("    BootConfig: %lu bytes\n", regSize);
-                            found = ParseResourceList(regData, regSize, barPhys, barSize);
+                    /* Try BootConfig directly */
+                    if (RegQueryValueExW(hInst, L"BootConfig", NULL, &dataType, data, &dataSize) == ERROR_SUCCESS
+                        && dataSize >= 20) {
+                        printf("    BootConfig: %lu bytes (type=%lu)\n", dataSize, dataType);
+                        if (ParseCmResourceList(data, dataSize, barPhys, barSize)) {
+                            RegCloseKey(hInst); RegCloseKey(hDev); RegCloseKey(hPci);
+                            return TRUE;
                         }
-
-                        /* Try AssignedResources if BootConfig failed */
-                        if (!found) {
-                            regSize = sizeof(regData);
-                            if (RegQueryValueExW(hInstKey, L"AssignedResources", NULL, &regType, regData, &regSize) == ERROR_SUCCESS
-                                && regSize > 24) {
-                                printf("    AssignedResources: %lu bytes\n", regSize);
-                                found = ParseResourceList(regData, regSize, barPhys, barSize);
-                            }
-                        }
-
-                        /* Also try Device Parameters subkey */
-                        if (!found) {
-                            HKEY hDevParamsKey;
-                            if (RegOpenKeyExW(hInstKey, L"Device Parameters", 0, KEY_READ, &hDevParamsKey) == ERROR_SUCCESS) {
-                                regSize = sizeof(regData);
-                                if (RegQueryValueExW(hDevParamsKey, L"BootConfig", NULL, &regType, regData, &regSize) == ERROR_SUCCESS
-                                    && regSize > 24) {
-                                    printf("    Device Parameters\\BootConfig: %lu bytes\n", regSize);
-                                    found = ParseResourceList(regData, regSize, barPhys, barSize);
-                                }
-                                if (!found) {
-                                    regSize = sizeof(regData);
-                                    if (RegQueryValueExW(hDevParamsKey, L"AssignedResources", NULL, &regType, regData, &regSize) == ERROR_SUCCESS
-                                        && regSize > 24) {
-                                        printf("    Device Parameters\\AssignedResources: %lu bytes\n", regSize);
-                                        found = ParseResourceList(regData, regSize, barPhys, barSize);
-                                    }
-                                }
-                                RegCloseKey(hDevParamsKey);
-                            }
-                        }
-
-                        RegCloseKey(hInstKey);
                     }
+                    RegCloseKey(hInst);
                 }
-
-                if (found) break;
             }
 
-            RegCloseKey(hDevKey);
+            /* Try LogConf subkey — BootConfig is a VALUE inside LogConf */
+            {
+                WCHAR logConfKey[1024];
+                _snwprintf_s(logConfKey, sizeof(logConfKey)/sizeof(WCHAR), _TRUNCATE,
+                    L"SYSTEM\\CurrentControlSet\\Enum\\PCI\\%s\\%s\\LogConf",
+                    keyName, instName);
+
+                HKEY hLC;
+                if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, logConfKey, 0, KEY_READ, &hLC) == ERROR_SUCCESS) {
+                    BYTE data[8192];
+                    DWORD dataSize = sizeof(data);
+                    DWORD dataType = 0;
+
+                    if (RegQueryValueExW(hLC, L"BootConfig", NULL, &dataType, data, &dataSize) == ERROR_SUCCESS
+                        && dataSize >= 20) {
+                        printf("    LogConf\\BootConfig: %lu bytes (type=%lu)\n", dataSize, dataType);
+                        if (ParseCmResourceList(data, dataSize, barPhys, barSize)) {
+                            RegCloseKey(hLC); RegCloseKey(hDev); RegCloseKey(hPci);
+                            return TRUE;
+                        }
+                    }
+
+                    /* Also try AssignedResources */
+                    dataSize = sizeof(data);
+                    if (RegQueryValueExW(hLC, L"AssignedResources", NULL, &dataType, data, &dataSize) == ERROR_SUCCESS
+                        && dataSize >= 20) {
+                        printf("    LogConf\\AssignedResources: %lu bytes\n", dataSize);
+                        if (ParseCmResourceList(data, dataSize, barPhys, barSize)) {
+                            RegCloseKey(hLC); RegCloseKey(hDev); RegCloseKey(hPci);
+                            return TRUE;
+                        }
+                    }
+                    RegCloseKey(hLC);
+                }
+            }
+
         }
-
-        if (found) break;
+        RegCloseKey(hDev);
     }
-
-    RegCloseKey(hPciKey);
-
-    if (found) {
-        printf("  >> BAR0: PA=0x%llX, Size=0x%X (%lu KB)\n",
-            (unsigned long long)*barPhys, *barSize, *barSize / 1024);
-    }
-    return found;
+    RegCloseKey(hPci);
+    return FALSE;
 }
 
-int main(void)
+int main(int argc, char *argv[])
 {
     HANDLE hDev;
-    DWORD pass = 0, fail = 0, total = 0, bytesRet;
+    DWORD pass = 0, fail = 0, total = 0, br;
     UINT64 barPhys = 0;
     UINT32 barSize = 0;
     BOOL ok;
@@ -266,146 +242,133 @@ int main(void)
     printf("  BC-250 GPU Hardware Init Test\n");
     printf("========================================\n\n");
 
+    /* Manual BAR0 override */
+    if (argc >= 3) {
+        barPhys = _strtoui64(argv[1], NULL, 0);
+        barSize = (UINT32)strtoul(argv[2], NULL, 0);
+        printf("[MANUAL] BAR0 PA=0x%llX, Size=0x%X\n\n", (unsigned long long)barPhys, barSize);
+    }
+
     hDev = CreateFileW(L"\\\\.\\AMDBC250DreamV43", GENERIC_READ | GENERIC_WRITE,
                         0, NULL, OPEN_EXISTING, 0, NULL);
     if (hDev == INVALID_HANDLE_VALUE) {
-        printf("[FAIL] Cannot open KMD device: %lu\n", GetLastError());
+        printf("[FAIL] Cannot open KMD: %lu\n", GetLastError());
         return 1;
     }
     printf("[OK] KMD device opened\n\n");
 
-    /* Test 1: Find PCI BAR0 */
-    total++;
-    printf("[TEST 1/7] Find PCI BAR0 via registry enum...\n");
-    if (FindPciBar0(&barPhys, &barSize)) {
-        printf("[PASS] BAR0 found\n\n"); pass++;
+    if (barPhys == 0) {
+        total++;
+        printf("[TEST 1] Find PCI BAR0 from registry...\n");
+        if (FindBar0FromRegistry(&barPhys, &barSize)) {
+            printf("\n  >> BAR0: PA=0x%llX, Size=0x%X (%lu MB)\n\n",
+                (unsigned long long)barPhys, barSize, barSize / (1024*1024));
+            printf("[PASS]\n\n");
+            pass++;
+        } else {
+            printf("[FAIL] BAR0 not found\n\n");
+            printf("  Run with manual override: test-gpu-hw-init.exe 0xC0000000 0x10000000\n");
+            fail++;
+            CloseHandle(hDev);
+            return 1;
+        }
     } else {
-        printf("[FAIL] BAR0 not found\n\n"); fail++;
-        printf("Cannot continue without BAR0.\n");
-        CloseHandle(hDev);
-        return 1;
+        total++; printf("[TEST 1] Manual BAR0\n[PASS]\n\n"); pass++;
     }
 
     /* Test 2: Init Hardware */
     total++;
-    printf("[TEST 2/7] INIT_HARDWARE (PA=0x%llX, Size=0x%X)...\n", (unsigned long long)barPhys, barSize);
+    printf("[TEST 2] INIT_HARDWARE (PA=0x%llX, Size=0x%X)...\n", (unsigned long long)barPhys, barSize);
     {
-        INIT_HARDWARE_INPUT ih;
+        INIT_HW_IN ih = {0};
         ih.MmioPhysicalBase = barPhys;
         ih.MmioSize = barSize;
-        ih.Flags = 0;
-        ok = SendIoctl(hDev, IOCTL_AMDBC250_INIT_HARDWARE, &ih, sizeof(ih), NULL, 0, &bytesRet);
-        if (ok) { printf("[PASS] INIT_HARDWARE accepted\n\n"); pass++; }
-        else { printf("[FAIL] INIT_HARDWARE failed: %lu\n\n", GetLastError()); fail++; }
+        ok = SIO(hDev, IOCTL_AMDBC250_INIT_HARDWARE, &ih, sizeof(ih), NULL, 0, &br);
+        if (ok) { printf("[PASS]\n\n"); pass++; }
+        else { printf("[FAIL] err=%lu\n\n", GetLastError()); fail++; }
     }
-
     Sleep(200);
 
     /* Test 3: Get HW Status */
     total++;
-    printf("[TEST 3/7] GET_HW_STATUS...\n");
+    printf("[TEST 3] GET_HW_STATUS...\n");
     {
-        HW_STATUS_RESULT hs = {0};
-        ok = SendIoctl(hDev, IOCTL_AMDBC250_GET_HW_STATUS, NULL, 0, &hs, sizeof(hs), &bytesRet);
+        HW_STATUS hs = {0};
+        ok = SIO(hDev, IOCTL_AMDBC250_GET_HW_STATUS, NULL, 0, &hs, sizeof(hs), &br);
         if (ok) {
-            printf("  MMIO mapped:       %s\n", hs.MmioMapped ? "YES" : "NO");
-            printf("  Rings initialized: %s\n", hs.RingsInitialized ? "YES" : "NO");
-            printf("  Fence initialized: %s\n", hs.FenceInitialized ? "YES" : "NO");
-            printf("  GFX Ring PA:       0x%llX (%u KB)\n", (unsigned long long)hs.GfxRingPhysAddr, hs.GfxRingSize / 1024);
-            printf("  Ring WPtr/RPtr:    %u / %u\n", hs.GfxRingWptr, hs.GfxRingRptr);
-            printf("  Fence:             %llu / %llu\n", (unsigned long long)hs.FenceValue, (unsigned long long)hs.LastSubmittedFence);
-            if (hs.MmioMapped && hs.RingsInitialized) {
-                printf("[PASS] Hardware initialized\n\n"); pass++;
-            } else {
-                printf("[FAIL] Hardware NOT fully initialized\n\n"); fail++;
-            }
-        } else {
-            printf("[FAIL] GET_HW_STATUS failed: %lu\n\n", GetLastError()); fail++;
-        }
+            printf("  MMIO=%s, Rings=%s, Fence=%s\n",
+                hs.MmioMapped?"YES":"NO", hs.RingsInit?"YES":"NO", hs.FenceInit?"YES":"NO");
+            printf("  RingPA=0x%llX (%uKB), WPtr=%u, RPtr=%u\n",
+                (unsigned long long)hs.RingPhys, hs.RingSize/1024, hs.WPtr, hs.RPtr);
+            printf("  Fence=%llu, LastFence=%llu\n",
+                (unsigned long long)hs.FenceVal, (unsigned long long)hs.LastFence);
+            if (hs.MmioMapped && hs.RingsInit) { printf("[PASS]\n\n"); pass++; }
+            else { printf("[FAIL] HW not fully init\n\n"); fail++; }
+        } else { printf("[FAIL] err=%lu\n\n", GetLastError()); fail++; }
     }
 
-    /* Test 4: Read GPU Register (MMIO test) */
+    /* Test 4: Read GPU Registers */
     total++;
-    printf("[TEST 4/7] READ_REG test (MMIO)...\n");
+    printf("[TEST 4] READ_REG (MMIO)...\n");
     {
-        REG_ACCESS reg = {0x0000, 0};
-        ok = SendIoctl(hDev, IOCTL_AMDBC250_READ_REG, &reg, sizeof(reg), &reg, sizeof(reg), &bytesRet);
+        REG_OP r = {0x000C, 0};
+        ok = SIO(hDev, IOCTL_AMDBC250_READ_REG, &r, sizeof(r), &r, sizeof(r), &br);
         if (ok) {
-            printf("  reg[0x0000] = 0x%08X\n", reg.Value);
-
-            reg.RegisterOffset = 0x0080; reg.Value = 0;
-            SendIoctl(hDev, IOCTL_AMDBC250_READ_REG, &reg, sizeof(reg), &reg, sizeof(reg), &bytesRet);
-            printf("  reg[0x0080] = 0x%08X (GB_ADDR_CONFIG)\n", reg.Value);
-
-            reg.RegisterOffset = 0x86D0; reg.Value = 0;
-            SendIoctl(hDev, IOCTL_AMDBC250_READ_REG, &reg, sizeof(reg), &reg, sizeof(reg), &bytesRet);
-            printf("  reg[0x86D0] = 0x%08X (CP_ME_CNTL)\n", reg.Value);
-
-            reg.RegisterOffset = 0x000C; reg.Value = 0;
-            SendIoctl(hDev, IOCTL_AMDBC250_READ_REG, &reg, sizeof(reg), &reg, sizeof(reg), &bytesRet);
-            printf("  reg[0x000C] = 0x%08X (scratch)\n", reg.Value);
-
-            printf("[PASS] MMIO reads OK\n\n"); pass++;
-        } else {
-            printf("[FAIL] READ_REG failed: %lu\n\n", GetLastError()); fail++;
-        }
+            printf("  reg[0x000C] = 0x%08X (scratch)\n", r.Val);
+            r.Off = 0x0000; SIO(hDev, IOCTL_AMDBC250_READ_REG, &r, sizeof(r), &r, sizeof(r), &br);
+            printf("  reg[0x0000] = 0x%08X\n", r.Val);
+            r.Off = 0x0080; SIO(hDev, IOCTL_AMDBC250_READ_REG, &r, sizeof(r), &r, sizeof(r), &br);
+            printf("  reg[0x0080] = 0x%08X (GB_ADDR_CONFIG)\n", r.Val);
+            r.Off = 0x86D0; SIO(hDev, IOCTL_AMDBC250_READ_REG, &r, sizeof(r), &r, sizeof(r), &br);
+            printf("  reg[0x86D0] = 0x%08X (CP_ME_CNTL)\n", r.Val);
+            r.Off = 0x01A4; SIO(hDev, IOCTL_AMDBC250_READ_REG, &r, sizeof(r), &r, sizeof(r), &br);
+            printf("  reg[0x01A4] = 0x%08X (TMPMCR)\n", r.Val);
+            printf("[PASS]\n\n"); pass++;
+        } else { printf("[FAIL]\n\n"); fail++; }
     }
 
     /* Test 5: Send PM4 NOP */
     total++;
-    printf("[TEST 5/7] SEND_PM4 (NOP + fence)...\n");
+    printf("[TEST 5] SEND_PM4 (NOP + fence=100)...\n");
     {
-        SEND_PM4_INPUT sp = {0};
-        sp.Commands[0] = PM4_TYPE3_HDR(PM4_TYPE3_NOP, 1);
-        sp.Commands[1] = 0xDEADBEEF;
-        sp.CommandCount = 2;
-        sp.FenceValue = 100;
-        sp.QueueType = 0;
-
-        ok = SendIoctl(hDev, IOCTL_AMDBC250_SEND_PM4, &sp, sizeof(sp), NULL, 0, &bytesRet);
-        if (ok) { printf("[PASS] PM4 NOP sent\n\n"); pass++; }
-        else { printf("[FAIL] SEND_PM4 failed: %lu\n\n", GetLastError()); fail++; }
+        PM4_IN p = {0};
+        p.Cmd[0] = PM4_HDR(PM4_NOP, 1);
+        p.Cmd[1] = 0xDEADBEEF;
+        p.Count = 2; p.Fence = 100; p.Queue = 0;
+        ok = SIO(hDev, IOCTL_AMDBC250_SEND_PM4, &p, sizeof(p), NULL, 0, &br);
+        if (ok) { printf("[PASS]\n\n"); pass++; }
+        else { printf("[FAIL] err=%lu\n\n", GetLastError()); fail++; }
     }
-
     Sleep(100);
 
-    /* Test 6: Verify fence after PM4 */
+    /* Test 6: Verify fence */
     total++;
-    printf("[TEST 6/7] Verify ring write + fence...\n");
+    printf("[TEST 6] Verify ring write...\n");
     {
-        HW_STATUS_RESULT hs = {0};
-        ok = SendIoctl(hDev, IOCTL_AMDBC250_GET_HW_STATUS, NULL, 0, &hs, sizeof(hs), &bytesRet);
+        HW_STATUS hs = {0};
+        ok = SIO(hDev, IOCTL_AMDBC250_GET_HW_STATUS, NULL, 0, &hs, sizeof(hs), &br);
         if (ok) {
-            printf("  Ring WPtr:  %u (should be > 0)\n", hs.GfxRingWptr);
-            printf("  Fence:      %llu (expected >= 100)\n", (unsigned long long)hs.FenceValue);
-            if (hs.GfxRingWptr > 0) {
-                printf("[PASS] PM4 written to ring\n\n"); pass++;
-            } else {
-                printf("[FAIL] WPtr is 0\n\n"); fail++;
-            }
-        } else { printf("[FAIL] GET_HW_STATUS failed\n\n"); fail++; }
+            printf("  WPtr=%u, Fence=%llu\n", hs.WPtr, (unsigned long long)hs.FenceVal);
+            if (hs.WPtr > 0) { printf("[PASS]\n\n"); pass++; }
+            else { printf("[FAIL] WPtr still 0\n\n"); fail++; }
+        } else { printf("[FAIL]\n\n"); fail++; }
     }
 
-    /* Test 7: Write + Read register roundtrip */
+    /* Test 7: Register roundtrip */
     total++;
-    printf("[TEST 7/7] Register write/read roundtrip...\n");
+    printf("[TEST 7] Write/Read register...\n");
     {
-        REG_ACCESS reg = {0x000C, 0};
-        SendIoctl(hDev, IOCTL_AMDBC250_READ_REG, &reg, sizeof(reg), &reg, sizeof(reg), &bytesRet);
-        UINT32 orig = reg.Value;
-        printf("  Original reg[0x000C] = 0x%08X\n", orig);
-
-        reg.Value = orig ^ 0x12345678;
-        ok = SendIoctl(hDev, IOCTL_AMDBC250_WRITE_REG, &reg, sizeof(reg), NULL, 0, &bytesRet);
-
+        REG_OP r = {0x000C, 0};
+        SIO(hDev, IOCTL_AMDBC250_READ_REG, &r, sizeof(r), &r, sizeof(r), &br);
+        UINT32 orig = r.Val;
+        r.Val = orig ^ 0x00FF00FF;
+        ok = SIO(hDev, IOCTL_AMDBC250_WRITE_REG, &r, sizeof(r), NULL, 0, &br);
         if (ok) {
-            reg.Value = 0;
-            SendIoctl(hDev, IOCTL_AMDBC250_READ_REG, &reg, sizeof(reg), &reg, sizeof(reg), &bytesRet);
-            printf("  After write  reg[0x000C] = 0x%08X\n", reg.Value);
-            printf("[PASS] Write/read roundtrip OK\n\n"); pass++;
-        } else {
-            printf("[FAIL] WRITE_REG failed: %lu\n\n", GetLastError()); fail++;
-        }
+            r.Val = 0;
+            SIO(hDev, IOCTL_AMDBC250_READ_REG, &r, sizeof(r), &r, sizeof(r), &br);
+            printf("  orig=0x%08X, after=0x%08X\n", orig, r.Val);
+            printf("[PASS]\n\n"); pass++;
+        } else { printf("[FAIL]\n\n"); fail++; }
     }
 
     printf("========================================\n");

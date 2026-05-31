@@ -1,9 +1,0 @@
-=== Enum Test ===
-DLL loaded OK
-vk_icdGetInstanceProcAddr = 00007FFEF87F1AB0
-EnumerateInstanceExtProps = 00007FFEF87F1680
-CreateInstance = 00007FFEF87F15D0
-EnumPhysicalDevices = 00007FFEF87F16B0
-CreateDevice = 00007FFEF87F13E0
-EnumExt result: 0 count: 0
-CreateInstance result: 0 inst: 0000000000000001

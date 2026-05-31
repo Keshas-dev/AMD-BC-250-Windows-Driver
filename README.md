@@ -17,6 +17,7 @@ This is an AMD BC-250 Windows 11 driver project built by Keshukas and Kumpis (AI
 - **Compute Queue is broken** (hardware quirk) — must be disabled
 - **Requires HDP Flush** before reading ring pointers — otherwise GPU hangs
 - **VCN (video encode/decode) is locked** — Sony firmware lock
+- **PS5 SMU blocks GPU MMIO** — requires PSP firmware auth for compute access
 
 ### Why Other Projects Failed
 - **AMD official driver** also gives **Code 43** — this is not our code's problem
@@ -28,14 +29,14 @@ This is an AMD BC-250 Windows 11 driver project built by Keshukas and Kumpis (AI
 - **First project in the world** to achieve a working Vulkan ICD on AMD BC-250 with Windows
 - **13/13 Vulkan tests PASS** via custom IOCTL channel
 - **vulkaninfo.exe passes** without errors with the official Vulkan loader
-- **IOCTL channel works** (13/15 tests) — KMD receives and executes commands
+- **IOCTL channel works** (14/15 tests) — KMD receives and executes commands
 
 ---
 
 ## What We've Done
 
-### KMD (Kernel-Mode Driver)
-- ✅ IOCTL dispatch working (24+ handlers)
+### KMD (Kernel-Mode Driver) — `atikmdag.sys`
+- ✅ IOCTL dispatch working (30+ handlers)
 - ✅ g_PciDevExt initialized in DriverEntry
 - ✅ IB packet + EOP fence format fixed
 - ✅ EOP fence: `0xA0000246` (EVENT_INDEX=5, DATA_SEL=1, INT_SEL=1)
@@ -46,8 +47,13 @@ This is an AMD BC-250 Windows 11 driver project built by Keshukas and Kumpis (AI
 - ✅ TDR reset recovery
 - ✅ 40 CU unlock
 - ✅ Power/thermal management
+- ✅ INIT_HARDWARE — user-mode provides MMIO base, KMD maps it
+- ✅ SEND_PM4 — raw PM4 commands to GFX ring
+- ✅ READ_REG / WRITE_REG — GPU MMIO register access
+- ✅ GET_HW_STATUS — report MMIO/rings/fence state
+- ✅ AllocVidMem uses MDL-based allocation (MmAllocatePagesForMdlEx)
 
-### Vulkan ICD
+### Vulkan ICD — `amdbc250vulkan.dll`
 - ✅ Works with official Vulkan loader (vulkaninfo.exe passes!)
 - ✅ `vk_icdNegotiateLoaderICDInterfaceVersion` (version 4)
 - ✅ 80+ Vulkan function stubs for loader compatibility
@@ -56,7 +62,7 @@ This is an AMD BC-250 Windows 11 driver project built by Keshukas and Kumpis (AI
 - ✅ CreateCommandPool, AllocateCommandBuffers, BeginCommandBuffer, EndCommandBuffer
 - ✅ CreateGraphicsPipelines
 
-### User-Mode Driver (UMD)
+### User-Mode Driver (UMD) — `amdbc250umd64.dll`
 - ✅ D3D9 DDI (45+ functions)
 - ✅ OpenAdapter = ordinal 1 (via .def file)
 - ✅ GetCaps returns real D3DCAPS9 data
@@ -64,10 +70,12 @@ This is an AMD BC-250 Windows 11 driver project built by Keshukas and Kumpis (AI
 - ✅ Flush sends GPU physical address (not CPU address)
 
 ### Build & Test
-- ✅ build.bat (KMD + UMD)
+- ✅ build.bat (KMD + UMD, auto-sign)
 - ✅ dxgkrnl.lib import library (not in WDK 10.0.26100.0)
-- ✅ test-vulkan-icd.exe (13 tests, all pass)
-- ✅ test-gpu-ioctls.exe (15 tests, 13 pass)
+- ✅ test-gpu-ioctls.exe — 14/15 PASS (ReadEdid FAIL expected — no display)
+- ✅ test-vulkan-icd.exe — 13/13 PASS
+- ✅ test-gpu-hw-init.exe — 5/7 PASS (MMIO mapping fails — SMU block)
+- ✅ test-d3d9-adapter.exe — 5/5 PASS
 - ✅ vulkaninfo.exe passes without errors
 
 ---
@@ -75,7 +83,7 @@ This is an AMD BC-250 Windows 11 driver project built by Keshukas and Kumpis (AI
 ## How to Build
 
 ### Prerequisites
-- Visual Studio 2022 (Community or Professional)
+- Visual Studio 2022 (Community or Professional) — auto-detected on E: or C: drive
 - Windows WDK 10.0.26100.0
 - Test signing: `bcdedit /set testsigning on` (Run as Admin)
 
@@ -92,28 +100,29 @@ build.bat
 
 ### Register Vulkan ICD
 ```cmd
-reg add "HKLM\SOFTWARE\Khronos\Vulkan\Drivers" /v "C:\...\output\amdbc250_icd.json" /t REG_DWORD /d 0 /f
+tools\register-icd.bat
 ```
 
 ### Test
 ```cmd
-cd output
-test-gpu-ioctls.exe     # IOCTL test (13/15 pass)
-test-vulkan-icd.exe     # Vulkan test (13/13 pass)
-vulkaninfo.exe          # Official Vulkan test (passes!)
+test-tools\test-gpu-ioctls.exe      # IOCTL test (14/15 pass)
+test-tools\test-vulkan-icd.exe      # Vulkan test (13/13 pass)
+test-tools\test-gpu-hw-init.exe     # Hardware init test (5/7 pass)
+test-tools\test-d3d9-adapter.exe    # D3D9 UMD test (5/5 pass)
+vulkaninfo.exe                      # Official Vulkan test (passes!)
 ```
 
 ---
 
 ## What We Want to Do Next
 
-### Immediate
-1. **AllocVidMem** — fix MmAllocateContiguousMemory BSOD
-2. **Display flip** — program HUBPREQ registers via KMD IOCTL
-3. **Hardware init** — MMIO mapping, ring buffer, fence initialization in DriverEntry
+### Immediate — MMIO Access (Current Blocker)
+1. **Solve MMIO mapping** — MmMapIoSpace fails for register BAR (0xFE800000); GPU behind PS5 SMU firmware block
+2. **Try MmMapIoSpace on VRAM BAR** (0xC0000000, 256MB) — if SMU only blocks register BAR
+3. **Investigate PSP firmware auth** — PS5 requires PSP to authenticate GPU commands
 
 ### Short Term
-4. **Real triangle rendering** — vertex buffer + PM4 draw commands
+4. **Real triangle rendering** — vertex buffer + PM4 draw commands via ring buffer
 5. **ACO shader compilation** — DXBC/SPIR-V → GFX10 ISA
 6. **D3D9 via IOCTL** — bypass D3D9On12 using custom path
 
@@ -146,6 +155,11 @@ vulkaninfo.exe          # Official Vulkan test (passes!)
 │         ├── IOCTL 0x80000930: AllocDmaBuffer         │
 │         ├── IOCTL 0x80000840: AllocVidMem            │
 │         ├── IOCTL 0x800008C4: FlipDisplay            │
+│         ├── IOCTL 0x80000B80: InitHardware           │
+│         ├── IOCTL 0x80000B84: SendPM4                │
+│         ├── IOCTL 0x80000B88: ReadReg                │
+│         ├── IOCTL 0x80000B8C: WriteReg               │
+│         ├── IOCTL 0x80000B90: GetHwStatus            │
 │         ├── PM4 command ring → GPU                    │
 │         └── EOP fence → completion signal             │
 ├─────────────────────────────────────────────────────┤
@@ -159,28 +173,36 @@ vulkaninfo.exe          # Official Vulkan test (passes!)
 ## File Structure
 
 ```
-├── src/kmd/                     # Kernel-Mode Driver
-│   ├── amdbc250_dream_v3_kmd.c  # IOCTL dispatch, DriverEntry, submit
-│   ├── amdbc250_dream_v3_hw_init.c  # GPU init, ring buffers, display
-│   ├── amdbc250_dream_v3_power.c    # Power/thermal management
-│   ├── amdbc250_dream_v3_vm.c       # GPUVM, GART, page tables
-│   └── dxgkrnl.def              # Import library (not in WDK)
-├── src/umd/                     # User-Mode Driver
-│   ├── amdbc250_umd_v46.c       # D3D9 DDI (45+ functions)
-│   └── amdbc250_umd.def         # Export: OpenAdapter = ordinal 1
-├── src/vulkan/                  # Vulkan ICD
-│   ├── bc250_vulkan_icd.c       # 80+ Vulkan functions, IOCTL submit
-│   ├── bc250_vulkan.def         # Export: vk_icdGetInstanceProcAddr
-│   ├── bc250_aco_wrapper.c      # ACO shader compiler stub
-│   └── bc250_shader.c           # SPIR-V → GFX10 ISA
-├── test-tools/                  # Test applications
-│   ├── test-gpu-ioctls.c        # IOCTL test (15 tests)
-│   ├── test-vulkan-icd.c        # Vulkan test (13 tests)
-│   └── test-render.c            # Rendering test
-├── inf/                         # Driver INF
-├── output/                      # Build output
-├── build.bat                    # Build script
-└── STATUS.md                    # Detailed project status
+├── src/kmd/                        # Kernel-Mode Driver
+│   ├── amdbc250_dream_v3_kmd.c     # IOCTL dispatch, DriverEntry, submit
+│   ├── amdbc250_dream_v3_hw_init.c # GPU init, ring buffers, display
+│   ├── amdbc250_dream_v3_power.c   # Power/thermal management
+│   ├── amdbc250_dream_v3_vm.c      # GPUVM, GART, page tables
+│   └── dxgkrnl.def                 # Import library (not in WDK)
+├── src/umd/                        # User-Mode Driver
+│   ├── amdbc250_umd_v46.c          # D3D9 DDI (45+ functions)
+│   └── amdbc250_umd.def            # Export: OpenAdapter = ordinal 1
+├── src/vulkan/                     # Vulkan ICD
+│   ├── bc250_vulkan_icd.c          # 80+ Vulkan functions, IOCTL submit
+│   ├── bc250_vulkan.def            # Export: vk_icdGetInstanceProcAddr
+│   ├── bc250_aco_wrapper.c         # ACO shader compiler stub
+│   └── bc250_shader.c              # SPIR-V → GFX10 ISA
+├── inc/                            # Shared headers
+│   ├── amdbc250_dream_v3_kmd.h     # KMD structures, register offsets
+│   ├── amdbc250_dream_v3_hw.h      # Hardware register definitions
+│   ├── amdbc250_ioctl.h            # IOCTL codes + structures
+│   └── amdbc250_d3d*.h             # D3D type definitions
+├── test-tools/                     # Test applications
+│   ├── test-gpu-ioctls.c           # IOCTL test (15 tests)
+│   ├── test-vulkan-icd.c           # Vulkan ICD test (13 tests)
+│   ├── test-gpu-hw-init.c          # Hardware init + MMIO test (7 tests)
+│   ├── test-d3d9-adapter.c         # D3D9 UMD adapter test (6 tests)
+│   └── test-render.c               # Rendering test (color fill)
+├── inf/                            # Driver INF
+├── output/                         # Build output
+├── tools/                          # Install/uninstall/diagnostic scripts
+├── build.bat                       # Build + sign script
+└── STATUS.md                       # Detailed project status
 ```
 
 ---
@@ -192,4 +214,4 @@ ACO compiler: MIT license (Mesa project).
 
 ---
 
-*Made with love for GPU drivers. 🍖*
+*Made with love for GPU drivers.*

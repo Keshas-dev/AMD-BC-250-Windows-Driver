@@ -13,6 +13,10 @@
 *.ipdb
 *.iobj
 
+# Test executables (built locally, not tracked)
+test-tools/*.exe
+output/*.exe
+
 # Temp files
 *.tmp
 *.bak
@@ -41,3 +45,4 @@ sign*.txt
 dxdiag-output.txt
 icd-log.txt
 d3d9-diag.txt
+enum-test.txt
