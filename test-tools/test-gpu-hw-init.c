@@ -1,7 +1,7 @@
 /*
  * test-gpu-hw-init.c — Test real GPU hardware initialization
  *
- * Finds PCI BAR0 via SetupDi, sends INIT_HARDWARE IOCTL, sends PM4 NOP.
+ * Finds PCI BAR0 by enumerating registry, sends INIT_HARDWARE IOCTL, sends PM4 NOP.
  *
  * Build: cl /nologo /W3 /I"E:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\um"
  *        /I"E:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\shared"
@@ -16,6 +16,7 @@
 #include <setupapi.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #pragma comment(lib, "setupapi.lib")
 #pragma comment(lib, "advapi32.lib")
@@ -26,7 +27,6 @@
 #define CTL_CODE_AMDBC250(Function, Method, Access) \
     CTL_CODE(FILE_DEVICE_AMDBC250, IOCTL_INDEX + (Function), Method, Access)
 
-#define IOCTL_AMDBC250_GET_CAPS             CTL_CODE_AMDBC250(0x00, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #define IOCTL_AMDBC250_INIT_HARDWARE        CTL_CODE_AMDBC250(0x70, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #define IOCTL_AMDBC250_SEND_PM4             CTL_CODE_AMDBC250(0x71, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #define IOCTL_AMDBC250_READ_REG             CTL_CODE_AMDBC250(0x72, METHOD_BUFFERED, FILE_ANY_ACCESS)
@@ -59,166 +59,198 @@ static BOOL SendIoctl(HANDLE hDev, DWORD code, PVOID in, DWORD inSz, PVOID out, 
 }
 
 /*
- * Find PCI BAR0 by reading registry BootConfig for our device.
- * BootConfig is a binary blob in PNP_RESOURCE_REQUIREMENTS_LIST format.
- * We parse it manually to find CmResourceTypeMemory (BAR0).
+ * Parse BootConfig/AssignedResources binary blob to find MMIO BAR0.
+ * Format: PNP_RESOURCE_REQUIREMENTS_LIST (manually defined for user-mode)
  */
-static BOOL FindPciBar0(UINT64 *barPhys, UINT32 *barSize)
+static BOOL ParseResourceList(BYTE *buf, DWORD bufSize, UINT64 *barPhys, UINT32 *barSize)
 {
-    HDEVINFO devInfo;
-    SP_DEVINFO_DATA edd;
-    HKEY hKey;
-    DWORD regType, regSize;
-    BYTE *buf;
+    DWORD offset;
+    DWORD prCount, i;
     BOOL found = FALSE;
 
     *barPhys = 0;
     *barSize = 0;
 
-    /* Find BC-250 via hardware ID */
-    devInfo = SetupDiGetClassDevsA(NULL, "PCI\\VEN_1002&DEV_13FE", NULL,
-                                    DIGCF_PRESENT | DIGCF_ALLCLASSES);
-    if (devInfo == INVALID_HANDLE_VALUE) {
-        /* Fallback: broader search */
-        devInfo = SetupDiGetClassDevsA(NULL, "VEN_1002&DEV_13FE", NULL,
-                                        DIGCF_PRESENT | DIGCF_ALLCLASSES);
-    }
-    if (devInfo == INVALID_HANDLE_VALUE) {
-        printf("[FAIL] Cannot enumerate PCI devices\n");
-        return FALSE;
-    }
-
-    edd.cbSize = sizeof(edd);
-    if (!SetupDiEnumDeviceInfo(devInfo, 0, &edd)) {
-        /* Try another index */
-        printf("[FAIL] No BC-250 device found\n");
-        SetupDiDestroyDeviceInfoList(devInfo);
-        return FALSE;
-    }
-
-    /* Open device registry key */
-    hKey = SetupDiOpenDevRegKey(devInfo, &edd, DICS_FLAG_GLOBAL, 0,
-                                 DIREG_DEV, KEY_READ);
-    SetupDiDestroyDeviceInfoList(devInfo);
-
-    if (hKey == INVALID_HANDLE_VALUE) {
-        printf("[FAIL] Cannot open device registry key\n");
-        return FALSE;
-    }
-
-    /* Read BootConfig value */
-    regSize = 0;
-    RegQueryValueExA(hKey, "BootConfig", NULL, &regType, NULL, &regSize);
-    if (regSize == 0) {
-        printf("[WARN] BootConfig is empty, trying AssignedResources...\n");
-        RegQueryValueExA(hKey, "AssignedResources", NULL, &regType, NULL, &regSize);
-    }
-
-    if (regSize == 0) {
-        printf("[FAIL] No resource data in registry\n");
-        RegCloseKey(hKey);
-        return FALSE;
-    }
-
-    printf("  BootConfig: %lu bytes\n", regSize);
-    buf = (BYTE *)malloc(regSize);
-    if (!buf) { RegCloseKey(hKey); return FALSE; }
-
-    if (RegQueryValueExA(hKey, "BootConfig", NULL, &regType, buf, &regSize) != ERROR_SUCCESS) {
-        /* Try AssignedResources */
-        if (RegQueryValueExA(hKey, "AssignedResources", NULL, &regType, buf, &regSize) != ERROR_SUCCESS) {
-            printf("[FAIL] Cannot read resource data\n");
-            free(buf); RegCloseKey(hKey);
-            return FALSE;
-        }
-    }
-    RegCloseKey(hKey);
-
-    /*
-     * Parse PNP_RESOURCE_REQUIREMENTS_LIST structure:
-     *   ListSize (ULONG)
-     *   List[0]:
-     *     InterfaceType (ULONG) - 1 = PCI
-     *     Version (ULONG)
-     *     Revision (ULONG)
-     *     PartialResourceList:
-     *       Version (USHORT)
-     *       Revision (USHORT)
-     *       Count (ULONG)
-     *       PartialDescriptors[Count]:
-     *         Type (UCHAR) - 3 = CmResourceTypeMemory
-     *         ShareDisposition (UCHAR)
-     *         Flags (USHORT)
-     *         u.Memory.Start (LARGE_INTEGER)
-     *         u.Memory.Length (ULONG)
-     *
-     * Total header = 4 (ListSize) + 4+4+4 (List[0] header) + 2+2+4 (PartialResourceList header) = 20 bytes
-     * Each descriptor = 1 (Type) + 1 (Share) + 2 (Flags) + 8 (Start) + 4 (Length) = 16 bytes
+    /* PNP_RESOURCE_REQUIREMENTS_LIST layout:
+     *   [0..3]  ListSize (ULONG)
+     *   [4..7]  InterfaceType (ULONG) = 1 for PCI
+     *   [8..11] Version (ULONG)
+     *   [12..15] Revision (ULONG)
+     *   [16..17] PartialResourceList.Version (USHORT)
+     *   [18..19] PartialResourceList.Revision (USHORT)
+     *   [20..23] PartialResourceList.Count (ULONG)
+     *   [24..]  PartialDescriptors[] (each 16 bytes):
+     *     +0:  Type (UCHAR) — 3=CmResourceTypeMemory
+     *     +1:  ShareDisposition (UCHAR)
+     *     +2:  Flags (USHORT)
+     *     +4:  Start (LARGE_INTEGER, 8 bytes)
+     *     +12: Length (ULONG)
      */
-    if (regSize < 20) {
-        printf("[FAIL] BootConfig too small (%lu bytes)\n", regSize);
-        free(buf);
+    if (bufSize < 24) return FALSE;
+
+    /* Skip ListSize + InterfaceType + Version + Revision + PR header */
+    offset = 24;
+    prCount = *(DWORD *)(buf + 20);
+
+    printf("  Resource count: %lu\n", prCount);
+
+    for (i = 0; i < prCount; i++) {
+        BYTE type;
+        ULONGLONG start;
+        DWORD length;
+
+        if (offset + 16 > bufSize) break;
+
+        type = buf[offset];
+        start = 0;
+        memcpy(&start, buf + offset + 4, 8);
+        length = *(DWORD *)(buf + offset + 12);
+        offset += 16;
+
+        if (type == 3) { /* CmResourceTypeMemory */
+            printf("  Resource[%lu]: Memory, PA=0x%llX, Length=0x%X (%lu KB)\n",
+                i, start, length, length / 1024);
+            if (!found && length >= 0x10000) { /* BAR0 should be at least 64KB */
+                *barPhys = (UINT64)start;
+                *barSize = length;
+                found = TRUE;
+            }
+        } else if (type == 1) {
+            printf("  Resource[%lu]: Port, PA=0x%llX, Length=0x%X\n", i, start, length);
+        } else if (type == 2) {
+            printf("  Resource[%lu]: Interrupt\n", i);
+        }
+    }
+    return found;
+}
+
+/*
+ * Find PCI BAR0 by enumerating the PCI registry enum key.
+ */
+static BOOL FindPciBar0(UINT64 *barPhys, UINT32 *barSize)
+{
+    HKEY hPciKey, hDevKey;
+    DWORD index = 0;
+    WCHAR subKeyName[256];
+    DWORD subKeySize;
+    BOOL found = FALSE;
+
+    *barPhys = 0;
+    *barSize = 0;
+
+    /* Open HKLM\SYSTEM\CurrentControlSet\Enum\PCI */
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE,
+        L"SYSTEM\\CurrentControlSet\\Enum\\PCI",
+        0, KEY_READ, &hPciKey) != ERROR_SUCCESS) {
+        printf("[FAIL] Cannot open PCI enum key\n");
         return FALSE;
     }
 
-    {
-        DWORD offset = 4; /* Skip ListSize */
-        /* List[0] header: InterfaceType, Version, Revision */
-        DWORD interfaceType = *(DWORD *)(buf + offset); offset += 4;
-        DWORD listVersion   = *(DWORD *)(buf + offset); offset += 4;
-        DWORD listRevision  = *(DWORD *)(buf + offset); offset += 4;
+    /* Enumerate PCI device IDs — look for VEN_1002&DEV_13FE */
+    while (1) {
+        subKeySize = sizeof(subKeyName) / sizeof(WCHAR);
+        if (RegEnumKeyExW(hPciKey, index++, subKeyName, &subKeySize,
+                          NULL, NULL, NULL, NULL) != ERROR_SUCCESS)
+            break;
 
-        printf("  InterfaceType=%lu, Version=%lu.%lu\n", interfaceType, listVersion, listRevision);
+        /* Check if this is our device */
+        if (wcsstr(subKeyName, L"VEN_1002") && wcsstr(subKeyName, L"DEV_13FE")) {
+            WCHAR fullSubKey[512];
+            DWORD instanceIndex = 0;
+            WCHAR instSubKey[256];
+            DWORD instSubKeySize;
 
-        /* PartialResourceList header */
-        USHORT prVersion = *(USHORT *)(buf + offset); offset += 2;
-        USHORT prRevision = *(USHORT *)(buf + offset); offset += 2;
-        DWORD  prCount   = *(DWORD *)(buf + offset); offset += 4;
+            printf("  Found PCI device: %ls\n", subKeyName);
 
-        printf("  PartialResourceList: version=%u.%u, count=%lu\n", prVersion, prRevision, prCount);
+            /* Open this device ID key to enumerate instances */
+            _snwprintf_s(fullSubKey, sizeof(fullSubKey)/sizeof(WCHAR), _TRUNCATE,
+                L"SYSTEM\\CurrentControlSet\\Enum\\PCI\\%s", subKeyName);
 
-        /* Parse descriptors */
-        for (DWORD i = 0; i < prCount; i++) {
-            if (offset + 16 > regSize) break;
-
-            BYTE  type  = buf[offset];
-            BYTE  share = buf[offset + 1];
-            USHORT flags = *(USHORT *)(buf + offset + 2);
-            LARGE_INTEGER start;
-            DWORD length;
-            start.LowPart  = *(DWORD *)(buf + offset + 4);
-            start.HighPart = *(DWORD *)(buf + offset + 8);
-            length = *(DWORD *)(buf + offset + 12);
-            offset += 16;
-
-            (void)share; (void)flags;
-
-            if (type == 3) { /* CmResourceTypeMemory */
-                printf("  Resource[%lu]: Memory, PA=0x%llX, Length=0x%X (%lu KB)\n",
-                    i, (unsigned long long)start.QuadPart, length, length / 1024);
-                if (!found) {
-                    *barPhys = (UINT64)start.QuadPart;
-                    *barSize = length;
-                    found = TRUE;
-                }
-            } else if (type == 1) {
-                printf("  Resource[%lu]: Port, PA=0x%llX, Length=0x%X\n",
-                    i, (unsigned long long)start.QuadPart, length);
-            } else if (type == 2) {
-                printf("  Resource[%lu]: Interrupt\n", i);
+            if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, fullSubKey, 0, KEY_READ, &hDevKey) != ERROR_SUCCESS) {
+                printf("    Cannot open: %ls\n", fullSubKey);
+                continue;
             }
+
+            /* Enumerate instances (e.g., 5&12345678&0&00000000) */
+            while (1) {
+                instSubKeySize = sizeof(instSubKey) / sizeof(WCHAR);
+                if (RegEnumKeyExW(hDevKey, instanceIndex++, instSubKey, &instSubKeySize,
+                                  NULL, NULL, NULL, NULL) != ERROR_SUCCESS)
+                    break;
+
+                WCHAR instFullKey[1024];
+                _snwprintf_s(instFullKey, sizeof(instFullKey)/sizeof(WCHAR), _TRUNCATE,
+                    L"SYSTEM\\CurrentControlSet\\Enum\\PCI\\%s\\%s",
+                    subKeyName, instSubKey);
+
+                printf("    Instance: %ls\n", instSubKey);
+
+                /* Try to read BootConfig from this instance */
+                {
+                    HKEY hInstKey;
+                    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, instFullKey, 0, KEY_READ, &hInstKey) == ERROR_SUCCESS) {
+                        BYTE regData[8192];
+                        DWORD regSize = sizeof(regData);
+                        DWORD regType = 0;
+
+                        /* Try BootConfig first */
+                        if (RegQueryValueExW(hInstKey, L"BootConfig", NULL, &regType, regData, &regSize) == ERROR_SUCCESS
+                            && regSize > 24) {
+                            printf("    BootConfig: %lu bytes\n", regSize);
+                            found = ParseResourceList(regData, regSize, barPhys, barSize);
+                        }
+
+                        /* Try AssignedResources if BootConfig failed */
+                        if (!found) {
+                            regSize = sizeof(regData);
+                            if (RegQueryValueExW(hInstKey, L"AssignedResources", NULL, &regType, regData, &regSize) == ERROR_SUCCESS
+                                && regSize > 24) {
+                                printf("    AssignedResources: %lu bytes\n", regSize);
+                                found = ParseResourceList(regData, regSize, barPhys, barSize);
+                            }
+                        }
+
+                        /* Also try Device Parameters subkey */
+                        if (!found) {
+                            HKEY hDevParamsKey;
+                            if (RegOpenKeyExW(hInstKey, L"Device Parameters", 0, KEY_READ, &hDevParamsKey) == ERROR_SUCCESS) {
+                                regSize = sizeof(regData);
+                                if (RegQueryValueExW(hDevParamsKey, L"BootConfig", NULL, &regType, regData, &regSize) == ERROR_SUCCESS
+                                    && regSize > 24) {
+                                    printf("    Device Parameters\\BootConfig: %lu bytes\n", regSize);
+                                    found = ParseResourceList(regData, regSize, barPhys, barSize);
+                                }
+                                if (!found) {
+                                    regSize = sizeof(regData);
+                                    if (RegQueryValueExW(hDevParamsKey, L"AssignedResources", NULL, &regType, regData, &regSize) == ERROR_SUCCESS
+                                        && regSize > 24) {
+                                        printf("    Device Parameters\\AssignedResources: %lu bytes\n", regSize);
+                                        found = ParseResourceList(regData, regSize, barPhys, barSize);
+                                    }
+                                }
+                                RegCloseKey(hDevParamsKey);
+                            }
+                        }
+
+                        RegCloseKey(hInstKey);
+                    }
+                }
+
+                if (found) break;
+            }
+
+            RegCloseKey(hDevKey);
         }
+
+        if (found) break;
     }
 
-    free(buf);
+    RegCloseKey(hPciKey);
 
     if (found) {
-        printf("  >> BAR0 identified: PA=0x%llX, Size=0x%X (%lu KB)\n",
+        printf("  >> BAR0: PA=0x%llX, Size=0x%X (%lu KB)\n",
             (unsigned long long)*barPhys, *barSize, *barSize / 1024);
-    } else {
-        printf("[FAIL] No MMIO resource found in BootConfig\n");
     }
-
     return found;
 }
 
@@ -244,7 +276,7 @@ int main(void)
 
     /* Test 1: Find PCI BAR0 */
     total++;
-    printf("[TEST 1/7] Find PCI BAR0 via registry...\n");
+    printf("[TEST 1/7] Find PCI BAR0 via registry enum...\n");
     if (FindPciBar0(&barPhys, &barSize)) {
         printf("[PASS] BAR0 found\n\n"); pass++;
     } else {
@@ -311,7 +343,7 @@ int main(void)
 
             reg.RegisterOffset = 0x000C; reg.Value = 0;
             SendIoctl(hDev, IOCTL_AMDBC250_READ_REG, &reg, sizeof(reg), &reg, sizeof(reg), &bytesRet);
-            printf("  reg[0x000C] = 0x%08X (scratch reg)\n", reg.Value);
+            printf("  reg[0x000C] = 0x%08X (scratch)\n", reg.Value);
 
             printf("[PASS] MMIO reads OK\n\n"); pass++;
         } else {
@@ -345,7 +377,7 @@ int main(void)
         ok = SendIoctl(hDev, IOCTL_AMDBC250_GET_HW_STATUS, NULL, 0, &hs, sizeof(hs), &bytesRet);
         if (ok) {
             printf("  Ring WPtr:  %u (should be > 0)\n", hs.GfxRingWptr);
-            printf("  Fence:      %llu (expected 100)\n", (unsigned long long)hs.FenceValue);
+            printf("  Fence:      %llu (expected >= 100)\n", (unsigned long long)hs.FenceValue);
             if (hs.GfxRingWptr > 0) {
                 printf("[PASS] PM4 written to ring\n\n"); pass++;
             } else {
@@ -363,7 +395,7 @@ int main(void)
         UINT32 orig = reg.Value;
         printf("  Original reg[0x000C] = 0x%08X\n", orig);
 
-        reg.Value = orig ^ 0x12345678; /* Toggle some bits */
+        reg.Value = orig ^ 0x12345678;
         ok = SendIoctl(hDev, IOCTL_AMDBC250_WRITE_REG, &reg, sizeof(reg), NULL, 0, &bytesRet);
 
         if (ok) {
