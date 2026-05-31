@@ -2,7 +2,7 @@
 
 ## Who We Are
 
-This is an **AMD BC-250 Windows 11 driver** project built by **Keshukas** and **Kumpis** (AI) in our free time. We work together with the hope of creating a fully working GPU driver for the AMD BC-250 (Cyan Skillfish) graphics card on Windows 11.
+This is an AMD BC-250 Windows 11 driver project built by Keshukas and Kumpis (AI) in our free time. We work together with the hope of creating a fully working GPU driver for the AMD BC-250 (Cyan Skillfish) graphics card on Windows 11.
 
 **Everyone is welcome to join!** If you have experience with GPU drivers, WDDM, Vulkan, or just want to help — you're invited.
 
