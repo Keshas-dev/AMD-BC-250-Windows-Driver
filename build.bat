@@ -94,10 +94,11 @@ cl.exe /c /kernel /W3 /Zi /Od /DAMD64 /D_AMD64_ /DAMDBC250_DREAM_V3 ^
   /I"%WDK_ROOT%\Include\%WDK_VERSION%\km\crt" ^
   /I"%WDK_ROOT%\Include\%WDK_VERSION%\shared" ^
   /I"%INC_DIR%" ^
-  "%SRC_DIR%\kmd\amdbc250_dream_v3_kmd.c" ^
-  "%SRC_DIR%\kmd\amdbc250_dream_v3_hw_init.c" ^
-  "%SRC_DIR%\kmd\amdbc250_dream_v3_power.c" ^
-  "%SRC_DIR%\kmd\amdbc250_dream_v3_vm.c"
+  "%SRC_DIR%\kmd\amdbc250_dream_kmd.c" ^
+  "%SRC_DIR%\kmd\amdbc250_dream_hw_init.c" ^
+  "%SRC_DIR%\kmd\amdbc250_dream_power.c" ^
+  "%SRC_DIR%\kmd\amdbc250_dream_vm.c" ^
+  "%SRC_DIR%\kmd\amdbc250_psp_v11.c"
 
 if errorlevel 1 (
     echo KMD compilation FAILED!
@@ -108,8 +109,8 @@ if errorlevel 1 (
 echo Linking KMD...
 link.exe /DRIVER /SUBSYSTEM:NATIVE /ENTRY:DriverEntry ^
   /OUT:"%OUTPUT_DIR%\atikmdag.sys" ^
-  amdbc250_dream_v3_kmd.obj amdbc250_dream_v3_hw_init.obj amdbc250_dream_v3_power.obj amdbc250_dream_v3_vm.obj ^
-  ntoskrnl.lib wdm.lib win32k.lib ntstrsafe.lib BufferOverflowK.lib "%SRC_DIR%\kmd\dxgkrnl.lib" ^
+  amdbc250_dream_kmd.obj amdbc250_dream_hw_init.obj amdbc250_dream_power.obj amdbc250_dream_vm.obj amdbc250_psp_v11.obj ^
+  ntoskrnl.lib wdm.lib win32k.lib ntstrsafe.lib BufferOverflowK.lib hal.lib "%SRC_DIR%\kmd\dxgkrnl.lib" ^
   /LIBPATH:"%WDK_ROOT%\Lib\%WDK_VERSION%\km\x64"
 
 if errorlevel 1 (
@@ -151,7 +152,7 @@ if errorlevel 1 (
 
 echo.
 echo Copying INF file...
-copy "%PROJECT_DIR%\inf\amdbc250_dream_v3.inf" "%OUTPUT_DIR%\" >nul
+copy "%PROJECT_DIR%\inf\amdbc250_dream.inf" "%OUTPUT_DIR%\" >nul
 
 echo.
 echo ==========================================
@@ -197,9 +198,9 @@ if errorlevel 1 (
 )
 
 rem --- Sign catalog ---
-echo Signing amdbc250_dream_v3.cat...
+echo Signing amdbc250_dream.cat...
 "%SIGNTOOLS%\signtool.exe" sign /fd SHA256 /a /s My /n "%CERT_NAME%" ^
-  "%OUTPUT_DIR%\amdbc250_dream_v3.cat"
+  "%OUTPUT_DIR%\amdbc250_dream.cat"
 if errorlevel 1 (
     echo WARNING: Catalog signing failed
 ) else (
@@ -232,8 +233,8 @@ echo.
 echo Verifying signatures...
 "%SIGNTOOLS%\signtool.exe" verify /pa "%OUTPUT_DIR%\atikmdag.sys" 2>nul
 "%SIGNTOOLS%\signtool.exe" verify /pa "%OUTPUT_DIR%\amdbc250umd64.dll" 2>nul
-if exist "%OUTPUT_DIR%\amdbc250_dream_v3.cat" (
-    "%SIGNTOOLS%\signtool.exe" verify /pa "%OUTPUT_DIR%\amdbc250_dream_v3.cat" 2>nul
+if exist "%OUTPUT_DIR%\amdbc250_dream.cat" (
+    "%SIGNTOOLS%\signtool.exe" verify /pa "%OUTPUT_DIR%\amdbc250_dream.cat" 2>nul
 )
 
 :SkipSigning
@@ -246,7 +247,7 @@ echo.
 echo  Output: %OUTPUT_DIR%
 echo    atikmdag.sys      - Kernel driver
 echo    amdbc250umd64.dll - User driver
-echo    amdbc250_dream_v3.inf
+echo    amdbc250_dream.inf
 echo.
 echo  Install:
 echo    1. bcdedit /set testsigning on  (as Admin)

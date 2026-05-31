@@ -3,16 +3,17 @@
 # This file is used by WDK build system (BUILD.exe)
 ###########################################################################
 
-TARGETNAME=amdbc250_dream_v3
+TARGETNAME=amdbc250_dream
 TARGETTYPE=DRIVER
 DRIVERTYPE=DISPLAY
 
 TARGETLIBS=$(DDK_LIB_PATH)\dxgkrnl.lib
 
-SOURCES=amdbc250_dream_v3_kmd.c \
-        amdbc250_dream_v3_hw_init.c \
-        amdbc250_dream_v3_vm.c \
-        amdbc250_dream_v3_power.c
+SOURCES=amdbc250_dream_kmd.c \
+        amdbc250_dream_hw_init.c \
+        amdbc250_dream_vm.c \
+        amdbc250_dream_power.c \
+        amdbc250_psp_v11.c
 
 TARGETPATH=obj
 
