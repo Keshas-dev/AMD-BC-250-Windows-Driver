@@ -74,9 +74,36 @@ echo   Service installed: AMDBC250DreamV43
 echo.
 
 rem =============================================
-rem  STEP 2: Install User-Mode Driver
+rem  STEP 2: Copy PSP Firmware
 rem =============================================
-echo [Step 2/7] Installing User-Mode Driver (amdbc250umd64.dll)...
+echo [Step 2/7] Copying PSP firmware files...
+set "FW_DIR=%PROJECT_DIR%\third-party\firmware"
+set "FW_DEST=%DRIVERS%\amdgpu"
+if not exist "%FW_DEST%" mkdir "%FW_DEST%"
+if exist "%FW_DIR%\navi10_sos.bin" (
+    copy /Y "%FW_DIR%\navi10_sos.bin" "%FW_DEST%\navi10_sos.bin" >nul
+    echo   Copied: navi10_sos.bin
+) else (
+    echo   [WARN] navi10_sos.bin not found in third-party\firmware\
+)
+if exist "%FW_DIR%\navi10_asd.bin" (
+    copy /Y "%FW_DIR%\navi10_asd.bin" "%FW_DEST%\navi10_asd.bin" >nul
+    echo   Copied: navi10_asd.bin
+) else (
+    echo   [WARN] navi10_asd.bin not found in third-party\firmware\
+)
+if exist "%FW_DIR%\navi10_ta.bin" (
+    copy /Y "%FW_DIR%\navi10_ta.bin" "%FW_DEST%\navi10_ta.bin" >nul
+    echo   Copied: navi10_ta.bin
+) else (
+    echo   [WARN] navi10_ta.bin not found in third-party\firmware\
+)
+echo.
+
+rem =============================================
+rem  STEP 3: Install User-Mode Driver
+rem =============================================
+echo [Step 3/7] Installing User-Mode Driver (amdbc250umd64.dll)...
 copy /Y "%OUTPUT_DIR%\amdbc250umd64.dll" "%SYS32%\amdbc250umd64.dll" >nul
 echo   Copied: %SYS32%\amdbc250umd64.dll
 echo.
@@ -84,7 +111,7 @@ echo.
 rem =============================================
 rem  STEP 3: Install Vulkan ICD
 rem =============================================
-echo [Step 3/7] Installing Vulkan ICD...
+echo [Step 4/7] Installing Vulkan ICD...
 copy /Y "%OUTPUT_DIR%\amdbc250vulkan.dll" "%SYS32%\amdbc250vulkan.dll" >nul
 echo   Copied: %SYS32%\amdbc250vulkan.dll
 
@@ -111,7 +138,7 @@ echo.
 rem =============================================
 rem  STEP 4: Install DXVK (D3D9/10/11 -> Vulkan)
 rem =============================================
-echo [Step 4/7] Installing DXVK 2.7.1 (D3D9/10/11 -> Vulkan translation)...
+echo [Step 5/8] Installing DXVK 2.7.1 (D3D9/10/11 -> Vulkan translation)...
 
 if not exist "%DXVK_DIR%\x64\d3d11.dll" (
     echo [ERROR] DXVK not found in %DXVK_DIR%
@@ -138,7 +165,7 @@ echo.
 rem =============================================
 rem  STEP 5: Install DXVK-NVAPI
 rem =============================================
-echo [Step 5/7] Installing DXVK-NVAPI 0.9.2...
+echo [Step 6/8] Installing DXVK-NVAPI 0.9.2...
 
 if not exist "%NVAPI_DIR%\x64\nvapi64.dll" (
     echo [ERROR] DXVK-NVAPI not found in %NVAPI_DIR%
@@ -155,7 +182,7 @@ echo.
 rem =============================================
 rem  STEP 6: Install INF (for Device Manager)
 rem =============================================
-echo [Step 6/7] Installing driver INF...
+echo [Step 7/8] Installing driver INF...
 if exist "%OUTPUT_DIR%\amdbc250_dream.inf" (
     "%SYS32%\pnputil.exe" /add-driver "%OUTPUT_DIR%\amdbc250_dream.inf" /install 2>nul
     echo   INF installed via pnputil
@@ -167,7 +194,7 @@ echo.
 rem =============================================
 rem  STEP 7: Enable 40 CU unlock (optional)
 rem =============================================
-echo [Step 7/7] Checking 40 CU unlock setting...
+echo [Step 8/8] Checking 40 CU unlock setting...
 reg query "HKLM\SYSTEM\CurrentControlSet\Services\AMDBC250DreamV43" /v Enable40CU >nul 2>&1
 if %errorlevel% equ 0 (
     echo   40 CU unlock: ENABLED

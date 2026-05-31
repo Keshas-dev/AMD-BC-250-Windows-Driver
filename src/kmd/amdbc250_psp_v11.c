@@ -243,6 +243,54 @@ static NTSTATUS Amdbc250PspRingCreate(VOID)
     return STATUS_SUCCESS;
 }
 
+static NTSTATUS Amdbc250PspLoadFirmwareFile(PUCHAR *OutBuffer, PULONG OutSize, const WCHAR *FilePath)
+{
+    UNICODE_STRING fileName;
+    OBJECT_ATTRIBUTES objAttr;
+    IO_STATUS_BLOCK ioStatus;
+    HANDLE fileHandle;
+    FILE_STANDARD_INFORMATION fileInfo;
+    PUCHAR buffer;
+
+    RtlInitUnicodeString(&fileName, FilePath);
+    InitializeObjectAttributes(&objAttr, &fileName, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
+
+    NTSTATUS     status = ZwCreateFile(&fileHandle, GENERIC_READ, &objAttr, &ioStatus,
+                                   NULL, FILE_ATTRIBUTE_NORMAL, 0, FILE_OPEN,
+                                   FILE_SYNCHRONOUS_IO_NONALERT, NULL, 0);
+    if (!NT_SUCCESS(status)) {
+        KdPrint(("Amdbc250Psp: Cannot open %wZ (0x%08X)\n", &fileName, status));
+        return status;
+    }
+
+    status = ZwQueryInformationFile(fileHandle, &ioStatus, &fileInfo,
+                                    sizeof(FILE_STANDARD_INFORMATION), FileStandardInformation);
+    if (!NT_SUCCESS(status) || fileInfo.EndOfFile.LowPart == 0 || fileInfo.EndOfFile.LowPart > 1024*1024) {
+        KdPrint(("Amdbc250Psp: Bad firmware size\n"));
+        ZwClose(fileHandle);
+        return STATUS_INVALID_FILE_FOR_SECTION;
+    }
+
+    buffer = (PUCHAR)ExAllocatePool2(POOL_FLAG_NON_PAGED, fileInfo.EndOfFile.LowPart, 'FrmP');
+    if (!buffer) {
+        ZwClose(fileHandle);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    status = ZwReadFile(fileHandle, NULL, NULL, NULL, &ioStatus, buffer, fileInfo.EndOfFile.LowPart, NULL, NULL);
+    ZwClose(fileHandle);
+
+    if (!NT_SUCCESS(status)) {
+        ExFreePoolWithTag(buffer, 'FrmP');
+        return status;
+    }
+
+    *OutBuffer = buffer;
+    *OutSize = fileInfo.EndOfFile.LowPart;
+    KdPrint(("Amdbc250Psp: Loaded %wZ (%u bytes)\n", &fileName, *OutSize));
+    return STATUS_SUCCESS;
+}
+
 NTSTATUS Amdbc250PspInit(PDEVICE_OBJECT DeviceObject)
 {
     NTSTATUS status;
@@ -272,6 +320,25 @@ NTSTATUS Amdbc250PspInit(PDEVICE_OBJECT DeviceObject)
         Amdbc250PspUnmapRegisters();
         return status;
     }
+
+    /* Auto-load firmware from \SystemRoot\System32\drivers\amdgpu\ if available */
+    if (!g_PspContext.SosFirmware) {
+        Amdbc250PspLoadFirmwareFile(&g_PspContext.SosFirmware, &g_PspContext.SosFirmwareSize,
+                                   L"\\SystemRoot\\System32\\drivers\\amdgpu\\navi10_sos.bin");
+    }
+    if (!g_PspContext.AsdFirmware) {
+        Amdbc250PspLoadFirmwareFile(&g_PspContext.AsdFirmware, &g_PspContext.AsdFirmwareSize,
+                                   L"\\SystemRoot\\System32\\drivers\\amdgpu\\navi10_asd.bin");
+    }
+    if (!g_PspContext.TaFirmware) {
+        Amdbc250PspLoadFirmwareFile(&g_PspContext.TaFirmware, &g_PspContext.TaFirmwareSize,
+                                   L"\\SystemRoot\\System32\\drivers\\amdgpu\\navi10_ta.bin");
+    }
+
+    KdPrint(("Amdbc250Psp: Firmware: SOS=%s (%u), ASD=%s (%u), TA=%s (%u)\n",
+             g_PspContext.SosFirmware ? "OK" : "missing", g_PspContext.SosFirmwareSize,
+             g_PspContext.AsdFirmware ? "OK" : "missing", g_PspContext.AsdFirmwareSize,
+             g_PspContext.TaFirmware ? "OK" : "missing", g_PspContext.TaFirmwareSize));
 
     status = Amdbc250PspBootloaderLoadSysdrv();
     if (!NT_SUCCESS(status))
