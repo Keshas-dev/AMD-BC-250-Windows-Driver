@@ -93,15 +93,17 @@ cd C:\AMD-BC-250\AMD-BC-250-Windows-Driver-main
 build.bat
 ```
 
-### Install
+### Install (Full Installer)
+```cmd
+tools\install.bat
+```
+This installs everything: KMD, UMD, Vulkan ICD, DXVK, DXVK-NVAPI.
+Run as Administrator. Reboot required.
+
+### Install (Manual)
 1. `build.bat` creates `output\atikmdag.sys` + `output\amdbc250umd64.dll`
 2. Device Manager → BC-250 → Update Driver → Browse → `output\`
 3. Reboot
-
-### Register Vulkan ICD
-```cmd
-tools\register-icd.bat
-```
 
 ### Test
 ```cmd

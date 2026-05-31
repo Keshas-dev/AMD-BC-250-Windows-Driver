@@ -41,6 +41,9 @@ testcert.*
 _cert_thumbprint.txt
 sign*.txt
 
+# Third-party downloads (DXVK, DXVK-NVAPI)
+third-party/
+
 # Diagnostic output
 dxdiag-output.txt
 icd-log.txt
