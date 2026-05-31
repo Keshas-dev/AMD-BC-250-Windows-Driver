@@ -18,7 +18,7 @@ Provider=%AMD%
 Class=Display
 ClassGUID={4D36E968-E325-11CE-BFC1-08002BE10318}
 DriverVer=05/31/2026,4.5.2.0
-CatalogFile=amdbc250_dream_v3.CAT
+CatalogFile=amdbc250_dream.CAT
 
 [DestinationDirs]
 DefaultDestDir = 11

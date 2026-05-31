@@ -3,7 +3,7 @@
 Copyright (c) 2026 AMD BC-250 "Dream Drivers" Project — Version 3.0
 
 Module Name:
-    amdbc250_dream_v3_vm.c
+    amdbc250_dream_vm.c
 
 Abstract:
     GPU Virtual Memory Management for AMD BC-250 (RDNA2 / Cyan Skillfish / GFX1013).
@@ -40,7 +40,7 @@ Environment:
 
 --*/
 
-#include "amdbc250_dream_v3_kmd.h"
+#include "amdbc250_dream_kmd.h"
 
 /* Forward declarations */
 static NTSTATUS DreamV3VmAllocatePageTable(

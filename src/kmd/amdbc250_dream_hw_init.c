@@ -3,7 +3,7 @@
 Copyright (c) 2026 AMD BC-250 "Dream Drivers" Project — Version 3.0
 
 Module Name:
-    amdbc250_dream_v3_hw_init.c
+    amdbc250_dream_hw_init.c
 
 Abstract:
     Hardware initialization for AMD BC-250 (RDNA2 / Cyan Skillfish / GFX1013).
@@ -28,7 +28,7 @@ Environment:
 
 --*/
 
-#include "amdbc250_dream_v3_kmd.h"
+#include "amdbc250_dream_kmd.h"
 
 /* Forward declarations */
 static NTSTATUS DreamV3InitCommandProcessor(_In_ PDREAM_V3_DEVICE_EXTENSION DevExt);
@@ -718,7 +718,7 @@ DreamV3ReadTemperature(_In_ PDREAM_V3_DEVICE_EXTENSION DevExt)
   DreamV3CheckThermalThrottle — OLD VERSION (replaced by power.c)
 
   This function has been replaced by the enhanced version in 
-  amdbc250_dream_v3_power.c with:
+  amdbc250_dream_power.c with:
   - Multi-sensor thermal monitoring
   - Hysteresis support
   - SMU integration

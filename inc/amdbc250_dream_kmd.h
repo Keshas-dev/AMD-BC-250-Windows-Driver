@@ -3,7 +3,7 @@
 Copyright (c) 2026 AMD BC-250 "Dream Drivers" Project — Version 3.0
 
 Module Name:
-    amdbc250_dream_v3_kmd.h
+    amdbc250_dream_kmd.h
 
 Abstract:
     Kernel-Mode Display Miniport Driver interface for AMD BC-250 v3.0.
@@ -23,7 +23,7 @@ Environment:
 #include <wdm.h>
 #include <dispmprt.h>
 #include <d3dkmddi.h>
-#include "amdbc250_dream_v3_hw.h"
+#include "amdbc250_dream_hw.h"
 
 /* Resource type definitions (normally from miniport.h) */
 #ifndef CmResourceTypeMemory
@@ -437,7 +437,7 @@ DreamV3ReadTemperature(
     );
 
 /*===========================================================================
-  Function Prototypes - Power Management (amdbc250_dream_v3_power.c)
+  Function Prototypes - Power Management (amdbc250_dream_power.c)
 ===========================================================================*/
 
 NTSTATUS
@@ -484,7 +484,7 @@ DreamV3GetTelemetry(
     );
 
 /*===========================================================================
-  Function Prototypes - Memory Management (amdbc250_dream_v3_vm.c)
+  Function Prototypes - Memory Management (amdbc250_dream_vm.c)
 ===========================================================================*/
 
 /* GART functions */

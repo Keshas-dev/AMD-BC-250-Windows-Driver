@@ -41,13 +41,13 @@ Reason: INF file must be in output directory root for Inf2Cat
 
 | File | Size | Status |
 |------|------|--------|
-| `src\kmd\amdbc250_dream_v3_kmd.c` | 34 KB | ✅ Ready |
-| `src\kmd\amdbc250_dream_v3_hw_init.c` | 26.7 KB | ✅ Ready |
-| `inc\amdbc250_dream_v3_hw.h` | 26.8 KB | ✅ Ready |
-| `inc\amdbc250_dream_v3_kmd.h` | 14.6 KB | ✅ Ready |
+| `src\kmd\amdbc250_dream_kmd.c` | 34 KB | ✅ Ready |
+| `src\kmd\amdbc250_dream_hw_init.c` | 26.7 KB | ✅ Ready |
+| `inc\amdbc250_dream_hw.h` | 26.8 KB | ✅ Ready |
+| `inc\amdbc250_dream_kmd.h` | 14.6 KB | ✅ Ready |
 | `src\kmd\SOURCES` | 0.6 KB | ✅ Ready |
 | `src\kmd\makefile` | 0.3 KB | ✅ Ready |
-| `inf\amdbc250_dream_v3.inf` | 4.6 KB | ✅ Ready |
+| `inf\amdbc250_dream.inf` | 4.6 KB | ✅ Ready |
 
 **Total Source Code:** ~103 KB (~3000+ lines)
 
@@ -137,7 +137,7 @@ once proper WDK environment is configured.
 
 **Recommended next action:**
 Use existing Adrenalin 18.5.1 binaries with our custom INF file 
-(amdbc250_dream_v3.inf) for immediate testing, then build from source later.
+(amdbc250_dream.inf) for immediate testing, then build from source later.
 
 ---
 

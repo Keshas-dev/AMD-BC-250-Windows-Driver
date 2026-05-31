@@ -3,7 +3,7 @@
 Copyright (c) 2026 AMD BC-250 "Dream Drivers" Project — Version 3.0
 
 Module Name:
-    amdbc250_dream_v3_hw.h
+    amdbc250_dream_hw.h
 
 Abstract:
     CORRECTED Hardware definitions for AMD BC-250 APU.

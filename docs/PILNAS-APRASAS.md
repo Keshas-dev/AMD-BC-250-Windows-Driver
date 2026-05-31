@@ -297,7 +297,7 @@ WDDM Segments:
 
 ### 1. KMD (Kernel-Mode Driver)
 
-**Failas:** `src/kmd/amdbc250_dream_v3_kmd.c`
+**Failas:** `src/kmd/amdbc250_dream_kmd.c`
 
 ```
 Funkcijos:
@@ -320,7 +320,7 @@ Funkcijos:
 
 ### 2. Hardware Initialization
 
-**Failas:** `src/kmd/amdbc250_dream_v3_hw_init.c`
+**Failas:** `src/kmd/amdbc250_dream_hw_init.c`
 
 ```
 Initialization Sequence:
@@ -340,7 +340,7 @@ Initialization Sequence:
 
 ### 3. Hardware Definitions
 
-**Failas:** `inc/amdbc250_dream_v3_hw.h`
+**Failas:** `inc/amdbc250_dream_hw.h`
 
 ```
 Categories:
@@ -1033,7 +1033,7 @@ Required files (copy from Adrenalin 18.5.1 or 2020):
 ├── aticfx32.dll    (32-bit UMD, WOW64)
 ├── atidxx32.dll    (32-bit D3D11, WOW64)
 ├── amdhcp64.dll    (64-bit DHCP)
-└── amdbc250_dream_v3.inf  (our INF file)
+└── amdbc250_dream.inf  (our INF file)
 
 Step 3: Install via Device Manager
 ──────────────────────────────────
@@ -1043,7 +1043,7 @@ Step 3: Install via Device Manager
 4. "Browse my computer for drivers"
 5. "Let me pick from a list..."
 6. Click "Have Disk..."
-7. Browse to: amdbc250_dream_v3.inf
+7. Browse to: amdbc250_dream.inf
 8. Select: "AMD Radeon BC-250 Graphics (Dream Drivers v3.0 — RDNA2)"
 9. Click Next, confirm warning
 10. Wait for installation

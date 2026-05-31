@@ -73,7 +73,7 @@ cd AMD-BC-250-Windows-Driver
 # Sukurti backup original files
 $backupDir = "backup_$(Get-Date -Format 'yyyyMMdd_HHmmss')"
 New-Item -Type Directory -Path $backupDir | Out-Null
-Copy-Item -Path "src/kmd/amdbc250_dream_v3_kmd.c" -Destination "$backupDir/" -Force
+Copy-Item -Path "src/kmd/amdbc250_dream_kmd.c" -Destination "$backupDir/" -Force
 
 Write-Host "✅ Backup sukurtas: $backupDir"
 ```
@@ -84,7 +84,7 @@ Write-Host "✅ Backup sukurtas: $backupDir"
 
 ### 2.1 - Header File Updates
 
-**Failas: `src/kmd/amdbc250_dream_v3_kmd.h`**
+**Failas: `src/kmd/amdbc250_dream_kmd.h`**
 
 Pridėti šiuos defines:
 
@@ -127,7 +127,7 @@ typedef struct {
 
 ### 2.2 - Implementation File Updates
 
-**Failas: `src/kmd/amdbc250_dream_v3_kmd.c`**
+**Failas: `src/kmd/amdbc250_dream_kmd.c`**
 
 **ŽINGSNIS 1:** Pridėti global allocation manager inicijalizacijos į `DriverEntry`:
 
@@ -466,7 +466,7 @@ VOID CleanupAllAllocations(VOID)
 
 ### 3.1 - Header Definitions
 
-**Failas: `src/kmd/amdbc250_dream_v3_kmd.h`**
+**Failas: `src/kmd/amdbc250_dream_kmd.h`**
 
 Pridėti:
 
@@ -606,7 +606,7 @@ Rasti eilutę ~2390: `case 0x800008C4:` ir ZAMENIT:
 
 ### 4.1 - Missing Functions
 
-**Failas: `src/kmd/amdbc250_dream_v3_hw_init.c`**
+**Failas: `src/kmd/amdbc250_dream_hw_init.c`**
 
 Pridėti šias funkcijas jei jų nėra:
 
@@ -910,7 +910,7 @@ REM Execute build
 build.bat
 
 REM Expected output:
-REM - Compiling amdbc250_dream_v3_kmd.c
+REM - Compiling amdbc250_dream_kmd.c
 REM - Compiling amdbc250_umd_v46.c
 REM - Creating output\atikmdag.sys
 REM - Creating output\amdbc250umd64.dll

@@ -19,7 +19,7 @@ Write-Host "=== Step 2: Uninstall from device manager ==="
 
 Write-Host ""
 Write-Host "=== Step 3: Install fresh driver ==="
-& $pnputil /add-driver "C:\AMD-BC-250\AMD-BC-250-Windows-Driver-main\output\amdbc250_dream_v3.inf" /install 2>&1
+& $pnputil /add-driver "C:\AMD-BC-250\AMD-BC-250-Windows-Driver-main\output\amdbc250_dream.inf" /install 2>&1
 
 Write-Host ""
 Write-Host "=== DONE ==="

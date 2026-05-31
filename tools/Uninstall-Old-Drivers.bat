@@ -67,7 +67,7 @@ echo Next steps:
 echo   1. Open Device Manager
 echo   2. Right-click display adapter -^> Update Driver
 echo   3. Browse -^> Let me pick -^> Have Disk
-echo   4. Select: c:\AMD-BC-250-Windows-Driver\output\amdbc250_dream_v3.inf
+echo   4. Select: c:\AMD-BC-250-Windows-Driver\output\amdbc250_dream.inf
 echo   5. REBOOT computer
 echo.
 pause

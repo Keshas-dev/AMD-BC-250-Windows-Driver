@@ -11,7 +11,7 @@
 ### Problema Aprašymas
 
 ```
-Failas: src/kmd/amdbc250_dream_v3_kmd.c (eilutės 2155-2231)
+Failas: src/kmd/amdbc250_dream_kmd.c (eilutės 2155-2231)
 IOCTL kod: 0x80000840
 Statusas: ❌ BSOD (MmAllocateContiguousMemory)
 ```

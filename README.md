@@ -51,7 +51,9 @@ This is an AMD BC-250 Windows 11 driver project built by Keshukas and Kumpis (AI
 - ✅ SEND_PM4 — raw PM4 commands to GFX ring
 - ✅ READ_REG / WRITE_REG — GPU MMIO register access
 - ✅ GET_HW_STATUS — report MMIO/rings/fence state
+- ✅ READ_PCI_BAR — scan PCI bus for BC-250 BARs
 - ✅ AllocVidMem uses MDL-based allocation (MmAllocatePagesForMdlEx)
+- ✅ **PSP v11 firmware loading** — C2PMSG mailbox, bootloader handshake, SOS load
 
 ### Vulkan ICD — `amdbc250vulkan.dll`
 - ✅ Works with official Vulkan loader (vulkaninfo.exe passes!)
@@ -109,8 +111,9 @@ Run as Administrator. Reboot required.
 ```cmd
 test-tools\test-gpu-ioctls.exe      # IOCTL test (14/15 pass)
 test-tools\test-vulkan-icd.exe      # Vulkan test (13/13 pass)
-test-tools\test-gpu-hw-init.exe     # Hardware init test (5/7 pass)
-test-tools\test-d3d9-adapter.exe    # D3D9 UMD test (5/5 pass)
+test-tools\test-gpu-hw-init.exe     # Hardware init + MMIO test (5/7 pass)
+test-tools\test-d3d9-adapter.exe    # D3D9 UMD adapter test (5/5 pass)
+test-tools\test-psp.exe             # PSP firmware test (status/mailbox/init)
 vulkaninfo.exe                      # Official Vulkan test (passes!)
 ```
 
@@ -118,25 +121,26 @@ vulkaninfo.exe                      # Official Vulkan test (passes!)
 
 ## What We Want to Do Next
 
-### Immediate — MMIO Access (Current Blocker)
-1. **Solve MMIO mapping** — MmMapIoSpace fails for register BAR (0xFE800000); GPU behind PS5 SMU firmware block
-2. **Try MmMapIoSpace on VRAM BAR** (0xC0000000, 256MB) — if SMU only blocks register BAR
-3. **Investigate PSP firmware auth** — PS5 requires PSP to authenticate GPU commands
+### Immediate — Unlock GPU Registers (Current Blocker)
+1. **Get PSP firmware blobs** — `amdgpu_sos.bin`, `amdgpu_asd.bin`, `amdgpu_ta.bin` (extract from PS5 firmware or find compatible files)
+2. **Test PSP mailbox** — `test-psp.exe mailbox` to verify PSP responds
+3. **Load firmware** — `test-psp.exe loadfw 0 amdgpu_sos.bin` then `test-psp.exe init`
+4. **Verify MMIO** — after PSP auth, GPU registers should return real values instead of 0x0
 
 ### Short Term
-4. **Real triangle rendering** — vertex buffer + PM4 draw commands via ring buffer
-5. **ACO shader compilation** — DXBC/SPIR-V → GFX10 ISA
-6. **D3D9 via IOCTL** — bypass D3D9On12 using custom path
+5. **Real triangle rendering** — vertex buffer + PM4 draw commands via ring buffer
+6. **ACO shader compilation** — DXBC/SPIR-V → GFX10 ISA
+7. **D3D9 via IOCTL** — bypass D3D9On12 using custom path
 
 ### Medium Term
-7. **Full WDDM display miniport** — DxgkInitialize + all DDI callbacks
-8. **D3D11/D3D12 UMD** — functional stubs that actually work
-9. **Multi-monitor** — 4 display pipes support
+8. **Full WDDM display miniport** — DxgkInitialize + all DDI callbacks
+9. **D3D11/D3D12 UMD** — functional stubs that actually work
+10. **Multi-monitor** — 4 display pipes support
 
 ### Long Term
-10. **OpenGL ICD** — Mesa radeonsi port
-11. **Ray tracing** — RT core support
-12. **GPU compute** — SDMA compute queue (when HW quirk is fixed)
+11. **OpenGL ICD** — Mesa radeonsi port
+12. **Ray tracing** — RT core support
+13. **GPU compute** — SDMA compute queue (when HW quirk is fixed)
 
 ---
 
@@ -156,17 +160,24 @@ vulkaninfo.exe                      # Official Vulkan test (passes!)
 │         ├── IOCTL 0x80000880: SubmitCommands (IB+EOP)│
 │         ├── IOCTL 0x80000930: AllocDmaBuffer         │
 │         ├── IOCTL 0x80000840: AllocVidMem            │
-│         ├── IOCTL 0x800008C4: FlipDisplay            │
 │         ├── IOCTL 0x80000B80: InitHardware           │
 │         ├── IOCTL 0x80000B84: SendPM4                │
 │         ├── IOCTL 0x80000B88: ReadReg                │
 │         ├── IOCTL 0x80000B8C: WriteReg               │
 │         ├── IOCTL 0x80000B90: GetHwStatus            │
+│         ├── IOCTL 0x80000B94: ReadPciBar             │
+│         ├── IOCTL 0x80000B98: PspInit                │
+│         ├── IOCTL 0x80000B9C: PspLoadFirmware        │
+│         ├── IOCTL 0x80000BA0: PspSendCommand         │
+│         ├── IOCTL 0x80000BA4: PspGetStatus           │
+│         ├── IOCTL 0x80000BA8: PspTestMailbox         │
+│         ├── PSP v11 firmware loading                  │
 │         ├── PM4 command ring → GPU                    │
 │         └── EOP fence → completion signal             │
 ├─────────────────────────────────────────────────────┤
 │              AMD BC-250 GPU (RDNA2/GFX1013)           │
 │              24 CU, 16GB GDDR6, DCN 2.1              │
+│              PSP v11 (Platform Security Processor)    │
 └─────────────────────────────────────────────────────┘
 ```
 
@@ -176,30 +187,33 @@ vulkaninfo.exe                      # Official Vulkan test (passes!)
 
 ```
 ├── src/kmd/                        # Kernel-Mode Driver
-│   ├── amdbc250_dream_v3_kmd.c     # IOCTL dispatch, DriverEntry, submit
-│   ├── amdbc250_dream_v3_hw_init.c # GPU init, ring buffers, display
-│   ├── amdbc250_dream_v3_power.c   # Power/thermal management
-│   ├── amdbc250_dream_v3_vm.c      # GPUVM, GART, page tables
-│   └── dxgkrnl.def                 # Import library (not in WDK)
+│   ├── amdbc250_dream_kmd.c      # IOCTL dispatch, DriverEntry, submit
+│   ├── amdbc250_dream_hw_init.c  # GPU init, ring buffers, display
+│   ├── amdbc250_dream_power.c    # Power/thermal management
+│   ├── amdbc250_dream_vm.c       # GPUVM, GART, page tables
+│   ├── amdbc250_psp_v11.c        # PSP firmware loading (C2PMSG, bootloader)
+│   └── dxgkrnl.def                # Import library (not in WDK)
 ├── src/umd/                        # User-Mode Driver
-│   ├── amdbc250_umd_v46.c          # D3D9 DDI (45+ functions)
-│   └── amdbc250_umd.def            # Export: OpenAdapter = ordinal 1
+│   ├── amdbc250_umd_v46.c         # D3D9 DDI (45+ functions)
+│   └── amdbc250_umd.def           # Export: OpenAdapter = ordinal 1
 ├── src/vulkan/                     # Vulkan ICD
-│   ├── bc250_vulkan_icd.c          # 80+ Vulkan functions, IOCTL submit
-│   ├── bc250_vulkan.def            # Export: vk_icdGetInstanceProcAddr
-│   ├── bc250_aco_wrapper.c         # ACO shader compiler stub
-│   └── bc250_shader.c              # SPIR-V → GFX10 ISA
+│   ├── bc250_vulkan_icd.c         # 80+ Vulkan functions, IOCTL submit
+│   ├── bc250_vulkan.def           # Export: vk_icdGetInstanceProcAddr
+│   ├── bc250_aco_wrapper.c        # ACO shader compiler stub
+│   └── bc250_shader.c             # SPIR-V → GFX10 ISA
 ├── inc/                            # Shared headers
-│   ├── amdbc250_dream_v3_kmd.h     # KMD structures, register offsets
-│   ├── amdbc250_dream_v3_hw.h      # Hardware register definitions
-│   ├── amdbc250_ioctl.h            # IOCTL codes + structures
-│   └── amdbc250_d3d*.h             # D3D type definitions
+│   ├── amdbc250_dream_kmd.h      # KMD structures, register offsets
+│   ├── amdbc250_dream_hw.h       # Hardware register definitions
+│   ├── amdbc250_psp_v11.h        # PSP context and API
+│   ├── amdbc250_ioctl.h           # IOCTL codes + structures
+│   └── amdbc250_d3d*.h            # D3D type definitions
 ├── test-tools/                     # Test applications
-│   ├── test-gpu-ioctls.c           # IOCTL test (15 tests)
-│   ├── test-vulkan-icd.c           # Vulkan ICD test (13 tests)
-│   ├── test-gpu-hw-init.c          # Hardware init + MMIO test (7 tests)
-│   ├── test-d3d9-adapter.c         # D3D9 UMD adapter test (6 tests)
-│   └── test-render.c               # Rendering test (color fill)
+│   ├── test-gpu-ioctls.c          # IOCTL test (15 tests)
+│   ├── test-vulkan-icd.c          # Vulkan ICD test (13 tests)
+│   ├── test-gpu-hw-init.c         # Hardware init + MMIO test (7 tests)
+│   ├── test-d3d9-adapter.c        # D3D9 UMD adapter test (6 tests)
+│   ├── test-psp.c                 # PSP firmware test (status/mailbox/init)
+│   └── test-render.c              # Rendering test (color fill)
 ├── inf/                            # Driver INF
 ├── output/                         # Build output
 ├── tools/                          # Install/uninstall/diagnostic scripts

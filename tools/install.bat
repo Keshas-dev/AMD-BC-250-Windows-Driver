@@ -156,8 +156,8 @@ rem =============================================
 rem  STEP 6: Install INF (for Device Manager)
 rem =============================================
 echo [Step 6/7] Installing driver INF...
-if exist "%OUTPUT_DIR%\amdbc250_dream_v3.inf" (
-    "%SYS32%\pnputil.exe" /add-driver "%OUTPUT_DIR%\amdbc250_dream_v3.inf" /install 2>nul
+if exist "%OUTPUT_DIR%\amdbc250_dream.inf" (
+    "%SYS32%\pnputil.exe" /add-driver "%OUTPUT_DIR%\amdbc250_dream.inf" /install 2>nul
     echo   INF installed via pnputil
 ) else (
     echo   [WARN] INF not found, skipping

@@ -15,7 +15,7 @@
 #pragma comment(lib, "advapi32.lib")
 
 #define FILE_DEVICE_AMDBC250    0x8000
-#define IOCTL_INDEX             0x800
+#define IOCTL_INDEX             0x270
 #define CTL_CODE_AMDBC250(F, M, A) CTL_CODE(FILE_DEVICE_AMDBC250, IOCTL_INDEX + (F), M, A)
 
 #define IOCTL_AMDBC250_INIT_HARDWARE   CTL_CODE_AMDBC250(0x70, METHOD_BUFFERED, FILE_ANY_ACCESS)
@@ -23,6 +23,7 @@
 #define IOCTL_AMDBC250_READ_REG        CTL_CODE_AMDBC250(0x72, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #define IOCTL_AMDBC250_WRITE_REG       CTL_CODE_AMDBC250(0x73, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #define IOCTL_AMDBC250_GET_HW_STATUS   CTL_CODE_AMDBC250(0x74, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define IOCTL_AMDBC250_READ_PCI_BAR    CTL_CODE_AMDBC250(0x75, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
 typedef struct { UINT64 MmioPhysicalBase; UINT32 MmioSize; UINT32 Flags; } INIT_HW_IN;
 typedef struct {
@@ -32,6 +33,23 @@ typedef struct {
 } HW_STATUS;
 typedef struct { UINT32 Off, Val; } REG_OP;
 typedef struct { UINT32 Cmd[64], Count, Fence, Queue; } PM4_IN;
+
+/* PCI BAR info from READ_PCI_BAR */
+typedef struct {
+    UINT64 PhysicalAddress;
+    UINT32 Size;
+    UINT32 IsMemoryBar;
+    UINT32 Is64Bit;
+} PCI_BAR_INFO;
+
+typedef struct {
+    UINT16 VendorId, DeviceId;
+    UINT16 Command, Status;
+    UINT32 RevisionId, ClassCode;
+    PCI_BAR_INFO Bars[6];
+    UINT32 Bus;
+    UINT32 _pad;
+} PCI_CONFIG;
 
 #define PM4_NOP 0x10
 #define PM4_HDR(op, cnt) ((2u << 30) | (((cnt)-1u) << 16) | ((op) << 8))
@@ -257,20 +275,77 @@ int main(int argc, char *argv[])
     }
     printf("[OK] KMD device opened\n\n");
 
+    /* Test 1: Find PCI BARs via KMD (READ_PCI_BAR) */
     if (barPhys == 0) {
         total++;
-        printf("[TEST 1] Find PCI BAR0 from registry...\n");
-        if (FindBar0FromRegistry(&barPhys, &barSize)) {
-            printf("\n  >> BAR0: PA=0x%llX, Size=0x%X (%lu MB)\n\n",
-                (unsigned long long)barPhys, barSize, barSize / (1024*1024));
-            printf("[PASS]\n\n");
-            pass++;
-        } else {
-            printf("[FAIL] BAR0 not found\n\n");
-            printf("  Run with manual override: test-gpu-hw-init.exe 0xC0000000 0x10000000\n");
-            fail++;
-            CloseHandle(hDev);
-            return 1;
+        printf("[TEST 1] READ_PCI_BAR (KMD PCI config scan)...\n");
+        {
+            PCI_CONFIG pcfg = {0};
+            ok = SIO(hDev, IOCTL_AMDBC250_READ_PCI_BAR, NULL, 0, &pcfg, sizeof(pcfg), &br);
+            if (ok && pcfg.VendorId != 0) {
+                printf("  PCI: %04X:%04X (Class=%06X, Bus=%lu)\n",
+                    pcfg.VendorId, pcfg.DeviceId, pcfg.ClassCode, pcfg.Bus);
+                
+                /* Find the MMIO BAR: small memory BAR (64KB-4MB = GPU registers) */
+                printf("  BARs discovered:\n");
+                for (int i = 0; i < 6; i++) {
+                    if (pcfg.Bars[i].PhysicalAddress == 0) continue;
+                    printf("    BAR[%d]: PA=0x%llX, Size=0x%X, %s, %s\n",
+                        i, (unsigned long long)pcfg.Bars[i].PhysicalAddress,
+                        pcfg.Bars[i].Size,
+                        pcfg.Bars[i].IsMemoryBar ? "Memory" : "I/O",
+                        pcfg.Bars[i].Is64Bit ? "64-bit" : "32-bit");
+                    
+                    /* MMIO register BAR: small memory (256KB typical for RDNA2) */
+                    if (pcfg.Bars[i].IsMemoryBar && !barPhys) {
+                        UINT64 pa = pcfg.Bars[i].PhysicalAddress;
+                        /* Skip VRAM BARs (>= 64MB) and pick small memory BARs */
+                        if (pa >= 0x10000 && pa <= 0xFFFFFFFFULL) {
+                            /* Prefer small BARs that look like MMIO register space */
+                            if (pcfg.Bars[i].Size == 0 || 
+                                (pcfg.Bars[i].Size >= 0x10000 && pcfg.Bars[i].Size <= 0x1000000)) {
+                                barPhys = pa;
+                                barSize = pcfg.Bars[i].Size ? pcfg.Bars[i].Size : 0x100000;
+                                printf("  >> Selected BAR[%d] as MMIO register BAR\n", i);
+                            }
+                        }
+                    }
+                }
+                
+                if (!barPhys) {
+                    /* Fallback: try any memory BAR */
+                    for (int i = 0; i < 6; i++) {
+                        if (pcfg.Bars[i].PhysicalAddress != 0 && pcfg.Bars[i].IsMemoryBar) {
+                            barPhys = pcfg.Bars[i].PhysicalAddress;
+                            barSize = pcfg.Bars[i].Size ? pcfg.Bars[i].Size : 0x100000;
+                            printf("  >> Fallback: using BAR[%d]\n", i);
+                            break;
+                        }
+                    }
+                }
+                
+                printf("\n  >> MMIO candidate: PA=0x%llX, Size=0x%X\n\n",
+                    (unsigned long long)barPhys, barSize);
+                printf("[PASS]\n\n"); pass++;
+            } else {
+                printf("[FAIL] READ_PCI_BAR failed (err=%lu)\n\n", GetLastError());
+                fail++;
+            }
+        }
+
+        /* If READ_PCI_BAR didn't find an MMIO BAR, try registry fallback */
+        if (barPhys == 0) {
+            total++;
+            printf("[TEST 1b] Find PCI BAR0 from registry...\n");
+            if (FindBar0FromRegistry(&barPhys, &barSize)) {
+                printf("  >> BAR0: PA=0x%llX, Size=0x%X (%lu MB)\n\n",
+                    (unsigned long long)barPhys, barSize, barSize / (1024*1024));
+                printf("[PASS]\n\n"); pass++;
+            } else {
+                printf("[FAIL] BAR0 not found in registry either\n\n");
+                printf("  Run with manual override: test-gpu-hw-init.exe <BAR_PA> <SIZE>\n\n");
+                fail++;
+            }
         }
     } else {
         total++; printf("[TEST 1] Manual BAR0\n[PASS]\n\n"); pass++;
