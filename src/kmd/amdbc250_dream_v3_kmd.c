@@ -2782,6 +2782,230 @@ DreamV3DeviceControl(
         break;
     }
 
+    /* --- Init Hardware (user-mode provides MMIO base) --- */
+    case 0x80000B80: { /* IOCTL_AMDBC250_INIT_HARDWARE */
+        if (inputLen >= sizeof(AMDBC250_IOCTL_INIT_HARDWARE)) {
+            PAMDBC250_IOCTL_INIT_HARDWARE InitHw = (PAMDBC250_IOCTL_INIT_HARDWARE)inputBuffer;
+
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                "AMDBC250-DREAM-V4.3: INIT_HARDWARE requested: PA=0x%llX, Size=0x%X\n",
+                InitHw->MmioPhysicalBase, InitHw->MmioSize));
+
+            if (DevExt->HardwareInitialized) {
+                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                    "AMDBC250-DREAM-V4.3: Hardware already initialized, skipping\n"));
+                status = STATUS_SUCCESS;
+                break;
+            }
+
+            /* Validate input */
+            if (InitHw->MmioPhysicalBase == 0 || InitHw->MmioSize == 0) {
+                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
+                    "AMDBC250-DREAM-V4.3: INIT_HARDWARE invalid params\n"));
+                status = STATUS_INVALID_PARAMETER;
+                break;
+            }
+
+            /* Map MMIO BAR */
+            DevExt->MmioPhysicalBase.QuadPart = InitHw->MmioPhysicalBase;
+            DevExt->MmioSize = InitHw->MmioSize;
+
+            DevExt->MmioVirtualBase = MmMapIoSpace(
+                DevExt->MmioPhysicalBase,
+                DevExt->MmioSize,
+                MmNonCached
+            );
+
+            if (DevExt->MmioVirtualBase == NULL) {
+                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
+                    "AMDBC250-DREAM-V4.3: MmMapIoSpace FAILED for PA=0x%llX\n",
+                    InitHw->MmioPhysicalBase));
+                status = STATUS_INSUFFICIENT_RESOURCES;
+                break;
+            }
+
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                "AMDBC250-DREAM-V4.3: MMIO mapped: VA=%p\n", DevExt->MmioVirtualBase));
+
+            /* Verify GPU is alive — read a known register */
+            {
+                ULONG gpuId = DreamV3ReadRegister(DevExt, 0x0000); /* GPU_ID or scratch */
+                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                    "AMDBC250-DREAM-V4.3: GPU reg[0x0000] = 0x%08X (GPU alive test)\n", gpuId));
+            }
+
+            /* Initialize hardware (rings, fence, CP, etc.) */
+            NTSTATUS hwStatus = DreamV3HwInitialize(DevExt);
+            if (!NT_SUCCESS(hwStatus)) {
+                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+                    "AMDBC250-DREAM-V4.3: HwInitialize failed: 0x%08X (continuing anyway)\n", hwStatus));
+                /* Continue — some things may still work */
+            }
+
+            DevExt->HardwareInitialized = TRUE;
+
+            /* Enable interrupt handler ring if initialized */
+            if (DevExt->IhRing.Initialized) {
+                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                    "AMDBC250-DREAM-V4.3: IH ring active, PA=0x%llX\n",
+                    DevExt->IhRing.PhysicalAddress.QuadPart));
+            }
+
+            /* Report ring status */
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                "AMDBC250-DREAM-V4.3: INIT_HARDWARE complete. GFX ring: %s (PA=0x%llX, %lluKB)\n",
+                DevExt->GfxRing.Initialized ? "OK" : "FAIL",
+                DevExt->GfxRing.PhysicalAddress.QuadPart,
+                (ULONG64)DevExt->GfxRing.SizeInBytes / 1024));
+
+            status = STATUS_SUCCESS;
+        } else {
+            status = STATUS_BUFFER_TOO_SMALL;
+        }
+        break;
+    }
+
+    /* --- Send PM4 commands to GFX ring --- */
+    case 0x80000B84: { /* IOCTL_AMDBC250_SEND_PM4 */
+        if (inputLen >= sizeof(AMDBC250_IOCTL_SEND_PM4)) {
+            PAMDBC250_IOCTL_SEND_PM4 SendPm4 = (PAMDBC250_IOCTL_SEND_PM4)inputBuffer;
+
+            if (!DevExt->HardwareInitialized || DevExt->GfxRing.VirtualAddress == NULL) {
+                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+                    "AMDBC250-DREAM-V4.3: SEND_PM4 but hardware not initialized\n"));
+                status = STATUS_DEVICE_NOT_READY;
+                break;
+            }
+
+            if (SendPm4->CommandCount == 0 || SendPm4->CommandCount > 64) {
+                status = STATUS_INVALID_PARAMETER;
+                break;
+            }
+
+            volatile PULONG Ring = (volatile PULONG)DevExt->GfxRing.VirtualAddress;
+            ULONG WPtr = DevExt->GfxRing.WritePointer;
+            ULONG RingSize = (ULONG)DevExt->GfxRing.SizeInBytes;
+            ULONG BytesNeeded = SendPm4->CommandCount * sizeof(ULONG);
+
+            /* Ring wrap if needed */
+            if (WPtr + BytesNeeded > RingSize) {
+                /* Fill remaining with NOP, wrap to start */
+                ULONG NopCount = (RingSize - WPtr) / sizeof(ULONG);
+                for (ULONG i = 0; i < NopCount; i++) {
+                    Ring[WPtr / sizeof(ULONG) + i] = 0xB8000000; /* PM4_TYPE3_NOP */
+                }
+                WPtr = 0;
+            }
+
+            /* Copy PM4 commands into ring */
+            ULONG idx = WPtr / sizeof(ULONG);
+            RtlCopyMemory((PVOID)&Ring[idx], SendPm4->Commands, BytesNeeded);
+            WPtr += BytesNeeded;
+
+            /* Update write pointer */
+            DevExt->GfxRing.WritePointer = WPtr;
+            KeMemoryBarrier();
+
+            /* Kick doorbell — write WPTR to MMIO */
+            DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_GFX_RING0_WPTR, WPtr);
+
+            /* Handle fence */
+            if (SendPm4->FenceValue > 0) {
+                DreamV3WriteEopFence(DevExt, (ULONG64)SendPm4->FenceValue);
+                DevExt->GlobalFence.LastSubmittedValue = (ULONG64)SendPm4->FenceValue;
+            }
+
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_TRACE_LEVEL,
+                "AMDBC250-DREAM-V4.3: SEND_PM4: %lu DWORDs, WPtr=%u, fence=%u\n",
+                SendPm4->CommandCount, WPtr, SendPm4->FenceValue));
+
+            status = STATUS_SUCCESS;
+        } else {
+            status = STATUS_BUFFER_TOO_SMALL;
+        }
+        break;
+    }
+
+    /* --- Read GPU register --- */
+    case 0x80000B88: { /* IOCTL_AMDBC250_READ_REG */
+        if (inputLen >= sizeof(AMDBC250_IOCTL_REG_ACCESS) &&
+            outputLen >= sizeof(AMDBC250_IOCTL_REG_ACCESS)) {
+            PAMDBC250_IOCTL_REG_ACCESS RegAcc = (PAMDBC250_IOCTL_REG_ACCESS)inputBuffer;
+
+            if (!DevExt->HardwareInitialized || DevExt->MmioVirtualBase == NULL) {
+                status = STATUS_DEVICE_NOT_READY;
+                break;
+            }
+
+            ULONG value = DreamV3ReadRegister(DevExt, RegAcc->RegisterOffset);
+            RegAcc->Value = value;
+            bytesReturned = sizeof(AMDBC250_IOCTL_REG_ACCESS);
+
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_TRACE_LEVEL,
+                "AMDBC250-DREAM-V4.3: READ_REG[0x%04X] = 0x%08X\n",
+                RegAcc->RegisterOffset, value));
+        } else {
+            status = STATUS_BUFFER_TOO_SMALL;
+        }
+        break;
+    }
+
+    /* --- Write GPU register --- */
+    case 0x80000B8C: { /* IOCTL_AMDBC250_WRITE_REG */
+        if (inputLen >= sizeof(AMDBC250_IOCTL_REG_ACCESS)) {
+            PAMDBC250_IOCTL_REG_ACCESS RegAcc = (PAMDBC250_IOCTL_REG_ACCESS)inputBuffer;
+
+            if (!DevExt->HardwareInitialized || DevExt->MmioVirtualBase == NULL) {
+                status = STATUS_DEVICE_NOT_READY;
+                break;
+            }
+
+            DreamV3WriteRegister(DevExt, RegAcc->RegisterOffset, RegAcc->Value);
+
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_TRACE_LEVEL,
+                "AMDBC250-DREAM-V4.3: WRITE_REG[0x%04X] = 0x%08X\n",
+                RegAcc->RegisterOffset, RegAcc->Value));
+            status = STATUS_SUCCESS;
+        } else {
+            status = STATUS_BUFFER_TOO_SMALL;
+        }
+        break;
+    }
+
+    /* --- Get hardware status --- */
+    case 0x80000B90: { /* IOCTL_AMDBC250_GET_HW_STATUS */
+        if (outputLen >= sizeof(AMDBC250_IOCTL_HW_STATUS)) {
+            PAMDBC250_IOCTL_HW_STATUS HwStatus = (PAMDBC250_IOCTL_HW_STATUS)outputBuffer;
+            RtlZeroMemory(HwStatus, sizeof(*HwStatus));
+
+            HwStatus->MmioMapped = (DevExt->MmioVirtualBase != NULL) ? 1 : 0;
+            HwStatus->RingsInitialized = DevExt->GfxRing.Initialized ? 1 : 0;
+            HwStatus->FenceInitialized = (DevExt->GlobalFence.VirtualAddress != NULL) ? 1 : 0;
+            HwStatus->GfxRingPhysAddr = DevExt->GfxRing.PhysicalAddress.QuadPart;
+            HwStatus->GfxRingSize = (UINT32)DevExt->GfxRing.SizeInBytes;
+            HwStatus->GfxRingWptr = DevExt->GfxRing.WritePointer;
+            HwStatus->GfxRingRptr = DevExt->GfxRing.ReadPointer;
+            HwStatus->FencePhysAddr = DevExt->GlobalFence.PhysicalAddress.QuadPart;
+            if (DevExt->GlobalFence.VirtualAddress != NULL) {
+                HwStatus->FenceValue = *DevExt->GlobalFence.VirtualAddress;
+            }
+            HwStatus->LastSubmittedFence = DevExt->GlobalFence.LastSubmittedValue;
+            bytesReturned = sizeof(AMDBC250_IOCTL_HW_STATUS);
+
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                "AMDBC250-DREAM-V4.3: HW Status: MMIO=%s, Rings=%s, Fence=%s, "
+                "RingPA=0x%llX, Fence=%llu/%llu\n",
+                HwStatus->MmioMapped ? "YES" : "NO",
+                HwStatus->RingsInitialized ? "YES" : "NO",
+                HwStatus->FenceInitialized ? "YES" : "NO",
+                HwStatus->GfxRingPhysAddr,
+                HwStatus->FenceValue, HwStatus->LastSubmittedFence));
+        } else {
+            status = STATUS_BUFFER_TOO_SMALL;
+        }
+        break;
+    }
+
     default:
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
                    "AMDBC250-DREAM-V4.3: Unknown IOCTL 0x%08X\n", ioctlCode));

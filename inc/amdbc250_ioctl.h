@@ -83,6 +83,21 @@ Environment:
 #define IOCTL_AMDBC250_UNLOCK_40CU          CTL_CODE_AMDBC250(0x60, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #define IOCTL_AMDBC250_GET_CU_STATUS        CTL_CODE_AMDBC250(0x61, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
+/* Hardware Init (from user-mode — maps MMIO, inits rings/fence) */
+#define IOCTL_AMDBC250_INIT_HARDWARE        CTL_CODE_AMDBC250(0x70, METHOD_BUFFERED, FILE_ANY_ACCESS)
+
+/* Send raw PM4 commands to GFX ring */
+#define IOCTL_AMDBC250_SEND_PM4             CTL_CODE_AMDBC250(0x71, METHOD_BUFFERED, FILE_ANY_ACCESS)
+
+/* Read GPU register (for testing MMIO) */
+#define IOCTL_AMDBC250_READ_REG             CTL_CODE_AMDBC250(0x72, METHOD_BUFFERED, FILE_ANY_ACCESS)
+
+/* Write GPU register (for testing MMIO) */
+#define IOCTL_AMDBC250_WRITE_REG            CTL_CODE_AMDBC250(0x73, METHOD_BUFFERED, FILE_ANY_ACCESS)
+
+/* Get hardware status (rings, fence, MMIO state) */
+#define IOCTL_AMDBC250_GET_HW_STATUS        CTL_CODE_AMDBC250(0x74, METHOD_BUFFERED, FILE_ANY_ACCESS)
+
 /*===========================================================================
   Capability Flags
 ============================================================================*/
@@ -222,6 +237,41 @@ typedef struct _AMDBC250_IOCTL_POWER_TELEMETRY {
     UINT32 ThrottleActive;
     UINT32 ThrottleCount;
 } AMDBC250_IOCTL_POWER_TELEMETRY, *PAMDBC250_IOCTL_POWER_TELEMETRY;
+
+/* --- Init Hardware (user-mode provides MMIO base) --- */
+typedef struct _AMDBC250_IOCTL_INIT_HARDWARE {
+    UINT64 MmioPhysicalBase;    /* BAR0 physical address from PCI config */
+    UINT32 MmioSize;            /* BAR0 size from PCI config */
+    UINT32 Flags;               /* Reserved, must be 0 */
+} AMDBC250_IOCTL_INIT_HARDWARE, *PAMDBC250_IOCTL_INIT_HARDWARE;
+
+/* --- Send PM4 --- */
+typedef struct _AMDBC250_IOCTL_SEND_PM4 {
+    UINT32 Commands[64];        /* Up to 64 DWORDs of PM4 commands */
+    UINT32 CommandCount;        /* Number of DWORDs */
+    UINT32 FenceValue;          /* Fence to signal after execution */
+    UINT32 QueueType;           /* 0=GFX, 1=Compute(broken), 2=SDMA */
+} AMDBC250_IOCTL_SEND_PM4, *PAMDBC250_IOCTL_SEND_PM4;
+
+/* --- Read/Write Register --- */
+typedef struct _AMDBC250_IOCTL_REG_ACCESS {
+    UINT32 RegisterOffset;      /* GPU register offset (byte) */
+    UINT32 Value;               /* Register value */
+} AMDBC250_IOCTL_REG_ACCESS, *PAMDBC250_IOCTL_REG_ACCESS;
+
+/* --- HW Status --- */
+typedef struct _AMDBC250_IOCTL_HW_STATUS {
+    UINT32 MmioMapped;          /* 1=MMIO mapped */
+    UINT32 RingsInitialized;    /* 1=rings ready */
+    UINT32 FenceInitialized;    /* 1=fence ready */
+    UINT64 GfxRingPhysAddr;     /* Ring physical address */
+    UINT32 GfxRingSize;         /* Ring size */
+    UINT32 GfxRingWptr;         /* Current write pointer */
+    UINT32 GfxRingRptr;         /* Current read pointer */
+    UINT64 FencePhysAddr;       /* Fence physical address */
+    UINT64 FenceValue;          /* Current fence value */
+    UINT64 LastSubmittedFence;  /* Last submitted fence */
+} AMDBC250_IOCTL_HW_STATUS, *PAMDBC250_IOCTL_HW_STATUS;
 
 #pragma pack(pop)
 
