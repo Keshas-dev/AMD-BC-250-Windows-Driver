@@ -322,17 +322,30 @@ NTSTATUS Amdbc250PspInit(PDEVICE_OBJECT DeviceObject)
     }
 
     /* Auto-load firmware from \SystemRoot\System32\drivers\amdgpu\ if available */
+    /* Try Cyan Skillfish firmware first, then fall back to navi10 */
     if (!g_PspContext.SosFirmware) {
-        Amdbc250PspLoadFirmwareFile(&g_PspContext.SosFirmware, &g_PspContext.SosFirmwareSize,
-                                   L"\\SystemRoot\\System32\\drivers\\amdgpu\\navi10_sos.bin");
+        status = Amdbc250PspLoadFirmwareFile(&g_PspContext.SosFirmware, &g_PspContext.SosFirmwareSize,
+                                   L"\\SystemRoot\\System32\\drivers\\amdgpu\\cyan_skillfish2_sos.bin");
+        if (!NT_SUCCESS(status)) {
+            Amdbc250PspLoadFirmwareFile(&g_PspContext.SosFirmware, &g_PspContext.SosFirmwareSize,
+                                       L"\\SystemRoot\\System32\\drivers\\amdgpu\\navi10_sos.bin");
+        }
     }
     if (!g_PspContext.AsdFirmware) {
-        Amdbc250PspLoadFirmwareFile(&g_PspContext.AsdFirmware, &g_PspContext.AsdFirmwareSize,
-                                   L"\\SystemRoot\\System32\\drivers\\amdgpu\\navi10_asd.bin");
+        status = Amdbc250PspLoadFirmwareFile(&g_PspContext.AsdFirmware, &g_PspContext.AsdFirmwareSize,
+                                   L"\\SystemRoot\\System32\\drivers\\amdgpu\\cyan_skillfish2_asd.bin");
+        if (!NT_SUCCESS(status)) {
+            Amdbc250PspLoadFirmwareFile(&g_PspContext.AsdFirmware, &g_PspContext.AsdFirmwareSize,
+                                       L"\\SystemRoot\\System32\\drivers\\amdgpu\\navi10_asd.bin");
+        }
     }
     if (!g_PspContext.TaFirmware) {
-        Amdbc250PspLoadFirmwareFile(&g_PspContext.TaFirmware, &g_PspContext.TaFirmwareSize,
-                                   L"\\SystemRoot\\System32\\drivers\\amdgpu\\navi10_ta.bin");
+        status = Amdbc250PspLoadFirmwareFile(&g_PspContext.TaFirmware, &g_PspContext.TaFirmwareSize,
+                                   L"\\SystemRoot\\System32\\drivers\\amdgpu\\cyan_skillfish2_ta.bin");
+        if (!NT_SUCCESS(status)) {
+            Amdbc250PspLoadFirmwareFile(&g_PspContext.TaFirmware, &g_PspContext.TaFirmwareSize,
+                                       L"\\SystemRoot\\System32\\drivers\\amdgpu\\navi10_ta.bin");
+        }
     }
 
     KdPrint(("Amdbc250Psp: Firmware: SOS=%s (%u), ASD=%s (%u), TA=%s (%u)\n",
@@ -404,4 +417,71 @@ NTSTATUS Amdbc250PspSendCommand(ULONG Command, PUCHAR Data, ULONG DataSize)
 PAMDBC250_PSP_CONTEXT Amdbc250PspGetContext(VOID)
 {
     return &g_PspContext;
+}
+
+NTSTATUS Amdbc250PspUnlockNbio(VOID)
+{
+    NTSTATUS status;
+    ULONG cmd;
+    ULONG response;
+    ULONG i;
+    LARGE_INTEGER delay;
+
+    KdPrint(("Amdbc250Psp: Attempting NBIO unlock...\n"));
+
+    if (!g_PspContext.Initialized) {
+        KdPrint(("Amdbc250Psp: PSP not initialized\n"));
+        return STATUS_DEVICE_NOT_READY;
+    }
+
+    /* Try MODE1_RESET to unlock NBIO */
+    KdPrint(("Amdbc250Psp: Sending MODE1_RESET command...\n"));
+    
+    /* Wait for TOS ready */
+    status = Amdbc250PspWaitForRegister(MP0_SMN_C2PMSG_64, MBOX_TOS_READY_FLAG, MBOX_TOS_READY_MASK, PSP_MAX_WAIT_MS);
+    if (!NT_SUCCESS(status)) {
+        KdPrint(("Amdbc250Psp: TOS not ready for MODE1_RESET\n"));
+        return status;
+    }
+
+    /* Send MODE1_RESET command */
+    cmd = 0x00020000; /* GFX_CTRL_CMD_ID_MODE1_RST */
+    Amdbc250PspWriteRegister(MP0_SMN_C2PMSG_64, cmd);
+
+    /* Wait for response */
+    delay.QuadPart = -500000LL; /* 500ms */
+    KeDelayExecutionThread(KernelMode, FALSE, &delay);
+
+    /* Check response */
+    response = Amdbc250PspReadRegister(MP0_SMN_C2PMSG_64);
+    KdPrint(("Amdbc250Psp: MODE1_RESET response: 0x%08X\n", response));
+
+    if (response & MBOX_TOS_RESP_FLAG) {
+        KdPrint(("Amdbc250Psp: MODE1_RESET successful\n"));
+    } else {
+        KdPrint(("Amdbc250Psp: MODE1_RESET failed or timed out\n"));
+    }
+
+    /* Try to unlock NBIO by writing to signature registers */
+    KdPrint(("Amdbc250Psp: Trying NBIO signature unlock...\n"));
+    
+    /* Write to NBIO signature registers */
+    Amdbc250PspWriteRegister(0xC100, 0xFEDCBAEF); /* Magic signature 1 */
+    Amdbc250PspWriteRegister(0xC180, 0xFEDCBADF); /* Magic signature 2 */
+    
+    /* Wait a bit */
+    delay.QuadPart = -100000LL; /* 100ms */
+    KeDelayExecutionThread(KernelMode, FALSE, &delay);
+
+    /* Check if NBIO is unlocked by reading MMHUB register */
+    response = Amdbc250PspReadRegister(0x50D0);
+    KdPrint(("Amdbc250Psp: MMHUB[0x50D0] = 0x%08X\n", response));
+
+    if (response != 0x00000000) {
+        KdPrint(("Amdbc250Psp: NBIO unlock successful! MMHUB readable\n"));
+        return STATUS_SUCCESS;
+    }
+
+    KdPrint(("Amdbc250Psp: NBIO unlock failed - MMHUB still unreadable\n"));
+    return STATUS_UNSUCCESSFUL;
 }
