@@ -727,6 +727,94 @@ int main(void) {
         }
     }
 
+    /* ============================================== */
+    /* S24: NBIO + MMHUB Deep Register Scan           */
+    /* ============================================== */
+    Log("\n=== S24: NBIO + MMHUB Deep Scan ===\n");
+    {
+        HANDLE hKmd5 = CreateFileW(L"\\\\.\\AMDBC250DreamV43",
+            GENERIC_READ|GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
+        if (hKmd5 != INVALID_HANDLE_VALUE) {
+            DWORD br5 = 0;
+            typedef struct { UINT32 Offset; UINT32 Value; } REG_ACC;
+            REG_ACC ra = {0};
+            BOOL ok5;
+
+            /* Step 1: MMHUB register block (BAR5+0x5000) — full 4KB scan */
+            Log("  --- MMHUB Block (BAR5+0x5000, 256 regs) ---\n");
+            {
+                int mmhubCount = 0;
+                UINT32 i;
+                for (i = 0; i < 256; i++) {
+                    ra.Offset = 0x5000 + (i * 4);
+                    ra.Value = 0xDEADBEEF;
+                    ok5 = DeviceIoControl(hKmd5, 0x80000B88, &ra, sizeof(ra), &ra, sizeof(ra), &br5, NULL);
+                    if (ok5 && ra.Value != 0xFFFFFFFF && ra.Value != 0x00000000) {
+                        Log("    MMHUB[0x%04X] = 0x%08X\n", 0x5000 + i*4, ra.Value);
+                        mmhubCount++;
+                    }
+                }
+                Log("  MMHUB: %d readable registers\n", mmhubCount);
+            }
+
+            /* Step 2: GC/CP block (BAR5+0x2000-0x3FFF) — Command Processor */
+            Log("\n  --- GC/CP Block (BAR5+0x2000-0x3FFF) ---\n");
+            {
+                int gcCount = 0;
+                UINT32 off;
+                for (off = 0x2000; off < 0x4000; off += 4) {
+                    ra.Offset = off;
+                    ra.Value = 0xDEADBEEF;
+                    ok5 = DeviceIoControl(hKmd5, 0x80000B88, &ra, sizeof(ra), &ra, sizeof(ra), &br5, NULL);
+                    if (ok5 && ra.Value != 0xFFFFFFFF && ra.Value != 0x00000000) {
+                        Log("    GC[0x%04X] = 0x%08X\n", off, ra.Value);
+                        gcCount++;
+                        if (gcCount > 50) break; /* Limit output */
+                    }
+                }
+                Log("  GC/CP: %d readable registers\n", gcCount);
+            }
+
+            /* Step 3: DF block (BAR5+0x1A000) — Data Fabric */
+            Log("\n  --- DF Block (BAR5+0x1A000) ---\n");
+            {
+                int dfCount = 0;
+                UINT32 off;
+                for (off = 0x1A000; off < 0x1A100; off += 4) {
+                    ra.Offset = off;
+                    ra.Value = 0xDEADBEEF;
+                    ok5 = DeviceIoControl(hKmd5, 0x80000B88, &ra, sizeof(ra), &ra, sizeof(ra), &br5, NULL);
+                    if (ok5 && ra.Value != 0xFFFFFFFF && ra.Value != 0x00000000) {
+                        Log("    DF[0x%05X] = 0x%08X\n", off, ra.Value);
+                        dfCount++;
+                    }
+                }
+                Log("  DF: %d readable registers\n", dfCount);
+            }
+
+            /* Step 4: RSMU block (BAR5+0xA000) — SMU */
+            Log("\n  --- RSMU/SMU Block (BAR5+0xA000) ---\n");
+            {
+                int smuCount = 0;
+                UINT32 off;
+                for (off = 0xA000; off < 0xA100; off += 4) {
+                    ra.Offset = off;
+                    ra.Value = 0xDEADBEEF;
+                    ok5 = DeviceIoControl(hKmd5, 0x80000B88, &ra, sizeof(ra), &ra, sizeof(ra), &br5, NULL);
+                    if (ok5 && ra.Value != 0xFFFFFFFF && ra.Value != 0x00000000) {
+                        Log("    RSMU[0x%04X] = 0x%08X\n", off, ra.Value);
+                        smuCount++;
+                    }
+                }
+                Log("  RSMU/SMU: %d readable registers\n", smuCount);
+            }
+
+            CloseHandle(hKmd5);
+        } else {
+            Log("  KMD device: NOT FOUND (error=%lu)\n", GetLastError());
+        }
+    }
+
     Log("\n=== WDDM Probe Complete ===\n");
     fclose(g);
     printf("Done. Check output\\wddm-probe.log\n");
