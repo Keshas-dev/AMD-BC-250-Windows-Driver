@@ -11,16 +11,7 @@ echo.
 pause
 
 echo.
-echo [1/4] Disabling VBS launch policy...
-bcdedit /set vsmlaunchpolicy Off
-if %errorlevel% equ 0 (
-    echo   OK
-) else (
-    echo   FAILED - run as Administrator
-)
-
-echo.
-echo [2/4] Disabling Hypervisor...
+echo [1/3] Disabling Hypervisor...
 bcdedit /set hypervisorlaunchtype Off
 if %errorlevel% equ 0 (
     echo   OK
@@ -29,7 +20,7 @@ if %errorlevel% equ 0 (
 )
 
 echo.
-echo [3/4] Disabling Secure Boot (if possible)...
+echo [2/3] Disabling advanced options...
 bcdedit /set {globalsettings} advancedoptions true
 if %errorlevel% equ 0 (
     echo   OK
@@ -38,12 +29,12 @@ if %errorlevel% equ 0 (
 )
 
 echo.
-echo [4/4] Setting platform first initialization...
-bcdedit /set platformfirst yes
+echo [3/3] Disabling integrity checks...
+bcdedit /set nointegritychecks on
 if %errorlevel% equ 0 (
     echo   OK
 ) else (
-    echo   FAILED - may not be supported
+    echo   FAILED - run as Administrator
 )
 
 echo.
