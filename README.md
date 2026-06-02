@@ -104,6 +104,9 @@ DF has 40 readable registers containing:
 - ✅ **D3D9 UMD** — 45+ DDI functions, 5/5 adapter tests pass
 - ✅ **IB packet + EOP fence**, GFX10 ring buffer, HDP Flush
 - ✅ **SDMA copy/fill engine**, TDR reset, 40 CU unlock
+- ✅ **IOCTL_GET_GPU_INFO** (0x80000C00) — returns GPU info (Vendor, Device, CUs, Shaders)
+- ✅ **IOCTL_GET_FIREWALL_STATUS** (0x80000C04) — returns NBIO firewall status
+- ✅ **IOCTL_TEST_REGISTER** (0x80000C08) — tests register read/write
 
 ### Known Limitations
 
@@ -145,6 +148,7 @@ test-tools\compile-deep.bat      # Deep NBIO/DF/MMHUB scan + write test
 output\safe-test.exe             # Safe test — no crashes, all read-only
 output\deep-test.exe             # Deep register scan + write test
 output\test-wddm.exe             # Full WDDM + IOCTL tests (S1-S24)
+output\test-driver-check.exe     # New IOCTL test (GPU_INFO, FIREWALL, REG_TEST)
 ```
 
 **IMPORTANT:** Run `safe-test.exe` first to verify driver is loaded. If `safe-test.exe` crashes, the driver needs reinstallation.
@@ -168,6 +172,9 @@ output\test-wddm.exe             # Full WDDM + IOCTL tests (S1-S24)
 │         ├── GET_CAPS / GET_VRAM_INFO              │
 │         ├── ALLOC_VIDMEM (MDL-based)              │
 │         ├── PSP v11 firmware loading              │
+│         ├── IOCTL_GET_GPU_INFO (0x80000C00)      │
+│         ├── IOCTL_GET_FIREWALL_STATUS (0x80000C04)│
+│         ├── IOCTL_TEST_REGISTER (0x80000C08)     │
 │         └── PM4 ring buffer (blocked by NBIO)     │
 ├─────────────────────────────────────────────────┤
 │              NBIO Firewall                        │
@@ -206,9 +213,11 @@ output\test-wddm.exe             # Full WDDM + IOCTL tests (S1-S24)
 │   ├── safe-test.c                 # Safe minimal test (no crashes)
 │   ├── deep-test.c                 # Deep NBIO/DF/MMHUB scan + write
 │   ├── test-wddm.c                 # Full WDDM+IOCTL test (S1-S24)
+│   ├── test-driver-check.c         # New IOCTL test (GPU_INFO, FIREWALL, REG_TEST)
 │   ├── compile-safe.bat            # Compile safe-test
 │   ├── compile-deep.bat            # Compile deep-test
-│   └── compile-wddm.bat            # Compile test-wddm
+│   ├── compile-wddm.bat            # Compile test-wddm
+│   └── compile-driver-check.bat    # Compile test-driver-check
 ├── output/                         # Build output (signed drivers)
 │   ├── atikmdag.sys                # KMD (signed)
 │   ├── amdbc250umd64.dll           # UMD
@@ -253,6 +262,14 @@ output\test-wddm.exe             # Full WDDM + IOCTL tests (S1-S24)
 | GC[0x3008] | 0x00000000 | 0x00000001 | Graphics Core config |
 | HDP[0x05DC] | 0x00000000 | 0x00000000 | Writes ignored |
 | SCRATCH[0x2074] | 0xFFFFFFFF | 0xFFFFFFFF | NBIO blocks |
+
+### New IOCTLs (v4.3)
+
+| IOCTL | Code | Description |
+|-------|------|-------------|
+| GET_GPU_INFO | 0x80000C00 | Returns GPU info (Vendor, Device, CUs, Shaders, Architecture) |
+| GET_FIREWALL_STATUS | 0x80000C04 | Returns NBIO firewall status (allowed/blocked blocks) |
+| TEST_REGISTER | 0x80000C08 | Tests register read/write (ReadBefore, WriteValue, ReadAfter, WriteSuccess) |
 
 ---
 
