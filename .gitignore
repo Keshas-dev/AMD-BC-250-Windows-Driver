@@ -43,6 +43,7 @@ sign*.txt
 
 # Third-party downloads (DXVK, DXVK-NVAPI)
 third-party/
+!third-party/linuxinfo/
 
 # Diagnostic output in output/
 output/*.log
