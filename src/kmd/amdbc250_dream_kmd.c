@@ -4326,6 +4326,93 @@ DreamV3DeviceControl(
         break;
     }
 
+    /* --- GPU Info --- */
+    case 0x80000C00: { /* IOCTL_AMDBC250_GET_GPU_INFO */
+        if (outputLen >= 48) {
+            PDREAM_V3_DEVICE_EXTENSION ext = (PDREAM_V3_DEVICE_EXTENSION)g_ControlDevice->DeviceExtension;
+            UINT32 *out = (UINT32 *)outputBuffer;
+            /* Read GPU_ID from BAR5 offset 0x0000 */
+            __try {
+                if (ext && ext->MmioVirtualBase) {
+                    out[0] = READ_REGISTER_ULONG((PULONG)ext->MmioVirtualBase);  /* GPU_ID */
+                } else {
+                    out[0] = 0;
+                }
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                out[0] = 0;
+            }
+            out[1] = 0x1002;  /* Vendor ID: AMD */
+            out[2] = 0x13FE;  /* Device ID: BC-250 */
+            out[3] = 24;      /* Compute Units */
+            out[4] = 1536;    /* Stream Processors */
+            /* Architecture string: "Cyan Skillfish (GFX1013)" */
+            out[5] = 0x4379616E; /* "Cyan" */
+            out[6] = 0x20536B69; /* " Ski" */
+            out[7] = 0x6C6C6C66; /* "lllf" */
+            out[8] = 0x69736828; /* "ish(" */
+            out[9] = 0x47465831; /* "GFX1" */
+            out[10] = 0x30313329; /* "013)" */
+            status = STATUS_SUCCESS;
+            bytesReturned = 48;
+        } else {
+            status = STATUS_BUFFER_TOO_SMALL;
+        }
+        break;
+    }
+
+    /* --- Firewall Status --- */
+    case 0x80000C04: { /* IOCTL_AMDBC250_GET_FIREWALL_STATUS */
+        if (outputLen >= 12) {
+            UINT32 *out = (UINT32 *)outputBuffer;
+            out[0] = 6;   /* Allowed blocks: MMHUB, GC, DF, HDP, NBIO, GPU_ID */
+            out[1] = 7;   /* Blocked reads: GRBM, CP, CLK, RSMU, UVD, SDMA, RLCG */
+            out[2] = 7;   /* Blocked writes: same */
+            status = STATUS_SUCCESS;
+            bytesReturned = 12;
+        } else {
+            status = STATUS_BUFFER_TOO_SMALL;
+        }
+        break;
+    }
+
+    /* --- Register Test (Read + Write + ReadBack) --- */
+    case 0x80000C08: { /* IOCTL_AMDBC250_TEST_REGISTER */
+        if (inputLen >= 8 && outputLen >= 20) {
+            PDREAM_V3_DEVICE_EXTENSION ext = (PDREAM_V3_DEVICE_EXTENSION)g_ControlDevice->DeviceExtension;
+            UINT32 *in = (UINT32 *)inputBuffer;
+            UINT32 *out = (UINT32 *)outputBuffer;
+            UINT32 regAddr = in[0];
+            UINT32 writeVal = in[1];
+
+            __try {
+                if (ext && ext->MmioVirtualBase && regAddr < ext->MmioSize) {
+                    PUCHAR regVa = (PUCHAR)ext->MmioVirtualBase + regAddr;
+                    out[0] = READ_REGISTER_ULONG((PULONG)regVa);  /* ReadBefore */
+                    WRITE_REGISTER_ULONG((PULONG)regVa, writeVal);
+                    KeMemoryBarrier();
+                    out[1] = READ_REGISTER_ULONG((PULONG)regVa);  /* ReadAfter */
+                    out[2] = (out[1] == writeVal) ? 1 : 0;  /* WriteSuccess */
+                } else {
+                    out[0] = 0;
+                    out[1] = 0;
+                    out[2] = 0;
+                }
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                out[0] = 0;
+                out[1] = 0;
+                out[2] = 0;
+                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
+                    "AMDBC250-DREAM-V4.3: TEST_REGISTER EXCEPTION addr=0x%08X\n", regAddr));
+            }
+
+            status = STATUS_SUCCESS;
+            bytesReturned = 20;
+        } else {
+            status = STATUS_BUFFER_TOO_SMALL;
+        }
+        break;
+    }
+
     default:
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
                    "AMDBC250-DREAM-V4.3: Unknown IOCTL 0x%08X\n", ioctlCode));
