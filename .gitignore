@@ -44,8 +44,32 @@ sign*.txt
 # Third-party downloads (DXVK, DXVK-NVAPI)
 third-party/
 
-# Diagnostic output
-dxdiag-output.txt
-icd-log.txt
-d3d9-diag.txt
-enum-test.txt
+# Diagnostic output in output/
+output/*.log
+output/*.txt
+output/*.ilk
+output/*.pdb
+output/enum-test.txt
+output/d3d9-diag.txt
+output/icd-log.txt
+output/probe.log
+output/smu-probe.log
+output/wddm-console.txt
+output/ioctl-console.txt
+output/ioctl-test.log
+
+# Linux tools (not needed for Windows build)
+tools/*.sh
+tools/*.log
+tools/*.txt
+
+# Junk from PowerShell
+qc
+query
+queryex
+start
+stop
+compile-test.bat
+vc140.pdb
+Vulkan/
+mesa-aco/

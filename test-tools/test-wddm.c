@@ -538,6 +538,123 @@ int main(void) {
         }
     }
 
+    /* ============================================== */
+    /* S21: INIT_HARDWARE + READ_REG via IOCTL        */
+    /* ============================================== */
+    Log("\n=== S21: INIT_HARDWARE + READ_REG ===\n");
+    {
+        HANDLE hKmd2 = CreateFileW(L"\\\\.\\AMDBC250DreamV43",
+            GENERIC_READ|GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
+        if (hKmd2 != INVALID_HANDLE_VALUE) {
+            DWORD br2 = 0;
+
+            /* Step 1: Check current resource bars */
+            DWORD bars[16] = {0};
+            BOOL ok2 = DeviceIoControl(hKmd2, 0x80000BB8, NULL, 0, bars, sizeof(bars), &br2, NULL);
+            Log("  Before INIT: ResourceBars %s  MmioMapped=%lu  DeviceStarted=%lu\n",
+                ok2 ? "OK" : "FAIL", bars[1], bars[0]);
+
+            /* Step 2: INIT_HARDWARE with BAR5 (0xFE800000, 256KB) */
+            /* BAR5 is safe for reads, known from Linux probe */
+            typedef struct { UINT64 MmioPA; UINT32 MmioSize; UINT32 Flags; UINT64 FbPA; UINT32 FbSize; } INIT_HW;
+            INIT_HW ihw = {0};
+            ihw.MmioPA   = 0xFE800000ULL;  /* BAR5 — GPU registers (read-only safe) */
+            ihw.MmioSize = 0x40000;         /* 256 KB */
+            ihw.Flags    = 1;               /* NBIO_MAP flag — map without GPU init */
+            ihw.FbPA     = 0xC0000000ULL;   /* BAR0 — VRAM framebuffer */
+            ihw.FbSize   = 0x10000000;      /* 256 MB */
+
+            ok2 = DeviceIoControl(hKmd2, 0x80000B80, &ihw, sizeof(ihw), &ihw, sizeof(ihw), &br2, NULL);
+            Log("  INIT_HARDWARE: %s  bytesReturned=%lu\n", ok2 ? "OK" : "FAIL", br2);
+
+            if (ok2) {
+                /* Step 3: Verify resource bars after init */
+                RtlZeroMemory(bars, sizeof(bars));
+                ok2 = DeviceIoControl(hKmd2, 0x80000BB8, NULL, 0, bars, sizeof(bars), &br2, NULL);
+                Log("  After INIT: ResourceBars %s  MmioMapped=%lu  MmioPA=0x%08lX%08lX  MmioSize=0x%X\n",
+                    ok2 ? "OK" : "FAIL", bars[1], bars[3], bars[2], bars[4]);
+
+                /* Step 4: READ_REG — GPU_ID (offset 0x0) */
+                typedef struct { UINT32 Offset; UINT32 Value; } REG_ACC;
+                REG_ACC ra = {0};
+                ra.Offset = 0x0000;  /* GPU_ID */
+                ok2 = DeviceIoControl(hKmd2, 0x80000B88, &ra, sizeof(ra), &ra, sizeof(ra), &br2, NULL);
+                Log("  READ_REG GPU_ID (0x0000): %s  Value=0x%08X\n", ok2 ? "OK" : "FAIL", ra.Value);
+
+                /* Step 5: READ_REG — GRBM_STATUS (offset 0x2004) */
+                ra.Offset = 0x2004;  /* GRBM_STATUS */
+                ok2 = DeviceIoControl(hKmd2, 0x80000B88, &ra, sizeof(ra), &ra, sizeof(ra), &br2, NULL);
+                Log("  READ_REG GRBM_STATUS (0x2004): %s  Value=0x%08X\n", ok2 ? "OK" : "FAIL", ra.Value);
+
+                /* Step 6: READ_REG — Clock register (0xD00 + 4 = GPU_CLK) */
+                ra.Offset = 0x0D04;
+                ok2 = DeviceIoControl(hKmd2, 0x80000B88, &ra, sizeof(ra), &ra, sizeof(ra), &br2, NULL);
+                Log("  READ_REG CLK (0x0D04): %s  Value=0x%08X\n", ok2 ? "OK" : "FAIL", ra.Value);
+
+                /* Step 7: READ_REG — HDP registers (0x05A0) */
+                ra.Offset = 0x05A0;
+                ok2 = DeviceIoControl(hKmd2, 0x80000B88, &ra, sizeof(ra), &ra, sizeof(ra), &br2, NULL);
+                Log("  READ_REG HDP (0x05A0): %s  Value=0x%08X\n", ok2 ? "OK" : "FAIL", ra.Value);
+
+                /* Step 8: READ_REG — Scratch test (0x2074) */
+                ra.Offset = 0x2074;
+                ok2 = DeviceIoControl(hKmd2, 0x80000B88, &ra, sizeof(ra), &ra, sizeof(ra), &br2, NULL);
+                Log("  READ_REG SCRATCH (0x2074): %s  Value=0x%08X\n", ok2 ? "OK" : "FAIL", ra.Value);
+            }
+
+            CloseHandle(hKmd2);
+        } else {
+            Log("  KMD device: NOT FOUND (error=%lu)\n", GetLastError());
+        }
+    }
+
+    /* ============================================== */
+    /* S22: ALLOC_VIDMEM via IOCTL                    */
+    /* ============================================== */
+    Log("\n=== S22: ALLOC_VIDMEM ===\n");
+    {
+        HANDLE hKmd3 = CreateFileW(L"\\\\.\\AMDBC250DreamV43",
+            GENERIC_READ|GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
+        if (hKmd3 != INVALID_HANDLE_VALUE) {
+            DWORD br3 = 0;
+
+            /* Allocate 64KB contiguous memory */
+            ULONG allocInput[3] = { 64 * 1024, 0, 0 }; /* Size=64KB, Alignment=0, Flags=0 */
+            ULONG64 allocOutput[2] = {0}; /* PA + VA */
+            BOOL ok3 = DeviceIoControl(hKmd3, 0x80000840,
+                allocInput, sizeof(allocInput),
+                allocOutput, sizeof(allocOutput),
+                &br3, NULL);
+            Log("  ALLOC_VIDMEM (64KB): %s  bytesReturned=%lu\n", ok3 ? "OK" : "FAIL", br3);
+            if (ok3 && br3 >= 16) {
+                Log("    PhysicalAddr=0x%llX  VirtualAddr=0x%llX\n", allocOutput[0], allocOutput[1]);
+
+                if (allocOutput[1] != 0) {
+                    /* Write test pattern to the allocated buffer */
+                    PUCHAR buf = (PUCHAR)(ULONG_PTR)allocOutput[1];
+                    ULONG i;
+                    for (i = 0; i < 256 && i < 64*1024; i++) {
+                        buf[i] = (UCHAR)(i & 0xFF);
+                    }
+                    /* Read back and verify */
+                    UCHAR first = buf[0];
+                    UCHAR last = buf[255];
+                    Log("    Write/Read test: buf[0]=0x%02X (expect 0x00)  buf[255]=0x%02X (expect 0xFF)\n",
+                        first, last);
+
+                    /* Free the buffer */
+                    PVOID freeInput[1] = { (PVOID)(ULONG_PTR)allocOutput[1] };
+                    DeviceIoControl(hKmd3, 0x80000934, freeInput, sizeof(freeInput), NULL, 0, &br3, NULL);
+                    Log("    FREED buffer OK\n");
+                }
+            }
+
+            CloseHandle(hKmd3);
+        } else {
+            Log("  KMD device: NOT FOUND (error=%lu)\n", GetLastError());
+        }
+    }
+
     Log("\n=== WDDM Probe Complete ===\n");
     fclose(g);
     printf("Done. Check output\\wddm-probe.log\n");

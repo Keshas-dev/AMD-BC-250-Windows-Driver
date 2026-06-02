@@ -28,10 +28,13 @@ int main(int argc, char* argv[]) {
     printf("=== Step 1: Init Hardware ===\n");
     {
         AMDBC250_IOCTL_INIT_HARDWARE init = {0};
-        init.MmioPhysicalBase = 0xC0000000;
-        init.MmioSize = 0x10000000;
+        init.MmioPhysicalBase = 0xFE800000;   /* BAR5 = registers (Linux confirmed) */
+        init.MmioSize = 0x00080000;           /* 512KB */
+        init.FbPhysicalBase = 0xC0000000;     /* BAR0 = VRAM */
+        init.FbSize = 0x10000000;             /* 256MB */
         BOOL ok = SendIoctl(hDevice, 0x80000B80, &init, sizeof(init), NULL, 0);
-        printf("InitHardware: %s (error %lu)\n", ok ? "OK" : "FAIL", GetLastError());
+        printf("InitHardware: MMIO=0xFE800000(512KB), VRAM=0xC0000000(256MB): %s (error %lu)\n",
+               ok ? "OK" : "FAIL", GetLastError());
     }
 
     /* Step 2: Read GPU registers to verify MMIO works */
@@ -97,7 +100,7 @@ int main(int argc, char* argv[]) {
 
     /* Step 6: Probe PSP MMIO space (via KMD read_reg on PSP offsets) */
     printf("\n=== Step 6: Probe PSP MMIO Registers ===\n");
-    printf("  (Reading GPU_BAR0+0x10000 range via READ_REG)\n");
+    printf("  (Reading BAR2+0x10000 range via READ_REG — PSP at BAR2+0x10000)\n");
     {
         DWORD pspOffsets[] = {
             0x10000, 0x10004, 0x10008, 0x1000C,
