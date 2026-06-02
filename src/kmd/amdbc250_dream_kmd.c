@@ -4345,13 +4345,12 @@ DreamV3DeviceControl(
             out[2] = 0x13FE;  /* Device ID: BC-250 */
             out[3] = 24;      /* Compute Units */
             out[4] = 1536;    /* Stream Processors */
-            /* Architecture string: "Cyan Skillfish (GFX1013)" */
-            out[5] = 0x4379616E; /* "Cyan" */
-            out[6] = 0x20536B69; /* " Ski" */
-            out[7] = 0x6C6C6C66; /* "lllf" */
-            out[8] = 0x69736828; /* "ish(" */
-            out[9] = 0x47465831; /* "GFX1" */
-            out[10] = 0x30313329; /* "013)" */
+            /* Architecture string: "Cyan Skillfish(GFX10" (20 chars) */
+            out[5] = 0x6E617943; /* "Cyan" */
+            out[6] = 0x696B5320; /* " Ski" */
+            out[7] = 0x666C6C6C; /* "lllf" */
+            out[8] = 0x28687369; /* "ish(" */
+            out[9] = 0x30315846; /* "FX10" */
             status = STATUS_SUCCESS;
             bytesReturned = 48;
         } else {
