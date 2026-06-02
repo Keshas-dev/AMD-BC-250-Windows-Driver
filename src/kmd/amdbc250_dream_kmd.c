@@ -2594,7 +2594,7 @@ DreamV3DeviceControl(
         } else {
             status = STATUS_BUFFER_TOO_SMALL;
         }
-        break;
+        goto Cleanup;
     }
 
     case 0x80000BBC: { /* IOCTL_AMDBC250_FORCE_ENABLE_MMIO */
@@ -2698,7 +2698,7 @@ DreamV3DeviceControl(
         } else {
             status = STATUS_BUFFER_TOO_SMALL;
         }
-        break;
+        goto Cleanup;
     }
 
     default:

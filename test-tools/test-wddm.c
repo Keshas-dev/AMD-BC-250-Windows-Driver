@@ -339,10 +339,31 @@ int main(void) {
             GENERIC_READ|GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
         if (hKmd != INVALID_HANDLE_VALUE) {
             DWORD bytesReturned = 0;
-            DWORD caps[4] = {0};
+            DWORD caps[8] = {0};
             BOOL ok = DeviceIoControl(hKmd, 0x80000800, NULL, 0, caps, sizeof(caps), &bytesReturned, NULL);
-            Log("  KMD device: OPEN  IOCTL_GET_CAPS: %s  caps[0]=0x%08X\n",
-                ok ? "OK" : "FAIL", caps[0]);
+            Log("  KMD device: OPEN  IOCTL_GET_CAPS: %s  bytesReturned=%lu\n",
+                ok ? "OK" : "FAIL", bytesReturned);
+            if (ok && bytesReturned >= 28) {
+                Log("    Version=%lu.%lu.%lu  CUs=%lu  GPUCLK=%lu MHz  MEMCLK=%lu MHz  Temp=%lu  Throttle=%lu  ThrCount=%lu\n",
+                    caps[0]/100, (caps[0]/10)%10, caps[0]%10,
+                    caps[1], caps[2], caps[3], caps[4], caps[5], caps[6]);
+            }
+            DWORD vram[4] = {0};
+            ok = DeviceIoControl(hKmd, 0x80000804, NULL, 0, vram, sizeof(vram), &bytesReturned, NULL);
+            Log("  IOCTL_GET_VRAM_INFO: %s  bytesReturned=%lu\n", ok ? "OK" : "FAIL", bytesReturned);
+            if (ok && bytesReturned >= 12) {
+                Log("    Total=%lu MB  Visible=%lu MB  Used=%lu MB\n", vram[0], vram[1], vram[2]);
+            }
+
+            DWORD bars[16] = {0};
+            ok = DeviceIoControl(hKmd, 0x80000BB8, NULL, 0, bars, sizeof(bars), &bytesReturned, NULL);
+            Log("  IOCTL_GET_RESOURCE_BARS: %s  bytesReturned=%lu\n", ok ? "OK" : "FAIL", bytesReturned);
+            if (ok && bytesReturned >= 48) {
+                Log("    DeviceStarted=%lu  MmioMapped=%lu  MmioPA=0x%08lX%08lX  MmioSize=0x%X\n",
+                    bars[0], bars[1], bars[3], bars[2], bars[4]);
+                Log("    FbPA=0x%08lX%08lX  FbSize=0x%X\n", bars[6], bars[5], bars[7]);
+            }
+
             CloseHandle(hKmd);
         } else {
             Log("  KMD device: NOT FOUND (error=%lu) - driver not installed\n", GetLastError());
