@@ -55,6 +55,7 @@ static UNICODE_STRING g_SymlinkName;
 /* Forward declarations */
 NTSTATUS DreamV3DeviceControl(PDEVICE_OBJECT, PIRP);
 NTSTATUS DreamV3CreateClose(PDEVICE_OBJECT, PIRP);
+NTSTATUS DreamV3DdiEscape(HANDLE, CONST DXGKARG_ESCAPE*);
 NTSTATUS DreamV3SdmaCopyBuffer(PDREAM_V3_DEVICE_EXTENSION, PHYSICAL_ADDRESS, PHYSICAL_ADDRESS, SIZE_T);
 NTSTATUS DreamV3SdmaFillBuffer(PDREAM_V3_DEVICE_EXTENSION, PHYSICAL_ADDRESS, SIZE_T, ULONG);
 NTSTATUS DreamV3TdrReset(PDREAM_V3_DEVICE_EXTENSION);
@@ -62,11 +63,31 @@ NTSTATUS DreamV3ReadEdid(PDREAM_V3_DEVICE_EXTENSION, ULONG, PUCHAR, PULONG);
 NTSTATUS DreamV3ParseEdid(PDREAM_V3_DEVICE_EXTENSION, ULONG, PULONG, PULONG, PULONG);
 NTSTATUS DreamV3ShaderCompileStub(PDREAM_V3_DEVICE_EXTENSION, PVOID, SIZE_T, ULONG, PVOID*, PULONG);
 
+/* Mandatory DDI stubs (required by DxgkInitialize but not yet implemented) */
+NTSTATUS APIENTRY DreamV3DdiDispatchIoRequest(PVOID, ULONG, PVIDEO_REQUEST_PACKET);
+NTSTATUS APIENTRY DreamV3DdiControlEtwLogging(PVOID, UINT, UINT, PVOID);
+NTSTATUS APIENTRY DreamV3DdiDescribeAllocation(PVOID, PVOID);
+NTSTATUS APIENTRY DreamV3DdiGetStandardAllocationDriverData(PVOID, PVOID);
+NTSTATUS APIENTRY DreamV3DdiAcquireSwizzlingRange(PVOID, PVOID);
+NTSTATUS APIENTRY DreamV3DdiReleaseSwizzlingRange(PVOID, PVOID);
+NTSTATUS APIENTRY DreamV3DdiPatch(PVOID, PVOID);
+NTSTATUS APIENTRY DreamV3DdiSetPalette(PVOID, PVOID);
+NTSTATUS APIENTRY DreamV3DdiSetPointerPosition(PVOID, PVOID);
+NTSTATUS APIENTRY DreamV3DdiSetPointerShape(PVOID, PVOID);
+NTSTATUS APIENTRY DreamV3DdiResetFromTimeout(PVOID, PVOID);
+NTSTATUS APIENTRY DreamV3DdiRestartFromTimeout(PVOID);
+NTSTATUS APIENTRY DreamV3DdiCollectDbgInfo(PVOID, PVOID);
+NTSTATUS APIENTRY DreamV3DdiIsSupportedVidPn(PVOID, PVOID);
+NTSTATUS APIENTRY DreamV3DdiRecommendVidPnTopology(PVOID, PVOID);
+NTSTATUS APIENTRY DreamV3DdiStopCapture(PVOID, PVOID);
+NTSTATUS APIENTRY DreamV3DdiCreateOverlay(PVOID, PVOID, PVOID);
+
 /*===========================================================================
   DreamV3DxgkInitialize Stub
-  In real WDDM drivers, this is provided by DXGKRNL.
-  For our driver, we implement it ourselves.
-===========================================================================*/
+  DxgkInitialize is NOT exported by dxgkrnl.sys on Windows 11 26100+.
+  We store the init data but do not call the real DxgkInitialize.
+  UMD communication uses IRP_MJ_DEVICE_CONTROL on control device.
+============================================================================*/
 
 NTSTATUS
 NTAPI
@@ -76,23 +97,17 @@ DreamV3DxgkInitialize(
     _In_ PDRIVER_INITIALIZATION_DATA DriverInitializationData
     )
 {
+    UNREFERENCED_PARAMETER(DriverObject);
     UNREFERENCED_PARAMETER(RegistryPath);
 
     if (DriverInitializationData == NULL) {
         return STATUS_INVALID_PARAMETER;
     }
 
-    /* Store initialization data for later use.
-       NOTE: We do NOT call the real DxgkInitialize() here because this driver
-       is not a full WDDM display miniport driver. It uses a custom IOCTL channel
-       for UMD communication. The DxgkInitialize() call caused Code 39 because
-       dxgkrnl.sys expects full WDDM infrastructure that we don't have.
-
-       D3D9 support works through the custom UMD→KMD IOCTL channel instead. */
     RtlCopyMemory(&g_InitData, DriverInitializationData, sizeof(DRIVER_INITIALIZATION_DATA));
 
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-               "AMDBC250-DREAM-V4.3: DreamV3DxgkInitialize called (custom mode, no DxgkInitialize), DDI version=%u\n",
+               "AMDBC250-DREAM-V4.3: DreamV3DxgkInitialize stub (DxgkInitialize not available), DDI version=%u\n",
                DriverInitializationData->Version));
 
     return STATUS_SUCCESS;
@@ -147,7 +162,8 @@ DriverEntry(
                "AMDBC250-DREAM-V4.3: Architecture: 24 CU RDNA2, 16GB GDDR6\n"));
 
     /* Initialize the DDI callback table */
-    InitData.Version = DXGKDDI_INTERFACE_VERSION;
+    /* Use WIN8 version — enough for basic WDDM but not too many mandatory DDIs */
+    InitData.Version = DXGKDDI_INTERFACE_VERSION_WIN8;
     
     /* Core device lifecycle */
     InitData.DxgkDdiAddDevice = DreamV3DdiAddDevice;
@@ -202,9 +218,57 @@ DriverEntry(
     InitData.DxgkDdiRecommendMonitorModes = DreamV3DdiRecommendMonitorModes;
     InitData.DxgkDdiGetScanLine = DreamV3DdiGetScanLine;
     InitData.DxgkDdiControlInterrupt = DreamV3DdiControlInterrupt;
+    
+    /* UMD↔KMD communication via WDDM Escape (replaces MajorFunction IOCTL dispatch) */
+    InitData.DxgkDdiEscape = DreamV3DdiEscape;
+
+    /* Mandatory DDI stubs (required by DxgkInitialize for WIN8+) */
+    InitData.DxgkDdiDispatchIoRequest = DreamV3DdiDispatchIoRequest;
+    InitData.DxgkDdiControlEtwLogging = DreamV3DdiControlEtwLogging;
+    InitData.DxgkDdiDescribeAllocation = DreamV3DdiDescribeAllocation;
+    InitData.DxgkDdiGetStandardAllocationDriverData = DreamV3DdiGetStandardAllocationDriverData;
+    InitData.DxgkDdiAcquireSwizzlingRange = DreamV3DdiAcquireSwizzlingRange;
+    InitData.DxgkDdiReleaseSwizzlingRange = DreamV3DdiReleaseSwizzlingRange;
+    InitData.DxgkDdiPatch = DreamV3DdiPatch;
+    InitData.DxgkDdiSetPalette = DreamV3DdiSetPalette;
+    InitData.DxgkDdiSetPointerPosition = DreamV3DdiSetPointerPosition;
+    InitData.DxgkDdiSetPointerShape = DreamV3DdiSetPointerShape;
+    InitData.DxgkDdiResetFromTimeout = DreamV3DdiResetFromTimeout;
+    InitData.DxgkDdiRestartFromTimeout = DreamV3DdiRestartFromTimeout;
+    InitData.DxgkDdiCollectDbgInfo = DreamV3DdiCollectDbgInfo;
+    InitData.DxgkDdiIsSupportedVidPn = DreamV3DdiIsSupportedVidPn;
+    InitData.DxgkDdiRecommendVidPnTopology = DreamV3DdiRecommendVidPnTopology;
+    InitData.DxgkDdiStopCapture = DreamV3DdiStopCapture;
+    InitData.DxgkDdiCreateOverlay = DreamV3DdiCreateOverlay;
 
     /* Register with DXGKRNL */
+    {
+        UNICODE_STRING vp2, vn2;
+        OBJECT_ATTRIBUTES oa2;
+        RtlInitUnicodeString(&vp2, L"\\Registry\\Machine\\SYSTEM\\CurrentControlSet\\Services\\atikmdag");
+        InitializeObjectAttributes(&oa2, &vp2, OBJ_CASE_INSENSITIVE, NULL, NULL);
+        HANDLE hk2 = NULL;
+        if (NT_SUCCESS(ZwOpenKey(&hk2, KEY_SET_VALUE, &oa2))) {
+            ULONG step = 10;
+            RtlInitUnicodeString(&vn2, L"Step_BeforeDxgkInit");
+            ZwSetValueKey(hk2, &vn2, 0, REG_DWORD, &step, sizeof(step));
+            ZwClose(hk2);
+        }
+    }
     Status = DreamV3DxgkInitialize(DriverObject, RegistryPath, &InitData);
+    {
+        UNICODE_STRING vp2, vn2;
+        OBJECT_ATTRIBUTES oa2;
+        RtlInitUnicodeString(&vp2, L"\\Registry\\Machine\\SYSTEM\\CurrentControlSet\\Services\\atikmdag");
+        InitializeObjectAttributes(&oa2, &vp2, OBJ_CASE_INSENSITIVE, NULL, NULL);
+        HANDLE hk2 = NULL;
+        if (NT_SUCCESS(ZwOpenKey(&hk2, KEY_SET_VALUE, &oa2))) {
+            ULONG step = NT_SUCCESS(Status) ? 11 : 0xC0000000 | (ULONG)Status;
+            RtlInitUnicodeString(&vn2, L"Step_AfterDxgkInit");
+            ZwSetValueKey(hk2, &vn2, 0, REG_DWORD, &step, sizeof(step));
+            ZwClose(hk2);
+        }
+    }
 
     if (NT_SUCCESS(Status)) {
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
@@ -225,6 +289,24 @@ DriverEntry(
 
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                    "AMDBC250-DREAM-V4.3: Creating control device...\n"));
+
+        /* Delete any stale control device from a previous failed unload (fixes Error 38) */
+        {
+            PFILE_OBJECT oldFileObj = NULL;
+            PDEVICE_OBJECT oldDevObj = NULL;
+            NTSTATUS openStatus = IoGetDeviceObjectPointer(
+                &devName, FILE_ALL_ACCESS, &oldFileObj, &oldDevObj);
+            if (NT_SUCCESS(openStatus) && oldDevObj != NULL) {
+                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+                    "AMDBC250-DREAM-V4.3: Found stale control device at %p, deleting...\n", oldDevObj));
+                if (oldFileObj != NULL) {
+                    ObDereferenceObject(oldFileObj);
+                }
+                IoDeleteDevice(oldDevObj);
+                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+                    "AMDBC250-DREAM-V4.3: Stale control device deleted\n"));
+            }
+        }
 
         Status = IoCreateDevice(
             DriverObject,
@@ -260,13 +342,13 @@ DriverEntry(
 
             KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                        "AMDBC250-DREAM-V4.3: IoCreateDevice OK, symlink=0x%08X\n", symStatus));
-            DriverObject->MajorFunction[IRP_MJ_DEVICE_CONTROL] = DreamV3DeviceControl;
+            /* CREATE/CLOSE + DEVICE_CONTROL on control device — safe because
+               we do NOT call DxgkInitialize, so no WDDM adapter device exists. */
             DriverObject->MajorFunction[IRP_MJ_CREATE] = DreamV3CreateClose;
             DriverObject->MajorFunction[IRP_MJ_CLOSE] = DreamV3CreateClose;
-            DriverObject->DriverUnload = DreamV3WdmUnload;
+            DriverObject->MajorFunction[IRP_MJ_DEVICE_CONTROL] = DreamV3DeviceControl;
 
-            /* Initialize PCI device extension for IOCTL handler
-               (normally done in DxgkDdiAddDevice, but we don't call DxgkInitialize) */
+            /* Allocate PCI device extension for IOCTL handler */
             {
                 g_PciDevExt = (PDREAM_V3_DEVICE_EXTENSION)
                     ExAllocatePool2(POOL_FLAG_NON_PAGED, sizeof(DREAM_V3_DEVICE_EXTENSION), '3vDA');
@@ -283,6 +365,8 @@ DriverEntry(
                     g_PciDevExt->TotalVramBytes = 16ULL * 1024 * 1024 * 1024;
                     g_PciDevExt->NumDisplayPipes = 4;
                     g_PciDevExt->NextGpuVa = 0x100000000ULL;
+
+                    g_ControlDevice->DeviceExtension = g_PciDevExt;
 
                     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                                "AMDBC250-DREAM-V4.3: g_PciDevExt allocated at %p\n", g_PciDevExt));
@@ -470,6 +554,7 @@ DreamV3DdiStartDevice(
                PartialResourceList->Count));
     
     BOOLEAN MmioFound = FALSE;
+    BOOLEAN FbFound = FALSE;
     for (ULONG i = 0; i < PartialResourceList->Count; i++) {
         PCM_PARTIAL_RESOURCE_DESCRIPTOR desc = &PartialResourceList->PartialDescriptors[i];
         
@@ -481,8 +566,19 @@ DreamV3DdiStartDevice(
                        "AMDBC250-DREAM-V4.3: Resource[%lu] Type=Memory, PA=0x%llX, Size=0x%X\n",
                        i, PhysAddr.QuadPart, Size));
             
-            /* First memory resource = MMIO */
-            if (!MmioFound) {
+            /* Heuristic: MMIO register BAR is < 16MB, VRAM framebuffer is >= 16MB */
+            if (Size >= 0x1000000 && !FbFound) {
+                /* Large region = VRAM framebuffer */
+                DevExt->FbPhysicalBase = PhysAddr;
+                DevExt->FbSize = Size;
+                FbFound = TRUE;
+                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                           "AMDBC250-DREAM-V4.3: Framebuffer (VRAM): PA=0x%llX, Size=0x%X (%lu MB)\n",
+                           DevExt->FbPhysicalBase.QuadPart,
+                           DevExt->FbSize,
+                           DevExt->FbSize / (1024 * 1024)));
+            } else if (!MmioFound) {
+                /* Small region = MMIO registers */
                 DevExt->MmioPhysicalBase = PhysAddr;
                 DevExt->MmioSize = Size;
                 
@@ -503,37 +599,23 @@ DreamV3DdiStartDevice(
                 KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                            "AMDBC250-DREAM-V4.3: *** MMIO MAPPED SUCCESS: VA=0x%p, PA=0x%llX, Size=0x%X\n",
                            DevExt->MmioVirtualBase, DevExt->MmioPhysicalBase.QuadPart, DevExt->MmioSize));
-            } else {
-                /* Second memory resource = framebuffer */
-                DevExt->FbPhysicalBase = PhysAddr;
-                DevExt->FbSize = Size;
-                
-                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-                           "AMDBC250-DREAM-V4.3: Framebuffer: PA=0x%llX, Size=0x%X (%lu MB)\n",
-                           DevExt->FbPhysicalBase.QuadPart,
-                           DevExt->FbSize,
-                           DevExt->FbSize / (1024 * 1024)));
             }
         }
     }
     
     if (!MmioFound) {
-        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
-                   "AMDBC250-DREAM-V4.3: *** NO MMIO RESOURCE FOUND! Device cannot initialize.\n"));
-        return STATUS_DEVICE_CONFIGURATION_ERROR;
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+                   "AMDBC250-DREAM-V4.3: *** NO MMIO RESOURCE FOUND — continuing in software mode ***\n"));
+        /* Don't fail — PS5 may not expose MMIO resources to PnP.
+           The driver still works for D3DKMTEscape queries. */
     }
 
-    /* CRITICAL: Initialize hardware */
+    /* CRITICAL: Initialize hardware — non-fatal if fails (PS5 NBIO may block MMIO) */
     Status = DreamV3HwInitialize(DevExt);
     if (!NT_SUCCESS(Status)) {
-        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
-                   "AMDBC250-DREAM-V4.3: Hardware init failed: 0x%08X\n", Status));
-        
-        if (DevExt->MmioVirtualBase != NULL) {
-            MmUnmapIoSpace(DevExt->MmioVirtualBase, DevExt->MmioSize);
-            DevExt->MmioVirtualBase = NULL;
-        }
-        return Status;
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+                   "AMDBC250-DREAM-V4.3: Hardware init failed: 0x%08X — continuing in software mode\n", Status));
+        /* Don't fail — continue with software-only mode for Escape queries */
     }
 
     /* Report display topology */
@@ -577,8 +659,62 @@ DreamV3DdiStartDevice(
         }
     }
 
+    /* Control device already created in DriverEntry — skip if it exists */
+    if (g_ControlDevice == NULL) {
+        UNICODE_STRING devName, symLink;
+        RtlInitUnicodeString(&devName, L"\\Device\\AMDBC250DreamV43");
+        RtlInitUnicodeString(&symLink, L"\\DosDevices\\AMDBC250DreamV43");
+
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                   "AMDBC250-DREAM-V4.3: Creating WDM control device in WDDM path...\n"));
+
+        Status = IoCreateDevice(
+            g_DriverObject,
+            0,
+            &devName,
+            FILE_DEVICE_UNKNOWN,
+            0,
+            FALSE,
+            &g_ControlDevice);
+
+        if (NT_SUCCESS(Status)) {
+            NTSTATUS symStatus;
+            g_ControlDevice->Flags |= DO_BUFFERED_IO;
+            g_ControlDevice->Flags &= ~DO_DEVICE_INITIALIZING;
+            symStatus = IoCreateSymbolicLink(&symLink, &devName);
+            g_ControlDevice->DeviceExtension = DevExt;
+            g_PciDevExt = DevExt;
+
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                       "AMDBC250-DREAM-V4.3: WDM control device created in WDDM path, symlink=0x%08X\n",
+                       symStatus));
+        } else {
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+                       "AMDBC250-DREAM-V4.3: WDM control device creation FAILED: 0x%08X (non-fatal)\n",
+                       Status));
+        }
+    } else {
+        /* Already exists from DriverEntry — just update the device extension pointers */
+        if (g_ControlDevice->DeviceExtension == NULL) {
+            g_ControlDevice->DeviceExtension = DevExt;
+        }
+        g_PciDevExt = DevExt;
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                   "AMDBC250-DREAM-V4.3: Control device already exists, pointers updated\n"));
+    }
+
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                "AMDBC250-DREAM-V4.3: StartDevice SUCCESS\n"));
+
+    /* CRITICAL: Re-set CREATE/CLOSE handlers AFTER dxgkInitialize has completed.
+       dxgkrnl overwrites MajorFunction table when it takes over the DriverObject.
+       Setting handlers here ensures they survive dxgkrnl's initialization.
+       DEVICE_CONTROL is NOT set here — DxgkDdiEscape handles UMD communication. */
+    g_DriverObject->MajorFunction[IRP_MJ_CREATE] = DreamV3CreateClose;
+    g_DriverObject->MajorFunction[IRP_MJ_CLOSE] = DreamV3CreateClose;
+    g_DriverObject->DriverUnload = DreamV3WdmUnload;
+    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+               "AMDBC250-DREAM-V4.3: MajorFunction[CREATE/CLOSE] + DriverUnload re-set after dxgkrnl init\n"));
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                "AMDBC250-DREAM-V4.3:   24 CU RDNA2, 1536 SP\n"));
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
@@ -1918,6 +2054,243 @@ DreamV3DdiQueryInterface(
 }
 
 /*===========================================================================
+  DreamV3DdiEscape — UMD→KMD communication via WDDM Escape
+  
+  This is the WDDM-correct path for user-mode to kernel-mode communication.
+  Replaces the MajorFunction[IRP_MJ_DEVICE_CONTROL] that caused bugcheck 0x3B.
+  
+  UMD calls D3DKMTEscape() which routes through dxgkrnl to this callback.
+  We use D3DKMT_ESCAPE_DRIVERPRIVATE with custom command IDs.
+  
+  Command IDs (in pPrivateDriverData->CommandId):
+    0x01 = GET_CAPS        — return GPU capabilities
+    0x02 = GET_VRAM_INFO   — return VRAM layout
+    0x03 = READ_MMIO       — read GPU register (safe reads only)
+    0x04 = GET_BIOS_INFO   — return BIOS/firmware info
+    0x05 = GET_FW_VERSION  — return firmware version strings
+===========================================================================*/
+
+/* ===========================================================================
+   Mandatory DDI stub implementations
+   =========================================================================== */
+
+NTSTATUS APIENTRY DreamV3DdiDispatchIoRequest(PVOID MiniportDeviceContext, ULONG VidPnSourceId, PVIDEO_REQUEST_PACKET RequestPacket) {
+    UNREFERENCED_PARAMETER(MiniportDeviceContext); UNREFERENCED_PARAMETER(VidPnSourceId);
+    if (RequestPacket) RequestPacket->StatusBlock->Status = STATUS_NOT_IMPLEMENTED;
+    return STATUS_NOT_IMPLEMENTED;
+}
+
+NTSTATUS APIENTRY DreamV3DdiControlEtwLogging(PVOID MiniportDeviceContext, UINT Enable, UINT VerboseLevel, PVOID Reserved) {
+    UNREFERENCED_PARAMETER(MiniportDeviceContext); UNREFERENCED_PARAMETER(Enable);
+    UNREFERENCED_PARAMETER(VerboseLevel); UNREFERENCED_PARAMETER(Reserved);
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS APIENTRY DreamV3DdiDescribeAllocation(PVOID MiniportDeviceContext, PVOID DescribeAllocation) {
+    UNREFERENCED_PARAMETER(MiniportDeviceContext); UNREFERENCED_PARAMETER(DescribeAllocation);
+    return STATUS_NOT_IMPLEMENTED;
+}
+
+NTSTATUS APIENTRY DreamV3DdiGetStandardAllocationDriverData(PVOID MiniportDeviceContext, PVOID Data) {
+    UNREFERENCED_PARAMETER(MiniportDeviceContext); UNREFERENCED_PARAMETER(Data);
+    return STATUS_NOT_IMPLEMENTED;
+}
+
+NTSTATUS APIENTRY DreamV3DdiAcquireSwizzlingRange(PVOID MiniportDeviceContext, PVOID Range) {
+    UNREFERENCED_PARAMETER(MiniportDeviceContext); UNREFERENCED_PARAMETER(Range);
+    return STATUS_NOT_IMPLEMENTED;
+}
+
+NTSTATUS APIENTRY DreamV3DdiReleaseSwizzlingRange(PVOID MiniportDeviceContext, PVOID Range) {
+    UNREFERENCED_PARAMETER(MiniportDeviceContext); UNREFERENCED_PARAMETER(Range);
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS APIENTRY DreamV3DdiPatch(PVOID MiniportDeviceContext, PVOID Patch) {
+    UNREFERENCED_PARAMETER(MiniportDeviceContext); UNREFERENCED_PARAMETER(Patch);
+    return STATUS_NOT_IMPLEMENTED;
+}
+
+NTSTATUS APIENTRY DreamV3DdiSetPalette(PVOID MiniportDeviceContext, PVOID Palette) {
+    UNREFERENCED_PARAMETER(MiniportDeviceContext); UNREFERENCED_PARAMETER(Palette);
+    return STATUS_NOT_IMPLEMENTED;
+}
+
+NTSTATUS APIENTRY DreamV3DdiSetPointerPosition(PVOID MiniportDeviceContext, PVOID Position) {
+    UNREFERENCED_PARAMETER(MiniportDeviceContext); UNREFERENCED_PARAMETER(Position);
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS APIENTRY DreamV3DdiSetPointerShape(PVOID MiniportDeviceContext, PVOID Shape) {
+    UNREFERENCED_PARAMETER(MiniportDeviceContext); UNREFERENCED_PARAMETER(Shape);
+    return STATUS_NOT_IMPLEMENTED;
+}
+
+NTSTATUS APIENTRY DreamV3DdiResetFromTimeout(PVOID MiniportDeviceContext, PVOID Reset) {
+    UNREFERENCED_PARAMETER(MiniportDeviceContext); UNREFERENCED_PARAMETER(Reset);
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS APIENTRY DreamV3DdiRestartFromTimeout(PVOID MiniportDeviceContext) {
+    UNREFERENCED_PARAMETER(MiniportDeviceContext);
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS APIENTRY DreamV3DdiCollectDbgInfo(PVOID MiniportDeviceContext, PVOID DbgInfo) {
+    UNREFERENCED_PARAMETER(MiniportDeviceContext); UNREFERENCED_PARAMETER(DbgInfo);
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS APIENTRY DreamV3DdiIsSupportedVidPn(PVOID MiniportDeviceContext, PVOID IsSupported) {
+    UNREFERENCED_PARAMETER(MiniportDeviceContext); UNREFERENCED_PARAMETER(IsSupported);
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS APIENTRY DreamV3DdiRecommendVidPnTopology(PVOID MiniportDeviceContext, PVOID Recommend) {
+    UNREFERENCED_PARAMETER(MiniportDeviceContext); UNREFERENCED_PARAMETER(Recommend);
+    return STATUS_NOT_IMPLEMENTED;
+}
+
+NTSTATUS APIENTRY DreamV3DdiStopCapture(PVOID MiniportDeviceContext, PVOID Stop) {
+    UNREFERENCED_PARAMETER(MiniportDeviceContext); UNREFERENCED_PARAMETER(Stop);
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS APIENTRY DreamV3DdiCreateOverlay(PVOID MiniportDeviceContext, PVOID CreateOverlay, PVOID OverlayHandle) {
+    UNREFERENCED_PARAMETER(MiniportDeviceContext); UNREFERENCED_PARAMETER(CreateOverlay); UNREFERENCED_PARAMETER(OverlayHandle);
+    return STATUS_NOT_IMPLEMENTED;
+}
+
+typedef struct _DREAM_ESCAPE_HEADER {
+    ULONG CommandId;
+    NTSTATUS Status;
+    ULONG OutputSize;
+} DREAM_ESCAPE_HEADER, *PDREAM_ESCAPE_HEADER;
+
+NTSTATUS
+APIENTRY
+DreamV3DdiEscape(
+    _In_ HANDLE                     hAdapter,
+    _In_ CONST DXGKARG_ESCAPE*      pEscape
+    )
+{
+    PDREAM_V3_DEVICE_EXTENSION DevExt = (PDREAM_V3_DEVICE_EXTENSION)hAdapter;
+
+    if (pEscape == NULL || pEscape->pPrivateDriverData == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    if (pEscape->PrivateDriverDataSize < sizeof(DREAM_ESCAPE_HEADER)) {
+        return STATUS_BUFFER_TOO_SMALL;
+    }
+
+    PDREAM_ESCAPE_HEADER Header = (PDREAM_ESCAPE_HEADER)pEscape->pPrivateDriverData;
+
+    switch (Header->CommandId) {
+    case 0x01: /* GET_CAPS */
+    {
+        if (pEscape->PrivateDriverDataSize < sizeof(DREAM_ESCAPE_HEADER) + sizeof(ULONG) * 8) {
+            Header->Status = STATUS_BUFFER_TOO_SMALL;
+            Header->OutputSize = 0;
+            return STATUS_SUCCESS;
+        }
+        PULONG Caps = (PULONG)(Header + 1);
+        Caps[0] = 0x1002; /* VendorId */
+        Caps[1] = 0x13FE; /* DeviceId */
+        Caps[2] = 24; /* NumComputeUnits */
+        Caps[3] = 1536; /* NumShaders */
+        Caps[4] = 4; /* NumDisplayPipes */
+        Caps[5] = 64; /* GPU clock MHz (base) */
+        Caps[6] = 600; /* GPU clock MHz (boost) */
+        Caps[7] = 0; /* Reserved */
+        Header->Status = STATUS_SUCCESS;
+        Header->OutputSize = sizeof(ULONG) * 8;
+        return STATUS_SUCCESS;
+    }
+
+    case 0x02: /* GET_VRAM_INFO */
+    {
+        if (pEscape->PrivateDriverDataSize < sizeof(DREAM_ESCAPE_HEADER) + sizeof(ULONG) * 4) {
+            Header->Status = STATUS_BUFFER_TOO_SMALL;
+            Header->OutputSize = 0;
+            return STATUS_SUCCESS;
+        }
+        PULONG Info = (PULONG)(Header + 1);
+        Info[0] = (ULONG)(DevExt->TotalVramBytes >> 20); /* Total VRAM in MB */
+        Info[1] = (ULONG)(DevExt->VisibleVramBytes >> 20); /* Visible VRAM in MB */
+        Info[2] = 0xC0000000; /* VRAM physical base (low 32 bits) */
+        Info[3] = 0; /* VRAM physical base (high 32 bits) */
+        Header->Status = STATUS_SUCCESS;
+        Header->OutputSize = sizeof(ULONG) * 4;
+        return STATUS_SUCCESS;
+    }
+
+    case 0x03: /* READ_MMIO */
+    {
+        /* Read a GPU register — safe reads only (BAR5 writes cause hard freeze) */
+        if (pEscape->PrivateDriverDataSize < sizeof(DREAM_ESCAPE_HEADER) + sizeof(ULONG) * 2) {
+            Header->Status = STATUS_BUFFER_TOO_SMALL;
+            Header->OutputSize = 0;
+            return STATUS_SUCCESS;
+        }
+        PULONG Params = (PULONG)(Header + 1);
+        ULONG Offset = Params[0]; /* Register offset */
+        /* Only allow safe read offsets (BAR5) */
+        if (Offset >= 0x100000 && Offset < 0x140000) {
+            Params[1] = 0xDEAD0000; /* Refuse unsafe range */
+        } else if (Offset < 0x100000) {
+            /* Safe to read — but we need physical mapping.
+               For now return placeholder. */
+            Params[1] = 0x00000000;
+        } else {
+            Params[1] = 0x00000000;
+        }
+        Header->Status = STATUS_SUCCESS;
+        Header->OutputSize = sizeof(ULONG) * 2;
+        return STATUS_SUCCESS;
+    }
+
+    case 0x04: /* GET_BIOS_INFO */
+    {
+        if (pEscape->PrivateDriverDataSize < sizeof(DREAM_ESCAPE_HEADER) + sizeof(ULONG) * 4) {
+            Header->Status = STATUS_BUFFER_TOO_SMALL;
+            Header->OutputSize = 0;
+            return STATUS_SUCCESS;
+        }
+        PULONG Bios = (PULONG)(Header + 1);
+        Bios[0] = 1; /* BIOS version (stub) */
+        Bios[1] = 0; /* UMD version major */
+        Bios[2] = 43; /* UMD version minor */
+        Bios[3] = 0; /* Reserved */
+        Header->Status = STATUS_SUCCESS;
+        Header->OutputSize = sizeof(ULONG) * 4;
+        return STATUS_SUCCESS;
+    }
+
+    case 0x05: /* GET_FW_VERSION */
+    {
+        /* Return firmware version strings as ASCII in remaining buffer */
+        const char *fwVer = "BC250-FW-V43-PS5";
+        SIZE_T len = strlen(fwVer) + 1;
+        if (pEscape->PrivateDriverDataSize < sizeof(DREAM_ESCAPE_HEADER) + len) {
+            Header->Status = STATUS_BUFFER_TOO_SMALL;
+            Header->OutputSize = 0;
+            return STATUS_SUCCESS;
+        }
+        RtlCopyMemory(Header + 1, fwVer, len);
+        Header->Status = STATUS_SUCCESS;
+        Header->OutputSize = (ULONG)len;
+        return STATUS_SUCCESS;
+    }
+
+    default:
+        Header->Status = STATUS_INVALID_PARAMETER;
+        Header->OutputSize = 0;
+        return STATUS_SUCCESS;
+    }
+}
+
+/*===========================================================================
   Stub Functions - Not yet implemented but required for linking
 ===========================================================================*/
 
@@ -2048,6 +2421,17 @@ DreamV3DeviceControl(
     _Inout_ PIRP Irp
     )
 {
+    /* CRITICAL: Only handle IRPs for our control device.
+       This handler is set on g_DriverObject->MajorFunction which covers ALL
+       device objects from this driver — including the dxgkrnl WDDM adapter.
+       dxgkrnl sends its own IRPs (DxgkIrp) to the adapter device object.
+       We must NOT try to parse those as DeviceIoControl — it causes bugcheck 0x3B. */
+    if (DeviceObject != g_ControlDevice) {
+        /* Not our control device — pass through to next handler */
+        Irp->IoStatus.Status = STATUS_NOT_SUPPORTED;
+        IoCompleteRequest(Irp, IO_NO_INCREMENT);
+        return STATUS_NOT_SUPPORTED;
+    }
     /* MARKER: Write once to confirm IOCTL dispatch is called */
     {
         static BOOLEAN once = FALSE;
@@ -2189,9 +2573,137 @@ DreamV3DeviceControl(
             }
             goto Cleanup;
         }
-        default:
+    /* --- Report BAR addresses from StartDevice resource list --- */
+    case 0x80000BB8: { /* IOCTL_AMDBC250_GET_RESOURCE_BARS */
+        if (outputLen >= sizeof(AMDBC250_IOCTL_RESOURCE_BARS) && DevExt != NULL) {
+            PAMDBC250_IOCTL_RESOURCE_BARS r = (PAMDBC250_IOCTL_RESOURCE_BARS)outputBuffer;
+            RtlZeroMemory(r, sizeof(*r));
+            r->DeviceStarted = DevExt->DeviceStarted ? 1 : 0;
+            r->MmioMapped = (DevExt->MmioVirtualBase != NULL) ? 1 : 0;
+            r->MmioSize = (UINT32)DevExt->MmioSize;
+            r->MmioPhysicalBase = DevExt->MmioPhysicalBase.QuadPart;
+            r->MmioVirtualBase = (UINT64)(UINT_PTR)DevExt->MmioVirtualBase;
+            r->FbSize = (UINT32)DevExt->FbSize;
+            r->FbPhysicalBase = DevExt->FbPhysicalBase.QuadPart;
+            bytesReturned = sizeof(AMDBC250_IOCTL_RESOURCE_BARS);
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                "AMDBC250-DREAM-V4.3: GET_RESOURCE_BARS: started=%u mmio=%d PA=0x%llX sz=0x%X fb=0x%llX sz=0x%X\n",
+                r->DeviceStarted, r->MmioMapped, r->MmioPhysicalBase, r->MmioSize,
+                r->FbPhysicalBase, r->FbSize));
             status = STATUS_SUCCESS;
-            goto Cleanup;
+        } else {
+            status = STATUS_BUFFER_TOO_SMALL;
+        }
+        break;
+    }
+
+    case 0x80000BBC: { /* IOCTL_AMDBC250_FORCE_ENABLE_MMIO */
+        if (inputLen >= sizeof(AMDBC250_IOCTL_FORCE_ENABLE_MMIO) && DevExt != NULL) {
+            PAMDBC250_IOCTL_FORCE_ENABLE_MMIO f = (PAMDBC250_IOCTL_FORCE_ENABLE_MMIO)inputBuffer;
+
+            ULONG bus = f->Bus;
+            ULONG dev = f->Device;
+            ULONG func = f->Function;
+
+            /* Step 1: Read PCI Command register via IO ports (before) */
+            WRITE_PORT_ULONG((PULONG)(UINT_PTR)0xCF8,
+                0x80000000 | (bus << 16) | (dev << 11) | (func << 8) | 4);
+            KeMemoryBarrier();
+            f->CommandBefore = READ_PORT_ULONG((PULONG)(UINT_PTR)0xCFC);
+
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                "AMDBC250-DREAM-V4.3: FORCE_ENABLE_MMIO: Command reg before=0x%08X\n", f->CommandBefore));
+
+            /* Step 2: Try HalSetBusDataByOffset to write Command = 0x0007 (I/O+Mem+BusMaster) */
+            {
+                ULONG slotNumber = (dev << 0) | (func << 5);
+                PCI_COMMON_CONFIG pciCfg;
+                RtlZeroMemory(&pciCfg, sizeof(pciCfg));
+                pciCfg.Command = 0x0007;
+
+                ULONG bytesWritten = HalSetBusDataByOffset(
+                    PCIConfiguration, bus, slotNumber,
+                    &pciCfg, 0x04, sizeof(UINT16)); /* Write only offset 4 (Command) */
+                f->HalSetBusResult = (bytesWritten == sizeof(UINT16)) ? 1 : 0;
+
+                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                    "AMDBC250-DREAM-V4.3: FORCE_ENABLE_MMIO: HalSetBusData at B%u:D%u:F%u wrote %lu bytes (expected %llu)\n",
+                    bus, dev, func, bytesWritten, (ULONG64)sizeof(UINT16)));
+            }
+
+            /* Step 3: Try writing via IO ports */
+            {
+                WRITE_PORT_ULONG((PULONG)(UINT_PTR)0xCF8,
+                    0x80000000 | (bus << 16) | (dev << 11) | (func << 8) | 4);
+                KeMemoryBarrier();
+                WRITE_PORT_ULONG((PULONG)(UINT_PTR)0xCFC, 0x0007); /* I/O+Mem+BusMaster */
+                KeMemoryBarrier();
+
+                /* Read back to verify */
+                WRITE_PORT_ULONG((PULONG)(UINT_PTR)0xCF8,
+                    0x80000000 | (bus << 16) | (dev << 11) | (func << 8) | 4);
+                KeMemoryBarrier();
+                f->CommandAfter = READ_PORT_ULONG((PULONG)(UINT_PTR)0xCFC);
+
+                f->IoPortWriteResult = (f->CommandAfter == 0x0007 || (f->CommandAfter & 0x0007) == 0x0007) ? 1 : 0;
+
+                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                    "AMDBC250-DREAM-V4.3: FORCE_ENABLE_MMIO: IO port write, Command after=0x%08X\n", f->CommandAfter));
+            }
+
+            /* Step 4: Map MMIO and test registers */
+            PHYSICAL_ADDRESS mmioPa;
+            mmioPa.QuadPart = f->MmioPhysicalBase;
+            UINT32 mmioSize = f->MmioSize;
+
+            if (mmioPa.QuadPart != 0 && mmioSize != 0) {
+                PUCHAR mappedVa = (PUCHAR)MmMapIoSpace(mmioPa, mmioSize, MmNonCached);
+                if (mappedVa) {
+                    /* Read GPU_ID at offset 0 */
+                    f->GpuIdBefore = READ_REGISTER_ULONG((PULONG)(mappedVa));
+                    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                        "AMDBC250-DREAM-V4.3: FORCE_ENABLE_MMIO: GPU_ID at PA=0x%llX before=0x%08X\n",
+                        mmioPa.QuadPart, f->GpuIdBefore));
+
+                    /* Write scratch value if offset provided */
+                    if (f->ScratchOffset != 0 && f->ScratchOffset < mmioSize) {
+                        WRITE_REGISTER_ULONG((PULONG)(mappedVa + f->ScratchOffset), f->ScratchWriteVal);
+                        KeMemoryBarrier();
+                        f->ScratchReadVal = READ_REGISTER_ULONG((PULONG)(mappedVa + f->ScratchOffset));
+                        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                            "AMDBC250-DREAM-V4.3: FORCE_ENABLE_MMIO: Scratch at +0x%X wrote 0x%08X read back 0x%08X\n",
+                            f->ScratchOffset, f->ScratchWriteVal, f->ScratchReadVal));
+                    } else {
+                        f->ScratchReadVal = 0;
+                    }
+
+                    /* Read GPU_ID again after enabling */
+                    f->GpuIdAfter = READ_REGISTER_ULONG((PULONG)(mappedVa));
+
+                    MmUnmapIoSpace(mappedVa, mmioSize);
+                } else {
+                    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
+                        "AMDBC250-DREAM-V4.3: FORCE_ENABLE_MMIO: MmMapIoSpace FAILED\n"));
+                }
+            }
+
+            bytesReturned = sizeof(AMDBC250_IOCTL_FORCE_ENABLE_MMIO);
+            status = STATUS_SUCCESS;
+
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                "AMDBC250-DREAM-V4.3: FORCE_ENABLE_MMIO: Hal=%d IO=%d Cmd=0x%04X->0x%04X GPU_ID=0x%08X->0x%08X Scratch=0x%08X\n",
+                f->HalSetBusResult, f->IoPortWriteResult,
+                (UINT16)f->CommandBefore, (UINT16)f->CommandAfter,
+                f->GpuIdBefore, f->GpuIdAfter, f->ScratchReadVal));
+        } else {
+            status = STATUS_BUFFER_TOO_SMALL;
+        }
+        break;
+    }
+
+    default:
+            /* Let unhandled IOCTLs fall through to the main switch below */
+            break;
         }
     }
 
@@ -2788,18 +3300,28 @@ DreamV3DeviceControl(
 
     /* --- Init Hardware (user-mode provides MMIO base) --- */
     case 0x80000B80: { /* IOCTL_AMDBC250_INIT_HARDWARE */
-        if (inputLen >= sizeof(AMDBC250_IOCTL_INIT_HARDWARE)) {
+        /* Accept either old (16B) or new (32B) struct size */
+        if (inputLen >= 16 && inputLen <= sizeof(AMDBC250_IOCTL_INIT_HARDWARE)) {
             PAMDBC250_IOCTL_INIT_HARDWARE InitHw = (PAMDBC250_IOCTL_INIT_HARDWARE)inputBuffer;
 
             KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-                "AMDBC250-DREAM-V4.3: INIT_HARDWARE requested: PA=0x%llX, Size=0x%X\n",
+                "AMDBC250-DREAM-V4.3: INIT_HARDWARE requested: MMIO PA=0x%llX, Size=0x%X\n",
                 InitHw->MmioPhysicalBase, InitHw->MmioSize));
 
             if (DevExt->HardwareInitialized) {
                 KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-                    "AMDBC250-DREAM-V4.3: Hardware already initialized, skipping\n"));
-                status = STATUS_SUCCESS;
-                break;
+                    "AMDBC250-DREAM-V4.3: Hardware already initialized, re-mapping with new base\n"));
+                /* Unmap old MMIO if mapped */
+                if (DevExt->MmioVirtualBase) {
+                    MmUnmapIoSpace(DevExt->MmioVirtualBase, DevExt->MmioSize);
+                    DevExt->MmioVirtualBase = NULL;
+                }
+                /* Unmap old FB if mapped */
+                if (DevExt->FbVirtualBase) {
+                    MmUnmapIoSpace(DevExt->FbVirtualBase, DevExt->FbSize);
+                    DevExt->FbVirtualBase = NULL;
+                }
+                DevExt->HardwareInitialized = FALSE;
             }
 
             /* Validate input */
@@ -2810,7 +3332,7 @@ DreamV3DeviceControl(
                 break;
             }
 
-            /* Map MMIO BAR */
+            /* Map MMIO BAR (BAR2 = register space) */
             DevExt->MmioPhysicalBase.QuadPart = InitHw->MmioPhysicalBase;
             DevExt->MmioSize = InitHw->MmioSize;
 
@@ -2822,7 +3344,7 @@ DreamV3DeviceControl(
 
             if (DevExt->MmioVirtualBase == NULL) {
                 KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
-                    "AMDBC250-DREAM-V4.3: MmMapIoSpace FAILED for PA=0x%llX\n",
+                    "AMDBC250-DREAM-V4.3: MmMapIoSpace FAILED for MMIO PA=0x%llX\n",
                     InitHw->MmioPhysicalBase));
                 status = STATUS_INSUFFICIENT_RESOURCES;
                 break;
@@ -2831,11 +3353,64 @@ DreamV3DeviceControl(
             KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                 "AMDBC250-DREAM-V4.3: MMIO mapped: VA=%p\n", DevExt->MmioVirtualBase));
 
+            /* Map VRAM framebuffer BAR (BAR0) if provided (new struct with Fb fields) */
+            if (inputLen >= sizeof(AMDBC250_IOCTL_INIT_HARDWARE) &&
+                InitHw->FbPhysicalBase != 0 && InitHw->FbSize != 0) {
+                if (DevExt->FbVirtualBase) {
+                    MmUnmapIoSpace(DevExt->FbVirtualBase, DevExt->FbSize);
+                    DevExt->FbVirtualBase = NULL;
+                }
+                DevExt->FbPhysicalBase.QuadPart = InitHw->FbPhysicalBase;
+                DevExt->FbSize = InitHw->FbSize;
+                DevExt->FbVirtualBase = MmMapIoSpace(
+                    DevExt->FbPhysicalBase,
+                    DevExt->FbSize,
+                    MmNonCached
+                );
+                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                    "AMDBC250-DREAM-V4.3: VRAM mapped: VA=%p, PA=0x%llX, Size=0x%X\n",
+                    DevExt->FbVirtualBase, InitHw->FbPhysicalBase, InitHw->FbSize));
+            }
+
             /* Verify GPU is alive — read a known register */
             {
                 ULONG gpuId = DreamV3ReadRegister(DevExt, 0x0000); /* GPU_ID or scratch */
                 KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                     "AMDBC250-DREAM-V4.3: GPU reg[0x0000] = 0x%08X (GPU alive test)\n", gpuId));
+            }
+
+            /* If NBIO_MAP flag set, skip GPU init (just map memory for NBIO config access) */
+            if (InitHw->Flags & AMDBC250_INIT_FLAG_NBIO_MAP) {
+                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                    "AMDBC250-DREAM-V4.3: NBIO_MAP flag set - skipping GPU init\n"));
+                DevExt->HardwareInitialized = TRUE;
+                status = STATUS_SUCCESS;
+                break;
+            }
+
+            /* Try to enable PCI Memory Space via HalSetBusDataByOffset */
+            {
+                ULONG slotNumber = (1 << 0) | (0 << 5); /* Bus 1, Dev 0, Func 0 */
+                PCI_COMMON_CONFIG pciCfg;
+                RtlZeroMemory(&pciCfg, sizeof(pciCfg));
+                pciCfg.Command = 0x0007; /* I/O + Mem + BusMaster */
+                ULONG bytesWritten = HalSetBusDataByOffset(
+                    PCIConfiguration, 1, slotNumber,
+                    &pciCfg, 0x04, sizeof(UINT16));
+                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                    "AMDBC250-DREAM-V4.3: HalSetBusDataByOffset write Command=7: %lu bytes written\n", bytesWritten));
+
+                /* Also try IO port write */
+                WRITE_PORT_ULONG((PULONG)(UINT_PTR)0xCF8,
+                    0x80000000 | (1 << 16) | (0 << 11) | (0 << 8) | 4);
+                KeMemoryBarrier();
+                WRITE_PORT_ULONG((PULONG)(UINT_PTR)0xCFC, 0x0007);
+                KeMemoryBarrier();
+
+                /* Re-read GPU ID after enable */
+                ULONG gpuId2 = DreamV3ReadRegister(DevExt, 0x0000);
+                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                    "AMDBC250-DREAM-V4.3: GPU reg[0x0000] AFTER PCI enable = 0x%08X\n", gpuId2));
             }
 
             /* Initialize hardware (rings, fence, CP, etc.) */
@@ -2988,6 +3563,69 @@ DreamV3DeviceControl(
         break;
     }
 
+    /* --- Read raw PCI config space via ECAM (MMCFG) --- */
+    case 0x80000BAC: { /* IOCTL_AMDBC250_READ_PCI_CONFIG */
+        if (inputLen >= sizeof(AMDBC250_IOCTL_READ_PCI_CONFIG) &&
+            outputLen >= sizeof(AMDBC250_IOCTL_READ_PCI_CONFIG)) {
+            PAMDBC250_IOCTL_READ_PCI_CONFIG pci = (PAMDBC250_IOCTL_READ_PCI_CONFIG)inputBuffer;
+
+            UCHAR buffer[256];
+            RtlZeroMemory(buffer, sizeof(buffer));
+            ULONG readBytes = 0;
+
+            /* Try multiple ECAM base addresses */
+            PHYSICAL_ADDRESS ecamBases[] = {
+                {0xF0000000, 0},
+                {0xF8000000, 0},
+                {0xE0000000, 0},
+                {0xFC000000, 0},
+            };
+
+            for (int b = 0; b < 4 && readBytes == 0; b++) {
+                PHYSICAL_ADDRESS pa = ecamBases[b];
+                ULONG ecamOffset = (pci->Bus << 20) | (pci->Device << 15) | (pci->Function << 12);
+                pa.QuadPart += ecamOffset;
+
+                PUCHAR va = (PUCHAR)MmMapIoSpace(pa, 256, MmNonCached);
+                if (va) {
+                    UINT16 vendor = READ_REGISTER_USHORT((PUSHORT)va);
+                    if (vendor != 0xFFFF && vendor != 0x0000) {
+                        for (ULONG off = 0; off < 256; off++) {
+                            buffer[off] = READ_REGISTER_UCHAR(va + off);
+                        }
+                        readBytes = 256;
+                        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                            "AMDBC250: PCI ECAM found at base 0x%llX for B%lu:D%lu:F%lu\n",
+                            ecamBases[b].QuadPart, pci->Bus, pci->Device, pci->Function));
+                    }
+                    MmUnmapIoSpace(va, 256);
+                }
+            }
+
+            if (readBytes > 0) {
+                pci->BytesRead = readBytes;
+                RtlCopyMemory(pci->ConfigData, buffer, readBytes);
+                bytesReturned = sizeof(AMDBC250_IOCTL_READ_PCI_CONFIG);
+                status = STATUS_SUCCESS;
+            } else {
+                /* Fallback: try IO ports (CF8/CFC) */
+                for (ULONG off = 0; off < 256; off += 4) {
+                    WRITE_PORT_ULONG((PULONG)(UINT_PTR)0xCF8,
+                        0x80000000 | (pci->Bus << 16) | (pci->Device << 11) | (pci->Function << 8) | (off & 0xFC));
+                    ULONG data = READ_PORT_ULONG((PULONG)(UINT_PTR)0xCFC);
+                    *(PULONG)(buffer + off) = data;
+                }
+                pci->BytesRead = 256;
+                RtlCopyMemory(pci->ConfigData, buffer, 256);
+                bytesReturned = sizeof(AMDBC250_IOCTL_READ_PCI_CONFIG);
+                status = STATUS_SUCCESS;
+            }
+        } else {
+            status = STATUS_BUFFER_TOO_SMALL;
+        }
+        break;
+    }
+
     /* --- Get hardware status --- */
     case 0x80000B90: { /* IOCTL_AMDBC250_GET_HW_STATUS */
         if (outputLen >= sizeof(AMDBC250_IOCTL_HW_STATUS)) {
@@ -3027,9 +3665,10 @@ DreamV3DeviceControl(
             PAMDBC250_IOCTL_PCI_CONFIG PciCfg = (PAMDBC250_IOCTL_PCI_CONFIG)outputBuffer;
             RtlZeroMemory(PciCfg, sizeof(*PciCfg));
 
-            /* Scan PCI bus to find our GPU (no PDO needed — uses HAL directly) */
             BOOLEAN found = FALSE;
+            UINT32 foundBus = 0, foundDev = 0, foundFunc = 0;
 
+            /* Method 1: HalGetBusDataByOffset */
             for (ULONG bus = 0; bus < 256 && !found; bus++) {
                 for (ULONG dev = 0; dev < 32 && !found; dev++) {
                     for (ULONG func = 0; func < 8 && !found; func++) {
@@ -3038,87 +3677,55 @@ DreamV3DeviceControl(
                         RtlZeroMemory(&pciCfg, sizeof(pciCfg));
 
                         ULONG bytesRead = HalGetBusDataByOffset(
-                            PCIConfiguration,
-                            bus,
-                            slotNumber,
-                            &pciCfg,
-                            0,
-                            sizeof(PCI_COMMON_HDR_LENGTH)
-                            );
+                            PCIConfiguration, bus, slotNumber,
+                            &pciCfg, 0, sizeof(PCI_COMMON_HDR_LENGTH));
 
                         if (bytesRead < sizeof(PCI_COMMON_HDR_LENGTH))
                             continue;
 
                         if (pciCfg.VendorID == 0x1002 && pciCfg.DeviceID == 0x13FE) {
                             found = TRUE;
-                    PciCfg->VendorId = pciCfg.VendorID;
-                    PciCfg->DeviceId = pciCfg.DeviceID;
-                    PciCfg->Command = pciCfg.Command;
-                    PciCfg->Status = pciCfg.Status;
-                    PciCfg->RevisionId = pciCfg.RevisionID;
-                    PciCfg->ClassCode = ((ULONG)pciCfg.BaseClass << 16) |
-                                         ((ULONG)pciCfg.SubClass << 8) |
-                                         ((ULONG)pciCfg.ProgIf);
-                    PciCfg->Bus = bus;
+                            foundBus = bus; foundDev = dev; foundFunc = func;
+                            PciCfg->VendorId = pciCfg.VendorID;
+                            PciCfg->DeviceId = pciCfg.DeviceID;
+                            PciCfg->Command = pciCfg.Command;
+                            PciCfg->Status = pciCfg.Status;
+                            PciCfg->RevisionId = pciCfg.RevisionID;
+                            PciCfg->ClassCode = ((ULONG)pciCfg.BaseClass << 16) |
+                                                 ((ULONG)pciCfg.SubClass << 8) |
+                                                 ((ULONG)pciCfg.ProgIf);
+                            PciCfg->Bus = bus;
+                        }
+                    }
+                }
+            }
 
-                            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-                                "AMDBC250-DREAM-V4.3: Found BC-250 at PCI %lu:%lu.%lu\n",
-                                bus, dev, func));
-
-                            /* Read each BAR */
-                            for (ULONG bar = 0; bar < 6; bar++) {
-                                UINT32 barValue = 0;
-
-                                HalGetBusDataByOffset(
-                                    PCIConfiguration,
-                                    bus,
-                                    slotNumber,
-                                    &barValue,
-                                    0x10 + (bar * 4),
-                                    sizeof(barValue)
-                                    );
-
-                                if (barValue == 0) {
-                                    PciCfg->Bars[bar].PhysicalAddress = 0;
-                                    PciCfg->Bars[bar].Size = 0;
-                                    continue;
-                                }
-
-                                PciCfg->Bars[bar].IsMemoryBar = (barValue & 1) ? 0 : 1;
-                                PciCfg->Bars[bar].Is64Bit = 0;
-
-                                if (PciCfg->Bars[bar].IsMemoryBar) {
-                                    PciCfg->Bars[bar].PhysicalAddress = barValue & 0xFFFFFFF0;
-
-                                    if ((barValue & 0x06) == 0x04) {
-                                        PciCfg->Bars[bar].Is64Bit = 1;
-                                        if (bar + 1 < 6) {
-                                            UINT32 barUpper = 0;
-                                            HalGetBusDataByOffset(
-                                                PCIConfiguration,
-                                                bus,
-                                                slotNumber,
-                                                &barUpper,
-                                                0x10 + ((bar + 1) * 4),
-                                                sizeof(barUpper)
-                                                );
-                                            PciCfg->Bars[bar].PhysicalAddress |=
-                                                ((UINT64)barUpper << 32);
-                                        }
-                                    }
-
-                                    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-                                        "AMDBC250-DREAM-V4.3: BAR[%lu] Memory: PA=0x%llX, 64bit=%s\n",
-                                        bar, PciCfg->Bars[bar].PhysicalAddress,
-                                        PciCfg->Bars[bar].Is64Bit ? "YES" : "NO"));
-                                } else {
-                                    PciCfg->Bars[bar].PhysicalAddress = barValue & 0xFFFFFFFC;
-                                    PciCfg->Bars[bar].Size = 0;
-
-                                    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-                                        "AMDBC250-DREAM-V4.3: BAR[%lu] I/O: Port=0x%llX\n",
-                                        bar, PciCfg->Bars[bar].PhysicalAddress));
-                                }
+            /* Method 2: IO ports (0xCF8/0xCFC) if HAL failed */
+            if (!found) {
+                for (ULONG bus = 0; bus < 256 && !found; bus++) {
+                    for (ULONG dev = 0; dev < 32 && !found; dev++) {
+                        for (ULONG func = 0; func < 8 && !found; func++) {
+                            WRITE_PORT_ULONG((PULONG)(UINT_PTR)0xCF8,
+                                0x80000000 | (bus << 16) | (dev << 11) | (func << 8) | 0);
+                            ULONG id = READ_PORT_ULONG((PULONG)(UINT_PTR)0xCFC);
+                            if ((id & 0xFFFF) == 0x1002 && ((id >> 16) & 0xFFFF) == 0x13FE) {
+                                found = TRUE;
+                                foundBus = bus; foundDev = dev; foundFunc = func;
+                                PciCfg->VendorId = (UINT16)(id & 0xFFFF);
+                                PciCfg->DeviceId = (UINT16)((id >> 16) & 0xFFFF);
+                                PciCfg->Bus = bus;
+                                /* Read command/status at offset 4 */
+                                WRITE_PORT_ULONG((PULONG)(UINT_PTR)0xCF8,
+                                    0x80000000 | (bus << 16) | (dev << 11) | (func << 8) | 4);
+                                ULONG cmdSts = READ_PORT_ULONG((PULONG)(UINT_PTR)0xCFC);
+                                PciCfg->Command = (UINT16)(cmdSts & 0xFFFF);
+                                PciCfg->Status = (UINT16)((cmdSts >> 16) & 0xFFFF);
+                                /* Read revision/class at offset 8 */
+                                WRITE_PORT_ULONG((PULONG)(UINT_PTR)0xCF8,
+                                    0x80000000 | (bus << 16) | (dev << 11) | (func << 8) | 8);
+                                ULONG revCls = READ_PORT_ULONG((PULONG)(UINT_PTR)0xCFC);
+                                PciCfg->RevisionId = revCls & 0xFF;
+                                PciCfg->ClassCode = (revCls >> 8) & 0xFFFFFF;
                             }
                         }
                     }
@@ -3126,10 +3733,94 @@ DreamV3DeviceControl(
             }
 
             if (found) {
+                PciCfg->Device = foundDev;
+                PciCfg->Function = foundFunc;
+
+                /* Read all 6 BARs using whatever method worked */
+                for (ULONG bar = 0; bar < 6; bar++) {
+                    UINT32 barValue = 0;
+                    ULONG barOffset = 0x10 + (bar * 4);
+
+                    /* Try IO ports first (works on all x64 platforms) */
+                    WRITE_PORT_ULONG((PULONG)(UINT_PTR)0xCF8,
+                        0x80000000 | (foundBus << 16) | (foundDev << 11) | (foundFunc << 8) | (barOffset & 0xFC));
+                    barValue = READ_PORT_ULONG((PULONG)(UINT_PTR)0xCFC);
+
+                    /* Fallback: try HalGetBusDataByOffset */
+                    if (barValue == 0) {
+                        ULONG slot = (foundDev << 0) | (foundFunc << 5);
+                        HalGetBusDataByOffset(PCIConfiguration, foundBus, slot,
+                            &barValue, barOffset, sizeof(barValue));
+                    }
+
+                    if (barValue == 0) {
+                        PciCfg->Bars[bar].PhysicalAddress = 0;
+                        PciCfg->Bars[bar].Size = 0;
+                        continue;
+                    }
+
+                    PciCfg->Bars[bar].IsMemoryBar = (barValue & 1) ? 0 : 1;
+                    PciCfg->Bars[bar].Is64Bit = 0;
+
+                    if (PciCfg->Bars[bar].IsMemoryBar) {
+                        UINT32 baseMask = 0xFFFFFFF0;
+                        PciCfg->Bars[bar].PhysicalAddress = barValue & baseMask;
+
+                        if ((barValue & 0x06) == 0x04) {
+                            PciCfg->Bars[bar].Is64Bit = 1;
+                            if (bar + 1 < 6) {
+                                UINT32 barUpper = 0;
+                                WRITE_PORT_ULONG((PULONG)(UINT_PTR)0xCF8,
+                                    0x80000000 | (foundBus << 16) | (foundDev << 11) | (foundFunc << 8) | ((barOffset + 4) & 0xFC));
+                                barUpper = READ_PORT_ULONG((PULONG)(UINT_PTR)0xCFC);
+                                PciCfg->Bars[bar].PhysicalAddress |= ((UINT64)barUpper << 32);
+                            }
+                        }
+
+                        /* Probe BAR size via IO ports */
+                        {
+                            UINT32 origLow = 0;
+                            WRITE_PORT_ULONG((PULONG)(UINT_PTR)0xCF8,
+                                0x80000000 | (foundBus << 16) | (foundDev << 11) | (foundFunc << 8) | (barOffset & 0xFC));
+                            origLow = READ_PORT_ULONG((PULONG)(UINT_PTR)0xCFC);
+
+                            WRITE_PORT_ULONG((PULONG)(UINT_PTR)0xCF8,
+                                0x80000000 | (foundBus << 16) | (foundDev << 11) | (foundFunc << 8) | (barOffset & 0xFC));
+                            WRITE_PORT_ULONG((PULONG)(UINT_PTR)0xCFC, 0xFFFFFFFF);
+
+                            WRITE_PORT_ULONG((PULONG)(UINT_PTR)0xCF8,
+                                0x80000000 | (foundBus << 16) | (foundDev << 11) | (foundFunc << 8) | (barOffset & 0xFC));
+                            UINT32 probeVal = READ_PORT_ULONG((PULONG)(UINT_PTR)0xCFC);
+
+                            /* Restore original BAR value */
+                            WRITE_PORT_ULONG((PULONG)(UINT_PTR)0xCF8,
+                                0x80000000 | (foundBus << 16) | (foundDev << 11) | (foundFunc << 8) | (barOffset & 0xFC));
+                            WRITE_PORT_ULONG((PULONG)(UINT_PTR)0xCFC, origLow);
+
+                            PciCfg->Bars[bar].Size = (UINT32)(~(probeVal & (UINT32)baseMask)) + 1;
+                        }
+
+                        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                            "AMDBC250-DREAM-V4.3: BAR[%lu] Mem: PA=0x%llX Size=0x%X 64bit=%s\n",
+                            bar, PciCfg->Bars[bar].PhysicalAddress,
+                            PciCfg->Bars[bar].Size,
+                            PciCfg->Bars[bar].Is64Bit ? "YES" : "NO"));
+                    } else {
+                        PciCfg->Bars[bar].PhysicalAddress = barValue & 0xFFFFFFFC;
+                        PciCfg->Bars[bar].Size = 0;
+                        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                            "AMDBC250-DREAM-V4.3: BAR[%lu] I/O: Port=0x%llX\n",
+                            bar, PciCfg->Bars[bar].PhysicalAddress));
+                    }
+                }
+
                 bytesReturned = sizeof(AMDBC250_IOCTL_PCI_CONFIG);
+                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                    "AMDBC250-DREAM-V4.3: Found BC-250 at PCI %lu:%lu.%lu via IO ports\n",
+                    foundBus, foundDev, foundFunc));
             } else {
                 KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
-                    "AMDBC250-DREAM-V4.3: BC-250 not found on PCI bus\n"));
+                    "AMDBC250-DREAM-V4.3: BC-250 not found on PCI bus (HAL or IO ports)\n"));
                 status = STATUS_UNSUCCESSFUL;
             }
         } else {
@@ -3196,7 +3887,205 @@ DreamV3DeviceControl(
                 pspCtx->TaFirmware = fwBuffer;
                 pspCtx->TaFirmwareSize = pspFw->FirmwareSize;
                 break;
-            default:
+    /* --- Write PCI config space (one DWORD via IO ports) --- */
+    case 0x80000BB0: { /* IOCTL_AMDBC250_WRITE_PCI_CONFIG */
+        if (inputLen >= sizeof(AMDBC250_IOCTL_WRITE_PCI_CONFIG)) {
+            PAMDBC250_IOCTL_WRITE_PCI_CONFIG w = (PAMDBC250_IOCTL_WRITE_PCI_CONFIG)inputBuffer;
+            if (w->Offset < 256 && (w->Offset & 3) == 0) {
+                /* Method 1: IO port config write */
+                WRITE_PORT_ULONG((PULONG)(UINT_PTR)0xCF8,
+                    0x80000000 | (w->Bus << 16) | (w->Device << 11) | (w->Function << 8) | w->Offset);
+                WRITE_PORT_ULONG((PULONG)(UINT_PTR)0xCFC, w->Value);
+                KeMemoryBarrier();
+
+                /* Verify IO port write */
+                WRITE_PORT_ULONG((PULONG)(UINT_PTR)0xCF8,
+                    0x80000000 | (w->Bus << 16) | (w->Device << 11) | (w->Function << 8) | w->Offset);
+                KeMemoryBarrier();
+                ULONG readback = READ_PORT_ULONG((PULONG)(UINT_PTR)0xCFC);
+
+                if (readback != w->Value) {
+                    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+                        "AMDBC250-DREAM-V4.3: IO port write B%u:D%u:F%u+0x%02X = 0x%08X readback 0x%08X (blocked)\n",
+                        w->Bus, w->Device, w->Function, w->Offset, w->Value, readback));
+
+                    /* Method 2: ECAM write (memory-mapped config) — try all known bases */
+                    PHYSICAL_ADDRESS ecamBases[] = {
+                        {0xE0000000, 0}, {0xF0000000, 0}, {0xF8000000, 0}, {0xFC000000, 0},
+                    };
+                    for (int b = 0; b < 4; b++) {
+                        PHYSICAL_ADDRESS pa = ecamBases[b];
+                        pa.QuadPart += ((ULONG64)w->Bus << 20) | ((ULONG64)w->Device << 15) |
+                                       ((ULONG64)w->Function << 12) | w->Offset;
+                        PUCHAR va = (PUCHAR)MmMapIoSpace(pa, 256, MmNonCached);
+                        if (va) {
+                            /* Test if ECAM is alive by reading vendor ID first */
+                            UINT16 vid = *(volatile UINT16*)va;
+                            if (vid != 0x0000 && vid != 0xFFFF) {
+                                /* ECAM is responsive — write the value */
+                                *(volatile PULONG)(va) = w->Value;
+                                KeMemoryBarrier();
+                                ULONG ecamReadback = *(volatile PULONG)(va);
+                                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                                    "AMDBC250-DREAM-V4.3: ECAM write B%u:D%u:F%u+0x%02X = 0x%08X "
+                                    "via base 0x%llX, readback 0x%08X\n",
+                                    w->Bus, w->Device, w->Function, w->Offset, w->Value,
+                                    ecamBases[b].QuadPart, ecamReadback));
+                            }
+                            MmUnmapIoSpace(va, 256);
+                        }
+                    }
+                }
+
+                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                    "AMDBC250-DREAM-V4.3: PCI config write B%u:D%u:F%u+0x%02X = 0x%08X\n",
+                    w->Bus, w->Device, w->Function, w->Offset, w->Value));
+                status = STATUS_SUCCESS;
+            } else {
+                status = STATUS_INVALID_PARAMETER;
+            }
+        } else {
+            status = STATUS_BUFFER_TOO_SMALL;
+        }
+        break;
+    }
+
+    /* --- Discover PCI device (BC-250) via all available methods --- */
+    case 0x80000BB4: { /* IOCTL_AMDBC250_DISCOVER_PCI */
+        if (outputLen >= sizeof(AMDBC250_IOCTL_DISCOVER_PCI)) {
+            PAMDBC250_IOCTL_DISCOVER_PCI d = (PAMDBC250_IOCTL_DISCOVER_PCI)outputBuffer;
+            RtlZeroMemory(d, sizeof(*d));
+
+            BOOLEAN found = FALSE;
+            UINT32 foundBus = 0, foundDev = 0, foundFunc = 0;
+
+            /* Try multiple ECAM base addresses */
+            PHYSICAL_ADDRESS ecamBases[] = {
+                {0xF0000000, 0}, {0xF8000000, 0}, {0xE0000000, 0}, {0xFC000000, 0},
+                {0xFE000000, 0}, {0xC0000000, 0}, {0xD0000000, 0}, {0x80000000, 0},
+                {0x90000000, 0}, {0xA0000000, 0}, {0xB0000000, 0}, {0x40000000, 0},
+                {0x50000000, 0}, {0x60000000, 0}, {0x70000000, 0},
+            };
+
+            for (int b = 0; b < sizeof(ecamBases)/sizeof(ecamBases[0]) && !found; b++) {
+                for (ULONG bus = 0; bus < 256 && !found; bus++) {
+                    for (ULONG dev = 0; dev < 32 && !found; dev++) {
+                        for (ULONG func = 0; func < 8 && !found; func++) {
+                            PHYSICAL_ADDRESS pa = ecamBases[b];
+                            pa.QuadPart += (bus << 20) | (dev << 15) | (func << 12);
+                            PUCHAR va = (PUCHAR)MmMapIoSpace(pa, 8, MmNonCached);
+                            if (va) {
+                                UINT16 vendor = READ_REGISTER_USHORT((PUSHORT)va);
+                                if (vendor == 0x1002) {
+                                    UINT16 device = READ_REGISTER_USHORT((PUSHORT)(va + 2));
+                                    if (device == 0x13FE) {
+                                        d->MethodUsed = 1;
+                                        found = TRUE;
+                                        foundBus = bus; foundDev = dev; foundFunc = func;
+                                    }
+                                }
+                                MmUnmapIoSpace(va, 8);
+                            }
+                        }
+                    }
+                }
+            }
+
+            /* Fallback: IO ports */
+            if (!found) {
+                for (ULONG bus = 0; bus < 256 && !found; bus++) {
+                    for (ULONG dev = 0; dev < 32 && !found; dev++) {
+                        for (ULONG func = 0; func < 8 && !found; func++) {
+                            WRITE_PORT_ULONG((PULONG)(UINT_PTR)0xCF8,
+                                0x80000000 | (bus << 16) | (dev << 11) | (func << 8) | 0);
+                            ULONG id = READ_PORT_ULONG((PULONG)(UINT_PTR)0xCFC);
+                            if ((id & 0xFFFF) == 0x1002 && ((id >> 16) & 0xFFFF) == 0x13FE) {
+                                found = TRUE;
+                                d->MethodUsed = 2; /* IO ports */
+                                foundBus = bus; foundDev = dev; foundFunc = func;
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (found) {
+                d->VendorFound = 1;
+                d->FoundBus = foundBus;
+                d->FoundDevice = foundDev;
+                d->FoundFunction = foundFunc;
+                d->PciConfig.VendorId = 0x1002;
+                d->PciConfig.DeviceId = 0x13FE;
+                d->PciConfig.Bus = foundBus;
+                d->PciConfig.Device = foundDev;
+                d->PciConfig.Function = foundFunc;
+
+                /* Read BARs via IO ports */
+                for (ULONG bar = 0; bar < 6; bar++) {
+                    ULONG barOffset = 0x10 + (bar * 4);
+                    WRITE_PORT_ULONG((PULONG)(UINT_PTR)0xCF8,
+                        0x80000000 | (foundBus << 16) | (foundDev << 11) | (foundFunc << 8) | (barOffset & 0xFC));
+                    UINT32 barValue = READ_PORT_ULONG((PULONG)(UINT_PTR)0xCFC);
+
+                    if (barValue == 0) continue;
+
+                    d->PciConfig.Bars[bar].IsMemoryBar = (barValue & 1) ? 0 : 1;
+                    d->PciConfig.Bars[bar].Is64Bit = 0;
+
+                    if (d->PciConfig.Bars[bar].IsMemoryBar) {
+                        UINT32 baseMask = 0xFFFFFFF0;
+                        d->PciConfig.Bars[bar].PhysicalAddress = barValue & baseMask;
+                        if ((barValue & 0x06) == 0x04) {
+                            d->PciConfig.Bars[bar].Is64Bit = 1;
+                            if (bar + 1 < 6) {
+                                WRITE_PORT_ULONG((PULONG)(UINT_PTR)0xCF8,
+                                    0x80000000 | (foundBus << 16) | (foundDev << 11) | (foundFunc << 8) | ((barOffset + 4) & 0xFC));
+                                UINT32 upper = READ_PORT_ULONG((PULONG)(UINT_PTR)0xCFC);
+                                d->PciConfig.Bars[bar].PhysicalAddress |= ((UINT64)upper << 32);
+                            }
+                        }
+                        /* Probe size */
+                        {
+                            WRITE_PORT_ULONG((PULONG)(UINT_PTR)0xCF8,
+                                0x80000000 | (foundBus << 16) | (foundDev << 11) | (foundFunc << 8) | (barOffset & 0xFC));
+                            UINT32 orig = READ_PORT_ULONG((PULONG)(UINT_PTR)0xCFC);
+                            WRITE_PORT_ULONG((PULONG)(UINT_PTR)0xCF8,
+                                0x80000000 | (foundBus << 16) | (foundDev << 11) | (foundFunc << 8) | (barOffset & 0xFC));
+                            WRITE_PORT_ULONG((PULONG)(UINT_PTR)0xCFC, 0xFFFFFFFF);
+                            WRITE_PORT_ULONG((PULONG)(UINT_PTR)0xCF8,
+                                0x80000000 | (foundBus << 16) | (foundDev << 11) | (foundFunc << 8) | (barOffset & 0xFC));
+                            UINT32 probe = READ_PORT_ULONG((PULONG)(UINT_PTR)0xCFC);
+                            WRITE_PORT_ULONG((PULONG)(UINT_PTR)0xCF8,
+                                0x80000000 | (foundBus << 16) | (foundDev << 11) | (foundFunc << 8) | (barOffset & 0xFC));
+                            WRITE_PORT_ULONG((PULONG)(UINT_PTR)0xCFC, orig);
+                            d->PciConfig.Bars[bar].Size = (UINT32)(~(probe & (UINT32)baseMask)) + 1;
+                        }
+                    } else {
+                        d->PciConfig.Bars[bar].PhysicalAddress = barValue & 0xFFFFFFFC;
+                    }
+                }
+
+                /* Read command register */
+                WRITE_PORT_ULONG((PULONG)(UINT_PTR)0xCF8,
+                    0x80000000 | (foundBus << 16) | (foundDev << 11) | (foundFunc << 8) | 4);
+                d->PciConfig.Command = (UINT16)READ_PORT_ULONG((PULONG)(UINT_PTR)0xCFC);
+
+                bytesReturned = sizeof(AMDBC250_IOCTL_DISCOVER_PCI);
+                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                    "AMDBC250-DREAM-V4.3: DISCOVER_PCI found BC-250 at %lu:%lu.%lu (method %lu)\n",
+                    foundBus, foundDev, foundFunc, d->MethodUsed));
+            } else {
+                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
+                    "AMDBC250-DREAM-V4.3: DISCOVER_PCI: BC-250 not found via any method\n"));
+                status = STATUS_UNSUCCESSFUL;
+            }
+        } else {
+            status = STATUS_BUFFER_TOO_SMALL;
+        }
+        break;
+    }
+
+    default:
                 ExFreePoolWithTag(fwBuffer, 'FrmP');
                 status = STATUS_INVALID_PARAMETER;
                 break;
@@ -3266,6 +4155,171 @@ DreamV3DeviceControl(
             RtlCopyMemory(outputBuffer, pspTest, sizeof(AMDBC250_IOCTL_PSP_TEST_MAILBOX));
             bytesReturned = sizeof(AMDBC250_IOCTL_PSP_TEST_MAILBOX);
             status = STATUS_SUCCESS;
+        } else {
+            status = STATUS_BUFFER_TOO_SMALL;
+        }
+        break;
+    }
+
+    /* --- Direct MMIO test: map any physical address and read/write --- */
+    case 0x80000BC0: { /* IOCTL_AMDBC250_MMIO_TEST */
+        if (inputLen >= sizeof(AMDBC250_IOCTL_MMIO_TEST) &&
+            outputLen >= sizeof(AMDBC250_IOCTL_MMIO_TEST)) {
+            PAMDBC250_IOCTL_MMIO_TEST m = (PAMDBC250_IOCTL_MMIO_TEST)inputBuffer;
+
+            m->MapResult = 0;
+            m->ValueRead = 0;
+            m->ValueWrittenBack = 0;
+
+            if (m->PhysicalAddress != 0 && m->Size >= 4 && m->Size <= 0x1000000) {
+                PHYSICAL_ADDRESS pa;
+                pa.QuadPart = m->PhysicalAddress;
+
+                PUCHAR va = (PUCHAR)MmMapIoSpace(pa, m->Size, MmNonCached);
+                if (va) {
+                    m->MapResult = 1;
+
+                    __try {
+                        /* Read at offset */
+                        if (m->OffsetRead + 4 <= m->Size) {
+                            m->ValueRead = READ_REGISTER_ULONG((PULONG)(va + m->OffsetRead));
+                        }
+
+                        /* Write at offset if requested */
+                        if (m->OffsetWrite != 0 && m->OffsetWrite + 4 <= m->Size) {
+                            WRITE_REGISTER_ULONG((PULONG)(va + m->OffsetWrite), m->ValueWrite);
+                            KeMemoryBarrier();
+                            m->ValueWrittenBack = READ_REGISTER_ULONG((PULONG)(va + m->OffsetWrite));
+                        }
+                    } __except (EXCEPTION_EXECUTE_HANDLER) {
+                        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
+                            "AMDBC250-DREAM-V4.3: MMIO_TEST EXCEPTION 0x%08X at PA=0x%llX off=0x%X\n",
+                            GetExceptionCode(), m->PhysicalAddress, m->OffsetRead));
+                        m->ValueRead = 0xFFFFFFFF;
+                        m->ValueWrittenBack = 0;
+                        m->MapResult = 0;
+                    }
+
+                    MmUnmapIoSpace(va, m->Size);
+                    status = STATUS_SUCCESS;
+                } else {
+                    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
+                        "AMDBC250-DREAM-V4.3: MMIO_TEST MmMapIoSpace FAILED PA=0x%llX sz=0x%X\n",
+                        m->PhysicalAddress, m->Size));
+                    status = STATUS_INSUFFICIENT_RESOURCES;
+                }
+            } else {
+                status = STATUS_INVALID_PARAMETER;
+            }
+            bytesReturned = sizeof(AMDBC250_IOCTL_MMIO_TEST);
+        } else {
+            status = STATUS_BUFFER_TOO_SMALL;
+        }
+        break;
+    }
+
+    /* --- I/O Port read/write (for PCI I/O BAR like GPU doorbell) --- */
+    case 0x80000BC8: { /* IOCTL_AMDBC250_PORT_IO */
+        if (inputLen >= sizeof(AMDBC250_IOCTL_PORT_IO) &&
+            outputLen >= sizeof(AMDBC250_IOCTL_PORT_IO)) {
+            PAMDBC250_IOCTL_PORT_IO p = (PAMDBC250_IOCTL_PORT_IO)inputBuffer;
+            p->Result = 0;
+
+            __try {
+                switch (p->Width) {
+                case 1:
+                    if (p->IsWrite) {
+                        WRITE_PORT_UCHAR((PUCHAR)(ULONG_PTR)p->Port, (UCHAR)p->Value);
+                    } else {
+                        p->Value = READ_PORT_UCHAR((PUCHAR)(ULONG_PTR)p->Port);
+                    }
+                    p->Result = 1;
+                    break;
+                case 2:
+                    if (p->IsWrite) {
+                        WRITE_PORT_USHORT((PUSHORT)(ULONG_PTR)p->Port, (USHORT)p->Value);
+                    } else {
+                        p->Value = READ_PORT_USHORT((PUSHORT)(ULONG_PTR)p->Port);
+                    }
+                    p->Result = 1;
+                    break;
+                case 4:
+                    if (p->IsWrite) {
+                        WRITE_PORT_ULONG((PULONG)(ULONG_PTR)p->Port, p->Value);
+                    } else {
+                        p->Value = READ_PORT_ULONG((PULONG)(ULONG_PTR)p->Port);
+                    }
+                    p->Result = 1;
+                    break;
+                }
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
+                    "AMDBC250-DREAM-V4.3: PORT_IO EXCEPTION 0x%08X port=0x%04X\n",
+                    GetExceptionCode(), p->Port));
+                p->Result = 0;
+            }
+
+            status = STATUS_SUCCESS;
+            bytesReturned = sizeof(AMDBC250_IOCTL_PORT_IO);
+        } else {
+            status = STATUS_BUFFER_TOO_SMALL;
+        }
+        break;
+    }
+
+    /* --- SMN access via MMIO index/data ports --- */
+    case 0x80000BC4: { /* IOCTL_AMDBC250_SMN_ACCESS */
+        if (inputLen >= sizeof(AMDBC250_IOCTL_SMN_ACCESS) &&
+            outputLen >= sizeof(AMDBC250_IOCTL_SMN_ACCESS)) {
+            PAMDBC250_IOCTL_SMN_ACCESS s = (PAMDBC250_IOCTL_SMN_ACCESS)inputBuffer;
+
+            /* Default SMN ports for Cyan Skillfish (PS5 APU) */
+            UINT32 idxPort = s->IndexPort ? s->IndexPort : 0x3B10528;
+            UINT32 dataPort = s->DataPort ? s->DataPort : 0x3B10564;
+            s->Result = 0;
+
+            __try {
+                /* Map the index port MMIO register */
+                PHYSICAL_ADDRESS paIdx;
+                paIdx.QuadPart = idxPort;
+                PUCHAR vaIdx = (PUCHAR)MmMapIoSpace(paIdx, 4, MmNonCached);
+
+                /* Map the data port MMIO register */
+                PHYSICAL_ADDRESS paData;
+                paData.QuadPart = dataPort;
+                PUCHAR vaData = (PUCHAR)MmMapIoSpace(paData, 4, MmNonCached);
+
+                if (vaIdx && vaData) {
+                    volatile PULONG pIdx = (volatile PULONG)vaIdx;
+                    volatile PULONG pData = (volatile PULONG)vaData;
+
+                    if (s->IsWrite) {
+                        /* Write: index → SMN address, data → SMN value */
+                        WRITE_REGISTER_ULONG(pIdx, s->SmnAddress);
+                        KeMemoryBarrier();
+                        WRITE_REGISTER_ULONG(pData, s->SmnData);
+                        KeMemoryBarrier();
+                        s->SmnData = READ_REGISTER_ULONG(pData);
+                    } else {
+                        /* Read: index → SMN address, read data */
+                        WRITE_REGISTER_ULONG(pIdx, s->SmnAddress);
+                        KeMemoryBarrier();
+                        s->SmnData = READ_REGISTER_ULONG(pData);
+                    }
+                    s->Result = 1;
+                }
+
+                if (vaIdx) MmUnmapIoSpace(vaIdx, 4);
+                if (vaData) MmUnmapIoSpace(vaData, 4);
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
+                    "AMDBC250-DREAM-V4.3: SMN_ACCESS EXCEPTION 0x%08X addr=0x%08X\n",
+                    GetExceptionCode(), s->SmnAddress));
+                s->Result = 0;
+            }
+
+            status = STATUS_SUCCESS;
+            bytesReturned = sizeof(AMDBC250_IOCTL_SMN_ACCESS);
         } else {
             status = STATUS_BUFFER_TOO_SMALL;
         }

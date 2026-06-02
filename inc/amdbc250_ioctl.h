@@ -108,6 +108,28 @@ Environment:
 #define IOCTL_AMDBC250_PSP_GET_STATUS       CTL_CODE_AMDBC250(0x79, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #define IOCTL_AMDBC250_PSP_TEST_MAILBOX     CTL_CODE_AMDBC250(0x7A, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
+/* Read raw PCI config space by bus/device/function */
+#define IOCTL_AMDBC250_READ_PCI_CONFIG      CTL_CODE_AMDBC250(0x7B, METHOD_BUFFERED, FILE_ANY_ACCESS)
+
+/* Write to PCI config space (for enabling Memory Space) */
+#define IOCTL_AMDBC250_WRITE_PCI_CONFIG     CTL_CODE_AMDBC250(0x7C, METHOD_BUFFERED, FILE_ANY_ACCESS)
+
+/* Scan all ECAM bases + IO ports to find BC-250 */
+#define IOCTL_AMDBC250_DISCOVER_PCI         CTL_CODE_AMDBC250(0x7D, METHOD_BUFFERED, FILE_ANY_ACCESS)
+
+/* Report BAR addresses parsed from StartDevice resource list */
+#define IOCTL_AMDBC250_GET_RESOURCE_BARS    CTL_CODE_AMDBC250(0x7E, METHOD_BUFFERED, FILE_ANY_ACCESS)
+
+typedef struct _AMDBC250_IOCTL_RESOURCE_BARS {
+    UINT32 DeviceStarted;         /* 1=StartDevice was called */
+    UINT32 MmioMapped;            /* 1=MMIO mapped */
+    UINT32 MmioSize;              /* MMIO BAR size */
+    UINT64 MmioPhysicalBase;      /* MMIO BAR physical address */
+    UINT64 MmioVirtualBase;       /* Mapped virtual address */
+    UINT32 FbSize;                /* Framebuffer BAR size */
+    UINT64 FbPhysicalBase;        /* Framebuffer BAR physical address */
+} AMDBC250_IOCTL_RESOURCE_BARS, *PAMDBC250_IOCTL_RESOURCE_BARS;
+
 /*===========================================================================
   Capability Flags
 ============================================================================*/
@@ -248,11 +270,16 @@ typedef struct _AMDBC250_IOCTL_POWER_TELEMETRY {
     UINT32 ThrottleCount;
 } AMDBC250_IOCTL_POWER_TELEMETRY, *PAMDBC250_IOCTL_POWER_TELEMETRY;
 
-/* --- Init Hardware (user-mode provides MMIO base) --- */
+/* --- Init Hardware (user-mode provides MMIO and VRAM bases) --- */
+#define AMDBC250_INIT_FLAG_NONE       0x00000000
+#define AMDBC250_INIT_FLAG_NBIO_MAP   0x00000001  /* Map address without GPU init (for NBIO config access) */
+
 typedef struct _AMDBC250_IOCTL_INIT_HARDWARE {
-    UINT64 MmioPhysicalBase;    /* BAR0 physical address from PCI config */
-    UINT32 MmioSize;            /* BAR0 size from PCI config */
-    UINT32 Flags;               /* Reserved, must be 0 */
+    UINT64 MmioPhysicalBase;    /* BAR2 physical address (MMIO registers, e.g. 0xD0000000) */
+    UINT32 MmioSize;            /* BAR2 size (e.g. 0x200000 = 2MB) */
+    UINT32 Flags;               /* AMDBC250_INIT_FLAG_* */
+    UINT64 FbPhysicalBase;      /* BAR0 physical address (VRAM framebuffer, e.g. 0xC0000000) */
+    UINT32 FbSize;              /* BAR0 size (e.g. 0x10000000 = 256MB) */
 } AMDBC250_IOCTL_INIT_HARDWARE, *PAMDBC250_IOCTL_INIT_HARDWARE;
 
 /* --- Send PM4 --- */
@@ -335,6 +362,92 @@ typedef struct _AMDBC250_IOCTL_PSP_TEST_MAILBOX {
     UINT32 ReadValue;             /* Value read back from C2PMSG_0 */
     UINT32 SolValue;              /* Sign of Life register value */
 } AMDBC250_IOCTL_PSP_TEST_MAILBOX, *PAMDBC250_IOCTL_PSP_TEST_MAILBOX;
+
+/* --- Read raw PCI config space by bus/device/function --- */
+typedef struct _AMDBC250_IOCTL_READ_PCI_CONFIG {
+    UINT32 Bus;                   /* PCI bus number */
+    UINT32 Device;                /* PCI device number */
+    UINT32 Function;              /* PCI function number */
+    UINT32 BytesRead;             /* OUT: bytes actually read */
+    UINT8  ConfigData[256];       /* OUT: raw PCI config space (256 bytes) */
+} AMDBC250_IOCTL_READ_PCI_CONFIG, *PAMDBC250_IOCTL_READ_PCI_CONFIG;
+
+/* --- Write PCI config space (one DWORD at bus/dev/func/offset) --- */
+typedef struct _AMDBC250_IOCTL_WRITE_PCI_CONFIG {
+    UINT32 Bus;                   /* PCI bus number */
+    UINT32 Device;                /* PCI device number */
+    UINT32 Function;              /* PCI function number */
+    UINT32 Offset;                /* Register offset in config space (0-255, must be DWORD-aligned) */
+    UINT32 Value;                 /* Value to write */
+} AMDBC250_IOCTL_WRITE_PCI_CONFIG, *PAMDBC250_IOCTL_WRITE_PCI_CONFIG;
+
+/* --- Discover PCI device (BC-250) via multiple methods --- */
+typedef struct _AMDBC250_IOCTL_DISCOVER_PCI {
+    UINT32 VendorFound;           /* OUT: 1 if BC-250 found */
+    UINT32 FoundBus;              /* OUT: bus number where found */
+    UINT32 FoundDevice;           /* OUT: device number where found */
+    UINT32 FoundFunction;         /* OUT: function number where found */
+    UINT32 MethodUsed;            /* OUT: 0=HAL, 1=ECAM, 2=IO ports */
+    AMDBC250_IOCTL_PCI_CONFIG PciConfig; /* OUT: full BAR info */
+} AMDBC250_IOCTL_DISCOVER_PCI, *PAMDBC250_IOCTL_DISCOVER_PCI;
+
+/* --- Force-enable MMIO: set PCI Command reg, test scratch write --- */
+#define IOCTL_AMDBC250_FORCE_ENABLE_MMIO  CTL_CODE_AMDBC250(0x7F, METHOD_BUFFERED, FILE_ANY_ACCESS)
+
+typedef struct _AMDBC250_IOCTL_FORCE_ENABLE_MMIO {
+    UINT32 HalSetBusResult;          /* OUT: 1=HalSetBusDataByOffset worked */
+    UINT32 IoPortWriteResult;        /* OUT: 1=IO port write worked */
+    UINT32 CommandBefore;            /* OUT: PCI Command reg before */
+    UINT32 CommandAfter;             /* OUT: PCI Command reg after */
+    UINT32 ScratchWriteVal;          /* IN: test value to write */
+    UINT32 ScratchReadVal;           /* OUT: value read back */
+    UINT32 ScratchOffset;            /* IN: scratch register offset (bytes) */
+    UINT32 GpuIdBefore;              /* OUT: GPU_ID register before enable */
+    UINT32 GpuIdAfter;               /* OUT: GPU_ID register after enable */
+    UINT32 Bus;                      /* IN: PCI bus */
+    UINT32 Device;                   /* IN: PCI device */
+    UINT32 Function;                 /* IN: PCI function */
+    UINT64 MmioPhysicalBase;         /* IN: MMIO physical address */
+    UINT32 MmioSize;                 /* IN: MMIO size in bytes */
+} AMDBC250_IOCTL_FORCE_ENABLE_MMIO, *PAMDBC250_IOCTL_FORCE_ENABLE_MMIO;
+
+/* --- Read/write I/O port (for PCI I/O BAR access like GPU doorbell) --- */
+#define IOCTL_AMDBC250_PORT_IO              CTL_CODE_AMDBC250(0x82, METHOD_BUFFERED, FILE_ANY_ACCESS)
+
+typedef struct _AMDBC250_IOCTL_PORT_IO {
+    UINT32 Port;                    /* IN: I/O port number (e.g. 0xE000) */
+    UINT32 IsWrite;                 /* IN: 0=read, 1=write */
+    UINT32 Value;                   /* IN: value to write / OUT: value read */
+    UINT32 Width;                   /* IN: 1=BYTE, 2=WORD, 4=DWORD */
+    UINT32 Result;                  /* OUT: 1=success, 0=failure */
+} AMDBC250_IOCTL_PORT_IO, *PAMDBC250_IOCTL_PORT_IO;
+
+/* --- SMN (System Management Network) read/write via MMIO index/data ports --- */
+#define IOCTL_AMDBC250_SMN_ACCESS           CTL_CODE_AMDBC250(0x81, METHOD_BUFFERED, FILE_ANY_ACCESS)
+
+typedef struct _AMDBC250_IOCTL_SMN_ACCESS {
+    UINT32 SmnAddress;              /* IN: SMN register address (byte offset) */
+    UINT32 SmnData;                 /* IN/OUT: data to write / data read */
+    UINT32 IsWrite;                 /* IN: 0=read, 1=write */
+    UINT32 Result;                  /* OUT: 1=success, 0=failure */
+    UINT32 IndexPort;               /* IN: MMIO index port address (0 = default 0x3B10528) */
+    UINT32 DataPort;                /* IN: MMIO data port address (0 = default 0x3B10564) */
+} AMDBC250_IOCTL_SMN_ACCESS, *PAMDBC250_IOCTL_SMN_ACCESS;
+
+/* --- Direct MMIO test: map any physical address and read/write --- */
+#define IOCTL_AMDBC250_MMIO_TEST            CTL_CODE_AMDBC250(0x80, METHOD_BUFFERED, FILE_ANY_ACCESS)
+
+typedef struct _AMDBC250_IOCTL_MMIO_TEST {
+    UINT64 PhysicalAddress;         /* IN: physical address to map */
+    UINT32 Size;                    /* IN: size to map (bytes) */
+    UINT32 OffsetRead;              /* IN: offset to read from */
+    UINT32 ValueRead;               /* OUT: value read */
+    UINT32 OffsetWrite;             /* IN: offset to write (0 = skip write) */
+    UINT32 ValueWrite;              /* IN: value to write */
+    UINT32 ValueWrittenBack;        /* OUT: value read back after write */
+    UINT32 MapResult;               /* OUT: 1=mapped OK, 0=failed */
+    UINT32 Padding;                 /* alignment */
+} AMDBC250_IOCTL_MMIO_TEST, *PAMDBC250_IOCTL_MMIO_TEST;
 
 #pragma pack(pop)
 

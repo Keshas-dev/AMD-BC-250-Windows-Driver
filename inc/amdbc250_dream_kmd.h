@@ -866,6 +866,13 @@ DreamV3DdiQueryInterface(
     _In_ PQUERY_INTERFACE   QueryInterface
     );
 
+NTSTATUS
+APIENTRY
+DreamV3DdiEscape(
+    _In_ HANDLE                     hAdapter,
+    _In_ CONST DXGKARG_ESCAPE*      pEscape
+    );
+
 /* ===== Memory Allocation Definitions ===== */
 #define GPU_PAGE_SIZE           0x1000              // 4KB
 #define GPU_PAGE_SHIFT          12
