@@ -321,31 +321,19 @@ NTSTATUS Amdbc250PspInit(PDEVICE_OBJECT DeviceObject)
         return status;
     }
 
-    /* Auto-load firmware from \SystemRoot\System32\drivers\amdgpu\ if available */
-    /* Try Cyan Skillfish firmware first, then fall back to navi10 */
+    /* Auto-load firmware from third-party\firmware\ directory */
+    /* Cyan Skillfish uses navi10 firmware (same PSP v11 IP) */
     if (!g_PspContext.SosFirmware) {
-        status = Amdbc250PspLoadFirmwareFile(&g_PspContext.SosFirmware, &g_PspContext.SosFirmwareSize,
-                                   L"\\SystemRoot\\System32\\drivers\\amdgpu\\cyan_skillfish2_sos.bin");
-        if (!NT_SUCCESS(status)) {
-            Amdbc250PspLoadFirmwareFile(&g_PspContext.SosFirmware, &g_PspContext.SosFirmwareSize,
-                                       L"\\SystemRoot\\System32\\drivers\\amdgpu\\navi10_sos.bin");
-        }
+        Amdbc250PspLoadFirmwareFile(&g_PspContext.SosFirmware, &g_PspContext.SosFirmwareSize,
+                                   L"\\SystemRoot\\System32\\drivers\\amdgpu\\navi10_sos.bin");
     }
     if (!g_PspContext.AsdFirmware) {
-        status = Amdbc250PspLoadFirmwareFile(&g_PspContext.AsdFirmware, &g_PspContext.AsdFirmwareSize,
-                                   L"\\SystemRoot\\System32\\drivers\\amdgpu\\cyan_skillfish2_asd.bin");
-        if (!NT_SUCCESS(status)) {
-            Amdbc250PspLoadFirmwareFile(&g_PspContext.AsdFirmware, &g_PspContext.AsdFirmwareSize,
-                                       L"\\SystemRoot\\System32\\drivers\\amdgpu\\navi10_asd.bin");
-        }
+        Amdbc250PspLoadFirmwareFile(&g_PspContext.AsdFirmware, &g_PspContext.AsdFirmwareSize,
+                                   L"\\SystemRoot\\System32\\drivers\\amdgpu\\navi10_asd.bin");
     }
     if (!g_PspContext.TaFirmware) {
-        status = Amdbc250PspLoadFirmwareFile(&g_PspContext.TaFirmware, &g_PspContext.TaFirmwareSize,
-                                   L"\\SystemRoot\\System32\\drivers\\amdgpu\\cyan_skillfish2_ta.bin");
-        if (!NT_SUCCESS(status)) {
-            Amdbc250PspLoadFirmwareFile(&g_PspContext.TaFirmware, &g_PspContext.TaFirmwareSize,
-                                       L"\\SystemRoot\\System32\\drivers\\amdgpu\\navi10_ta.bin");
-        }
+        Amdbc250PspLoadFirmwareFile(&g_PspContext.TaFirmware, &g_PspContext.TaFirmwareSize,
+                                   L"\\SystemRoot\\System32\\drivers\\amdgpu\\navi10_ta.bin");
     }
 
     KdPrint(("Amdbc250Psp: Firmware: SOS=%s (%u), ASD=%s (%u), TA=%s (%u)\n",
