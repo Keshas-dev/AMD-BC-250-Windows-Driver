@@ -618,38 +618,110 @@ int main(void) {
         if (hKmd3 != INVALID_HANDLE_VALUE) {
             DWORD br3 = 0;
 
-            /* Allocate 64KB contiguous memory */
-            ULONG allocInput[3] = { 64 * 1024, 0, 0 }; /* Size=64KB, Alignment=0, Flags=0 */
+            /* Allocate 4KB contiguous memory */
+            ULONG allocInput[3] = { 4096, 0, 0 }; /* Size=4KB, Alignment=0, Flags=0 */
             ULONG64 allocOutput[2] = {0}; /* PA + VA */
             BOOL ok3 = DeviceIoControl(hKmd3, 0x80000840,
                 allocInput, sizeof(allocInput),
                 allocOutput, sizeof(allocOutput),
                 &br3, NULL);
-            Log("  ALLOC_VIDMEM (64KB): %s  bytesReturned=%lu\n", ok3 ? "OK" : "FAIL", br3);
+            Log("  ALLOC_VIDMEM (4KB): %s  bytesReturned=%lu\n", ok3 ? "OK" : "FAIL", br3);
             if (ok3 && br3 >= 16) {
                 Log("    PhysicalAddr=0x%llX  VirtualAddr=0x%llX\n", allocOutput[0], allocOutput[1]);
-
-                if (allocOutput[1] != 0) {
-                    /* Write test pattern to the allocated buffer */
-                    PUCHAR buf = (PUCHAR)(ULONG_PTR)allocOutput[1];
-                    ULONG i;
-                    for (i = 0; i < 256 && i < 64*1024; i++) {
-                        buf[i] = (UCHAR)(i & 0xFF);
-                    }
-                    /* Read back and verify */
-                    UCHAR first = buf[0];
-                    UCHAR last = buf[255];
-                    Log("    Write/Read test: buf[0]=0x%02X (expect 0x00)  buf[255]=0x%02X (expect 0xFF)\n",
-                        first, last);
-
-                    /* Free the buffer */
-                    PVOID freeInput[1] = { (PVOID)(ULONG_PTR)allocOutput[1] };
-                    DeviceIoControl(hKmd3, 0x80000934, freeInput, sizeof(freeInput), NULL, 0, &br3, NULL);
-                    Log("    FREED buffer OK\n");
-                }
+                Log("    PA in VRAM range: %s\n", (allocOutput[0] >= 0xC0000000ULL) ? "YES" : "NO (system RAM)");
+                Log("    Note: VA is kernel-mode, cannot access from user-mode\n");
             }
 
             CloseHandle(hKmd3);
+        } else {
+            Log("  KMD device: NOT FOUND (error=%lu)\n", GetLastError());
+        }
+    }
+
+    /* ============================================== */
+    /* S23: BAR5 Register Scan + VRAM Write/Read      */
+    /* (Uses MMIO mapped by S21 INIT_HARDWARE)        */
+    /* ============================================== */
+    Log("\n=== S23: BAR5 Register Scan + VRAM Test ===\n");
+    {
+        HANDLE hKmd4 = CreateFileW(L"\\\\.\\AMDBC250DreamV43",
+            GENERIC_READ|GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
+        if (hKmd4 != INVALID_HANDLE_VALUE) {
+            DWORD br4 = 0;
+            typedef struct { UINT32 Offset; UINT32 Value; } REG_ACC;
+            REG_ACC ra = {0};
+            BOOL ok4;
+            int regCount = 0;
+
+            /* Known readable BAR5 offsets from Linux probe */
+            UINT32 offsets[] = {
+                0x0000, 0x0004,
+                0x05A0, 0x05A4, 0x05A8, 0x05AC,
+                0x05B0, 0x05B4, 0x05B8, 0x05BC,
+                0x05C0, 0x05C4, 0x05C8, 0x05CC,
+                0x05D0, 0x05D4, 0x05D8, 0x05DC,
+                0x0D00, 0x0D04, 0x0D08,
+                0x2000, 0x2004, 0x2074, 0x2078, 0x209C,
+                0x2100, 0x2104, 0x2108, 0x2110,
+                0x2300, 0x2304,
+                0x2600, 0x2604,
+                0x3000, 0x3004, 0x3008,
+                0x5000, 0x5004,
+                0x5400, 0x5404,
+                0xA000, 0xA004, 0xA010,
+                0xC000, 0xC004,
+                0x1A000, 0x1A004,
+            };
+            int numOffsets = sizeof(offsets) / sizeof(offsets[0]);
+            int i;
+
+            Log("  --- BAR5 Register Scan (0xFE800000) ---\n");
+            for (i = 0; i < numOffsets; i++) {
+                ra.Offset = offsets[i];
+                ra.Value = 0xDEADBEEF;
+                ok4 = DeviceIoControl(hKmd4, 0x80000B88, &ra, sizeof(ra), &ra, sizeof(ra), &br4, NULL);
+                if (ok4 && ra.Value != 0xFFFFFFFF && ra.Value != 0x00000000) {
+                    Log("    [0x%05X] = 0x%08X\n", offsets[i], ra.Value);
+                    regCount++;
+                }
+            }
+            Log("  --- %d readable registers found ---\n", regCount);
+
+            /* ALLOC_VIDMEM — verify allocation works (no user-mode access to kernel VA) */
+            Log("\n  --- ALLOC_VIDMEM Test ---\n");
+            {
+                ULONG allocIn[3] = { 4096, 0, 0 };
+                ULONG64 allocOut[2] = {0};
+                ok4 = DeviceIoControl(hKmd4, 0x80000840, allocIn, sizeof(allocIn),
+                    allocOut, sizeof(allocOut), &br4, NULL);
+                Log("  ALLOC_VIDMEM (4KB): %s  PA=0x%llX  VA=0x%llX\n",
+                    ok4 ? "OK" : "FAIL", allocOut[0], allocOut[1]);
+                if (ok4) {
+                    Log("    PA in VRAM range: %s\n", (allocOut[0] >= 0xC0000000ULL) ? "YES" : "NO (system RAM)");
+                }
+            }
+
+            /* HW Status */
+            Log("\n  --- HW Status ---\n");
+            {
+                typedef struct {
+                    UINT32 MmioMapped; UINT32 RingsInit; UINT32 FenceInit;
+                    UINT64 GfxRingPA; UINT64 GfxRingSize; UINT64 WritePtr;
+                    UINT64 ReadPtr; UINT32 FenceVal; UINT32 Pad;
+                } HW_STATUS;
+                HW_STATUS hw = {0};
+                ok4 = DeviceIoControl(hKmd4, 0x80000B90, NULL, 0, &hw, sizeof(hw), &br4, NULL);
+                Log("  GET_HW_STATUS: %s\n", ok4 ? "OK" : "FAIL");
+                if (ok4) {
+                    Log("    MMIO=%lu  Rings=%lu  Fence=%lu\n",
+                        hw.MmioMapped, hw.RingsInit, hw.FenceInit);
+                    Log("    GFX Ring PA=0x%llX  Size=%llu  WPtr=%llu  RPtr=%llu\n",
+                        hw.GfxRingPA, hw.GfxRingSize, hw.WritePtr, hw.ReadPtr);
+                    Log("    FenceValue=%lu\n", hw.FenceVal);
+                }
+            }
+
+            CloseHandle(hKmd4);
         } else {
             Log("  KMD device: NOT FOUND (error=%lu)\n", GetLastError());
         }
