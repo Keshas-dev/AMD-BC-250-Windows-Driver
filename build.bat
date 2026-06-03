@@ -121,6 +121,39 @@ if errorlevel 1 (
 
 echo.
 echo ==========================================
+echo  BUILDING PSP (PSP Driver)
+echo ==========================================
+echo.
+
+cl.exe /c /kernel /W3 /Zi /Od /DAMD64 /D_AMD64_ ^
+  /I"%WDK_ROOT%\Include\%WDK_VERSION%\km" ^
+  /I"%WDK_ROOT%\Include\%WDK_VERSION%\km\crt" ^
+  /I"%WDK_ROOT%\Include\%WDK_VERSION%\shared" ^
+  /I"%INC_DIR%" ^
+  /I"%SRC_DIR%\kmd" ^
+  "%SRC_DIR%\kmd\amdbc250_psp_driver.c"
+
+if errorlevel 1 (
+    echo PSP compilation FAILED!
+    pause
+    exit /b 1
+)
+
+echo Linking PSP...
+link.exe /DRIVER /SUBSYSTEM:NATIVE /ENTRY:DriverEntry ^
+  /OUT:"%OUTPUT_DIR%\amdbc250_psp.sys" ^
+  amdbc250_psp_driver.obj ^
+  ntoskrnl.lib wdm.lib hal.lib ^
+  /LIBPATH:"%WDK_ROOT%\Lib\%WDK_VERSION%\km\x64"
+
+if errorlevel 1 (
+    echo PSP linking FAILED!
+    pause
+    exit /b 1
+)
+
+echo.
+echo ==========================================
 echo  BUILDING UMD (User-Mode Driver)
 echo ==========================================
 echo.
