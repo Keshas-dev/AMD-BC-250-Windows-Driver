@@ -25,8 +25,15 @@ typedef struct _PSP_DEVICE_EXTENSION {
 static PDEVICE_OBJECT g_ControlDeviceObject = NULL;
 
 NTSTATUS PspDispatchPassThrough(PDEVICE_OBJECT deviceObject, PIRP irp) {
+    PPSP_DEVICE_EXTENSION devExt = deviceObject->DeviceExtension;
+    if (!devExt || !devExt->LowerDeviceObject) {
+        IoCompleteRequest(irp, IO_NO_INCREMENT);
+        irp->IoStatus.Status = STATUS_NOT_SUPPORTED;
+        irp->IoStatus.Information = 0;
+        return STATUS_NOT_SUPPORTED;
+    }
     IoSkipCurrentIrpStackLocation(irp);
-    return IoCallDriver(((PPSP_DEVICE_EXTENSION)deviceObject->DeviceExtension)->LowerDeviceObject, irp);
+    return IoCallDriver(devExt->LowerDeviceObject, irp);
 }
 
 NTSTATUS PspDispatchCreateClose(PDEVICE_OBJECT deviceObject, PIRP irp) {
@@ -98,6 +105,13 @@ NTSTATUS PspDispatchPnP(PDEVICE_OBJECT deviceObject, PIRP irp) {
     PPSP_DEVICE_EXTENSION devExt = deviceObject->DeviceExtension;
     PIO_STACK_LOCATION stack = IoGetCurrentIrpStackLocation(irp);
 
+    if (!devExt || !devExt->LowerDeviceObject) {
+        IoCompleteRequest(irp, IO_NO_INCREMENT);
+        irp->IoStatus.Status = STATUS_NOT_SUPPORTED;
+        irp->IoStatus.Information = 0;
+        return STATUS_NOT_SUPPORTED;
+    }
+
     switch (stack->MinorFunction) {
         case IRP_MN_START_DEVICE: {
             PCM_PARTIAL_RESOURCE_LIST resourceList = NULL;
@@ -141,8 +155,16 @@ NTSTATUS PspDispatchPnP(PDEVICE_OBJECT deviceObject, PIRP irp) {
 }
 
 NTSTATUS PspDispatchPower(PDEVICE_OBJECT deviceObject, PIRP irp) {
+    PPSP_DEVICE_EXTENSION devExt = deviceObject->DeviceExtension;
+    if (!devExt || !devExt->LowerDeviceObject) {
+        PoStartNextPowerIrp(irp);
+        IoCompleteRequest(irp, IO_NO_INCREMENT);
+        irp->IoStatus.Status = STATUS_NOT_SUPPORTED;
+        irp->IoStatus.Information = 0;
+        return STATUS_NOT_SUPPORTED;
+    }
     IoSkipCurrentIrpStackLocation(irp);
-    return IoCallDriver(((PPSP_DEVICE_EXTENSION)deviceObject->DeviceExtension)->LowerDeviceObject, irp);
+    return IoCallDriver(devExt->LowerDeviceObject, irp);
 }
 
 NTSTATUS PspAddDevice(PDRIVER_OBJECT driverObject, PDEVICE_OBJECT physicalDeviceObject) {
