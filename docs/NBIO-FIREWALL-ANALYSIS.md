@@ -109,4 +109,34 @@ The NBIO firewall blocking PSP MMIO access on Windows but NOT on Linux suggests 
 
 ---
 
+## PSP Device Discovery (2026-06-03)
+
+### Hardware Topology
+| Device | PCI ID | Bus Location | Description |
+|--------|--------|--------------|-------------|
+| BC-250 GPU | VEN_1002&DEV_13FE | Device 00, Function 0041 | GPU/Graphics |
+| BC-250 Audio | VEN_1002&DEV_13FF | Device 00, Function 0141 | Audio |
+| AMD PSP 3.0 | VEN_1022&DEV_143E | Device 02, Function 0241 | Crypto/Security |
+
+**Key Finding:** All three devices share the same internal bus (19caf403), confirming they are on the same APU die and connected through the same NBIO bridge.
+
+### PSP Behavior After Hypervisor Disable
+After disabling Windows hypervisor (bcdedit /set hypervisorlaunchtype off):
+- PSP (DEV_143E) enters Error state (CM_PROB_FAILED_INSTALL)
+- PSP expected VBS/Hyper-V security layer to be present
+- Without VBS, PSP refuses to initialize on Windows
+
+### Implications
+- **PSP may be re-activating NBIO firewall in background** even after our driver loads
+- Disabling PSP device in Device Manager may prevent this
+- This could explain why all our NBIO unlock attempts failed
+
+### Recommended Actions
+1. Disable PSP device in Device Manager (PCI Encryption/Decryption Controller)
+2. Reboot and test if BC-250 Degraded status changes
+3. Test PSP MMIO access after PSP device is disabled
+4. Test Vulkan rendering
+
+---
+
 *This analysis is based on community input and Linux driver analysis. Further testing required to confirm which scenario is correct.*
