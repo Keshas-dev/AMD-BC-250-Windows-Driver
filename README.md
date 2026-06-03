@@ -99,7 +99,7 @@ DF has 40 readable registers containing:
 - ✅ **WDDM coexistence** — BasicDisplay + our KMD on same DriverObject
 - ✅ **Build + sign pipeline** — `build.bat` produces signed `atikmdag.sys`
 - ✅ **No crashes** — safe-test approach (read-only + INIT_HARDWARE) works reliably
-- ❌ **PSP v11 firmware loading** (C2PMSG mailbox, bootloader handshake) — blocked by NBIO firewall
+- ✅ **PSP v11 firmware loading** (C2PMSG mailbox, bootloader handshake)
 - ✅ **Vulkan ICD** — 13/13 tests pass with official Vulkan loader
 - ✅ **D3D9 UMD** — 45+ DDI functions, 5/5 adapter tests pass
 - ✅ **IB packet + EOP fence**, GFX10 ring buffer, HDP Flush
