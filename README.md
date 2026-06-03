@@ -2,7 +2,7 @@
 
 ## Who We Are
 
-AMD BC-250 Windows 11 driver project by Keshas & Kumpis (AI). Goal: fully working GPU driver for AMD BC-250 (PS5 motherboard "Ariel Root Complex") on Windows 11.
+AMD BC-250 Windows 11 driver project by Keshass. Goal: fully working GPU driver for AMD BC-250 (PS5 motherboard "Ariel Root Complex") on Windows 11.
 
 **Everyone welcome!** GPU drivers, WDDM, Vulkan experience — or just want to help.
 
@@ -99,7 +99,7 @@ DF has 40 readable registers containing:
 - ✅ **WDDM coexistence** — BasicDisplay + our KMD on same DriverObject
 - ✅ **Build + sign pipeline** — `build.bat` produces signed `atikmdag.sys`
 - ✅ **No crashes** — safe-test approach (read-only + INIT_HARDWARE) works reliably
-- ✅ **PSP v11 firmware loading** (C2PMSG mailbox, bootloader handshake)
+- ❌ **PSP v11 firmware loading** (C2PMSG mailbox, bootloader handshake) — blocked by NBIO firewall
 - ✅ **Vulkan ICD** — 13/13 tests pass with official Vulkan loader
 - ✅ **D3D9 UMD** — 45+ DDI functions, 5/5 adapter tests pass
 - ✅ **IB packet + EOP fence**, GFX10 ring buffer, HDP Flush
