@@ -1,6 +1,7 @@
 #include "ntddk.h"
 #include "amdbc250_dream_kmd.h"
 #include "amdbc250_psp_v11.h"
+#include "firmware_data.h"
 
 #define PSP_MMIO_BASE_OFFSET          0x10000
 #define PSP_MMIO_SIZE                 0x4000
@@ -321,20 +322,15 @@ NTSTATUS Amdbc250PspInit(PDEVICE_OBJECT DeviceObject)
         return status;
     }
 
-    /* Auto-load firmware from third-party\firmware\ directory */
-    /* Cyan Skillfish uses navi10 firmware (same PSP v11 IP) */
-    if (!g_PspContext.SosFirmware) {
-        Amdbc250PspLoadFirmwareFile(&g_PspContext.SosFirmware, &g_PspContext.SosFirmwareSize,
-                                   L"\\SystemRoot\\System32\\drivers\\amdgpu\\navi10_sos.bin");
-    }
-    if (!g_PspContext.AsdFirmware) {
-        Amdbc250PspLoadFirmwareFile(&g_PspContext.AsdFirmware, &g_PspContext.AsdFirmwareSize,
-                                   L"\\SystemRoot\\System32\\drivers\\amdgpu\\navi10_asd.bin");
-    }
-    if (!g_PspContext.TaFirmware) {
-        Amdbc250PspLoadFirmwareFile(&g_PspContext.TaFirmware, &g_PspContext.TaFirmwareSize,
-                                   L"\\SystemRoot\\System32\\drivers\\amdgpu\\navi10_ta.bin");
-    }
+    /* Use embedded firmware data (no external files needed) */
+    g_PspContext.SosFirmware = (PUCHAR)g_SosFirmwareData;
+    g_PspContext.SosFirmwareSize = sizeof(g_SosFirmwareData);
+    
+    g_PspContext.AsdFirmware = (PUCHAR)g_AsdFirmwareData;
+    g_PspContext.AsdFirmwareSize = sizeof(g_AsdFirmwareData);
+    
+    g_PspContext.TaFirmware = (PUCHAR)g_TaFirmwareData;
+    g_PspContext.TaFirmwareSize = sizeof(g_TaFirmwareData);
 
     KdPrint(("Amdbc250Psp: Firmware: SOS=%s (%u), ASD=%s (%u), TA=%s (%u)\n",
              g_PspContext.SosFirmware ? "OK" : "missing", g_PspContext.SosFirmwareSize,
