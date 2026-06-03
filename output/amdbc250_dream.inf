@@ -136,6 +136,11 @@ HKR,, PP_EnableUploadFirmware, %REG_DWORD%, 1
 HKR,, PP_EnableLoadFalconSmcFirmware, %REG_DWORD%, 1
 HKR,, PP_EnableLoadPostProductionFirmware, %REG_DWORD%, 1
 
+; NBIO bypass - force display connection and disable memory validation
+HKR,, DalForceAllDisplaysConnected, %REG_DWORD%, 1
+HKR,, Kmd_EnableGuestMemoryValidation, %REG_DWORD%, 0
+HKR,, WdfEnableSqlAllowHighPerf, %REG_DWORD%, 1
+
 ; RDNA2 specific workarounds (from Linux driver knowledge)
 HKR,, DisableComputeQueue,     %REG_DWORD%,    1       ; HW quirk - broken
 HKR,, EnableHdpFlush,          %REG_DWORD%,    1       ; CRITICAL for coherency

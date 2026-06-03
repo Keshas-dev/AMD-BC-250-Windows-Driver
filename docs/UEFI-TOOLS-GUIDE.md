@@ -29,31 +29,39 @@ Search for "GRUB modded shell with setup_var"
 3. Ctrl+F -> Text -> Search for "IOMMU", "PSP", "NBIO"
 4. Extract the Setup module as setup.bin
 
-## Steps without IFRExtractor (simpler approach)
+## Finding VarOffset from UEFITool search results
 
-### Option A: Search in UEFITool directly
-1. Open UEFITool
-2. Load BIOS file (BC250_3.00_CHIPSETMENU.ROM)
-3. Click the "Information" dock/panel (bottom area)
-4. Navigate the tree to find "Setup" or "SetupUtility" section
-5. In Information panel, look for "VarStore" entries
-6. Search for text strings like "IOMMU", "PSP", "NBIO" 
-7. Note the VarOffset values found
+After finding "IOMMU", "psp", "NBO" in UEFITool, the VarOffset is in the binary data nearby.
 
-### Option B: Use UEFI Shell to explore
-Boot to UEFI Shell and use:
+### Method 1: Look for IFR (Internal Form Representation) patterns
+In the Information panel or hex view, look for patterns like:
 ```
-dmpstore -all > fs0:\vars.txt  (dump all variables)
+VarStoreInfo (VarOffset/Offset): 0xNNN
 ```
-Then search the output for IOMMU/PSP related variables.
 
-### Common VarOffset values (from AMI BIOS):
-- IOMMU: often at 0x1A2 or 0x1A3
-- PSP Support: often at 0x4F2 or similar
-- fTPM: often at 0x4F1 or similar
-- DMA Protection: often near 0x1A0-0x1AF range
+### Method 2: Search for "VarOffset" text in the same modules
+1. Double-click on one of the IOMMU search results in UEFITool tree
+2. Right-click -> "Extract body" or "Extract as is"
+3. Open with hex editor (HxD, etc.)
+4. Search backwards from the "IOMMU" string for patterns like:
+   - `2B 00` (Form ID tag)
+   - `01 00` (VarStore reference)
 
-These are EXAMPLE values only - actual offsets depend on BIOS version.
+### Method 3: Extract the Setup module and use IFRExtractor
+If UEFITool shows a module named "Setup" or "SetupUtility":
+1. Right-click -> Extract body
+2. Save as setup.bin
+3. Download IFRExtractor from: https://github.com/LongSoft/IFRExtractor/releases
+4. Run: ifrextractor.exe setup.bin
+5. Open setup.txt and search for IOMMU, PSP
+
+### Common VarOffset patterns (AMI BIOS):
+| Setting | Typical Offset | Disable Value |
+|---------|---------------|---------------|
+| IOMMU / AMD-Vi | 0x1A2 - 0x1A5 | 0x00 |
+| PSP Support | 0x4F0 - 0x4F5 | 0x00 |
+| fTPM | 0x4F1 - 0x4F6 | 0x00 |
+| NBIO Options | 0x500+ range | varies |
 
 ### Step 3: Create UEFI Shell USB
 1. Format USB as FAT32

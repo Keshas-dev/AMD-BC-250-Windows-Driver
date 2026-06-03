@@ -125,7 +125,7 @@ echo  BUILDING PSP (PSP Driver)
 echo ==========================================
 echo.
 
-cl.exe /c /kernel /W3 /Zi /Od /DAMD64 /D_AMD64_ ^
+cl.exe /c /kernel /W3 /Zi /Od /DAMD64 /D_AMD64_ /GS- ^
   /I"%WDK_ROOT%\Include\%WDK_VERSION%\km" ^
   /I"%WDK_ROOT%\Include\%WDK_VERSION%\km\crt" ^
   /I"%WDK_ROOT%\Include\%WDK_VERSION%\shared" ^
@@ -140,10 +140,10 @@ if errorlevel 1 (
 )
 
 echo Linking PSP...
-link.exe /DRIVER /SUBSYSTEM:NATIVE /ENTRY:DriverEntry ^
+link.exe /DRIVER /SUBSYSTEM:NATIVE /ENTRY:DriverEntry /NODEFAULTLIB ^
   /OUT:"%OUTPUT_DIR%\amdbc250_psp.sys" ^
   amdbc250_psp_driver.obj ^
-  ntoskrnl.lib wdm.lib hal.lib ^
+  ntoskrnl.lib hal.lib wdm.lib ^
   /LIBPATH:"%WDK_ROOT%\Lib\%WDK_VERSION%\km\x64"
 
 if errorlevel 1 (

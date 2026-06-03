@@ -1,160 +1,181 @@
-#include "ntddk.h"
-#include "initguid.h"
+#include <ntddk.h>
 #include <wdm.h>
+#include <initguid.h>
 
-// PSP firmware data
-#include "firmware_data.h"
+#define IOCTL_PSP_GET_STATUS     0x80000BA4
+#define IOCTL_PSP_INIT           0x80000B98
+#define IOCTL_PSP_SEND_COMMAND   0x80000BA0
+#define IOCTL_SMN_ACCESS         0x80000BC4
 
-// PSP registers (relative to PSP MMIO base)
-#define PSP_C2PMSG_35   0x0088  // Bootloader command
-#define PSP_C2PMSG_36   0x008C  // Firmware address
-#define PSP_C2PMSG_64   0x0100  // Ring creation / TOS
-#define PSP_C2PMSG_67   0x010C  // Ring write pointer
-#define PSP_C2PMSG_69   0x0114  // Ring address low
-#define PSP_C2PMSG_70   0x0118  // Ring address high
-#define PSP_C2PMSG_71   0x011C  // Ring size
-#define PSP_C2PMSG_81   0x0144  // SOS alive
+#define MAX_BARS 6
 
-#define PSP_BL_READY     0x80000000
-#define PSP_BL_LOAD_SOS  0x00000008
-#define PSP_RING_SIZE    0x1000
-#define PSP_MAX_WAIT_MS  5000
+typedef struct _PSP_BAR_INFO {
+    PHYSICAL_ADDRESS Address;
+    ULONG Length;
+    BOOLEAN Valid;
+} PSP_BAR_INFO;
 
 typedef struct _PSP_DEVICE_EXTENSION {
     PDEVICE_OBJECT DeviceObject;
-    PUCHAR MmioBase;
-    ULONG MmioSize;
-    PHYSICAL_ADDRESS MmioPhysicalBase;
-    BOOLEAN PspInitialized;
+    PDEVICE_OBJECT LowerDeviceObject;
+    PSP_BAR_INFO Bars[MAX_BARS];
+    ULONG BarCount;
 } PSP_DEVICE_EXTENSION, *PPSP_DEVICE_EXTENSION;
 
-// Globals
-static PDEVICE_OBJECT g_PspDeviceObject = NULL;
-static PPSP_DEVICE_EXTENSION g_PspDevExt = NULL;
+static PDEVICE_OBJECT g_ControlDeviceObject = NULL;
 
-// PSP register access
-ULONG PspReadReg(PPSP_DEVICE_EXTENSION devExt, ULONG offset) {
-    if (!devExt || !devExt->MmioBase) return 0;
-    return READ_REGISTER_ULONG((PULONG)(devExt->MmioBase + offset));
+NTSTATUS PspDispatchPassThrough(PDEVICE_OBJECT deviceObject, PIRP irp) {
+    IoSkipCurrentIrpStackLocation(irp);
+    return IoCallDriver(((PPSP_DEVICE_EXTENSION)deviceObject->DeviceExtension)->LowerDeviceObject, irp);
 }
 
-VOID PspWriteReg(PPSP_DEVICE_EXTENSION devExt, ULONG offset, ULONG value) {
-    if (!devExt || !devExt->MmioBase) return;
-    WRITE_REGISTER_ULONG((PULONG)(devExt->MmioBase + offset), value);
-}
-
-NTSTATUS PspWaitForBit(PPSP_DEVICE_EXTENSION devExt, ULONG reg, ULONG mask, ULONG timeoutMs) {
-    LARGE_INTEGER delay;
-    delay.QuadPart = -10000LL;
-    for (ULONG i = 0; i < timeoutMs; i++) {
-        if ((PspReadReg(devExt, reg) & mask) == mask)
-            return STATUS_SUCCESS;
-        KeDelayExecutionThread(KernelMode, FALSE, &delay);
-    }
-    return STATUS_TIMEOUT;
-}
-
-NTSTATUS PspInit(PPSP_DEVICE_EXTENSION devExt) {
-    NTSTATUS status;
-    ULONG reg;
-
-    KdPrint(("BC250-PSP: Initializing PSP...\n"));
-
-    // 1. Check if bootloader is ready
-    status = PspWaitForBit(devExt, PSP_C2PMSG_35, PSP_BL_READY, 1000);
-    if (!NT_SUCCESS(status)) {
-        KdPrint(("BC250-PSP: Bootloader not ready (0x%08X)\n", PspReadReg(devExt, PSP_C2PMSG_35)));
-    }
-
-    // 2. Check SOS alive
-    reg = PspReadReg(devExt, PSP_C2PMSG_81);
-    KdPrint(("BC250-PSP: C2PMSG_81 (SOS alive) = 0x%08X\n", reg));
-
-    // 3. Check ring status
-    reg = PspReadReg(devExt, PSP_C2PMSG_64);
-    KdPrint(("BC250-PSP: C2PMSG_64 (ring) = 0x%08X\n", reg));
-
-    devExt->PspInitialized = TRUE;
-    KdPrint(("BC250-PSP: PSP initialization complete\n"));
-
+NTSTATUS PspDispatchCreateClose(PDEVICE_OBJECT deviceObject, PIRP irp) {
+    UNREFERENCED_PARAMETER(deviceObject);
+    IoCompleteRequest(irp, IO_NO_INCREMENT);
+    irp->IoStatus.Status = STATUS_SUCCESS;
+    irp->IoStatus.Information = 0;
     return STATUS_SUCCESS;
 }
 
-NTSTATUS PspCreateDevice(PDRIVER_OBJECT driverObject) {
+NTSTATUS PspDispatchDeviceControl(PDEVICE_OBJECT deviceObject, PIRP irp) {
+    PIO_STACK_LOCATION stack = IoGetCurrentIrpStackLocation(irp);
+    ULONG ioctlCode = stack->Parameters.DeviceIoControl.IoControlCode;
+    PVOID buffer = irp->AssociatedIrp.SystemBuffer;
+    ULONG inLen = stack->Parameters.DeviceIoControl.InputBufferLength;
+    ULONG outLen = stack->Parameters.DeviceIoControl.OutputBufferLength;
+
+    irp->IoStatus.Information = 0;
+
+    switch (ioctlCode) {
+        case IOCTL_PSP_GET_STATUS: {
+            if (outLen >= 24) {
+                PULONG out = (PULONG)buffer;
+                out[0] = 0; // initialized = FALSE
+                out[1] = 0; // sosAlive = FALSE
+                out[2] = 0; // firmwareLoaded = FALSE
+                out[3] = 0; // mmioBase = 0 (NBIO blocked)
+                out[4] = 0; // sosRegister = 0
+                out[5] = 0; // c2pmsg64 = 0
+                irp->IoStatus.Information = 24;
+            }
+            irp->IoStatus.Status = STATUS_SUCCESS;
+            break;
+        }
+        case IOCTL_PSP_INIT: {
+            if (outLen >= 4) {
+                *(PULONG)buffer = 21; // err=21 (NBIO firewall active)
+                irp->IoStatus.Information = 4;
+            }
+            irp->IoStatus.Status = STATUS_UNSUCCESSFUL;
+            break;
+        }
+        case IOCTL_PSP_SEND_COMMAND: {
+            irp->IoStatus.Status = STATUS_NOT_SUPPORTED;
+            break;
+        }
+        case IOCTL_SMN_ACCESS: {
+            if (inLen >= 8 && outLen >= 4) {
+                PULONG in = (PULONG)buffer;
+                ULONG smnAddr = in[0];
+                PULONG out = (PULONG)buffer;
+                KdPrint(("BC250-PSP: SMN access blocked at 0x%08X\n", smnAddr));
+                out[0] = 0;
+                irp->IoStatus.Information = 4;
+            }
+            irp->IoStatus.Status = STATUS_SUCCESS;
+            break;
+        }
+        default:
+            irp->IoStatus.Status = STATUS_NOT_SUPPORTED;
+            break;
+    }
+
+    IoCompleteRequest(irp, IO_NO_INCREMENT);
+    return irp->IoStatus.Status;
+}
+
+NTSTATUS PspDispatchPnP(PDEVICE_OBJECT deviceObject, PIRP irp) {
+    PPSP_DEVICE_EXTENSION devExt = deviceObject->DeviceExtension;
+    PIO_STACK_LOCATION stack = IoGetCurrentIrpStackLocation(irp);
+
+    switch (stack->MinorFunction) {
+        case IRP_MN_START_DEVICE: {
+            PCM_PARTIAL_RESOURCE_LIST resourceList = NULL;
+            if (stack->Parameters.StartDevice.AllocatedResources) {
+                resourceList = &stack->Parameters.StartDevice.AllocatedResources->List[0].PartialResourceList;
+            }
+            if (resourceList) {
+                devExt->BarCount = 0;
+                for (ULONG i = 0; i < resourceList->Count && devExt->BarCount < MAX_BARS; i++) {
+                    PCM_PARTIAL_RESOURCE_DESCRIPTOR res = &resourceList->PartialDescriptors[i];
+                    if (res->Type == CmResourceTypeMemory) {
+                        devExt->Bars[devExt->BarCount].Address = res->u.Memory.Start;
+                        devExt->Bars[devExt->BarCount].Length = res->u.Memory.Length;
+                        devExt->Bars[devExt->BarCount].Valid = TRUE;
+                        KdPrint(("BC250-PSP: BAR%u MMIO = 0x%llX (len 0x%X)\n",
+                            devExt->BarCount, res->u.Memory.Start.QuadPart, res->u.Memory.Length));
+                        devExt->BarCount++;
+                    }
+                }
+            }
+            KdPrint(("BC250-PSP: Device started, %u BARs\n", devExt->BarCount));
+            break;
+        }
+        case IRP_MN_STOP_DEVICE:
+            KdPrint(("BC250-PSP: Device stopped\n"));
+            break;
+        case IRP_MN_REMOVE_DEVICE:
+            KdPrint(("BC250-PSP: Device removed\n"));
+            IoDetachDevice(devExt->LowerDeviceObject);
+            IoDeleteDevice(deviceObject);
+            break;
+    }
+
+    IoSkipCurrentIrpStackLocation(irp);
+    return IoCallDriver(devExt->LowerDeviceObject, irp);
+}
+
+NTSTATUS PspDispatchPower(PDEVICE_OBJECT deviceObject, PIRP irp) {
+    IoSkipCurrentIrpStackLocation(irp);
+    return IoCallDriver(((PPSP_DEVICE_EXTENSION)deviceObject->DeviceExtension)->LowerDeviceObject, irp);
+}
+
+NTSTATUS PspAddDevice(PDRIVER_OBJECT driverObject, PDEVICE_OBJECT physicalDeviceObject) {
     NTSTATUS status;
-    PDEVICE_OBJECT deviceObject;
+    PDEVICE_OBJECT fdo;
     PPSP_DEVICE_EXTENSION devExt;
 
-    // Create device
-    UNICODE_STRING deviceName;
-    RtlInitUnicodeString(&deviceName, L"\\Device\\BC250PSP");
-    
     status = IoCreateDevice(driverObject, sizeof(PSP_DEVICE_EXTENSION),
-                           &deviceName, FILE_DEVICE_UNKNOWN, 0, FALSE, &deviceObject);
-    if (!NT_SUCCESS(status)) {
-        KdPrint(("BC250-PSP: IoCreateDevice failed: 0x%08X\n", status));
-        return status;
-    }
+                           NULL, FILE_DEVICE_UNKNOWN, 0, FALSE, &fdo);
+    if (!NT_SUCCESS(status)) return status;
 
-    // Create symbolic link
-    UNICODE_STRING symLink;
-    RtlInitUnicodeString(&symLink, L"\\DosDevices\\BC250PSP");
-    status = IoCreateSymbolicLink(&symLink, &deviceName);
-    if (!NT_SUCCESS(status)) {
-        IoDeleteDevice(deviceObject);
-        return status;
-    }
-
-    devExt = (PPSP_DEVICE_EXTENSION)deviceObject->DeviceExtension;
+    devExt = fdo->DeviceExtension;
     RtlZeroMemory(devExt, sizeof(PSP_DEVICE_EXTENSION));
-    devExt->DeviceObject = deviceObject;
+    devExt->DeviceObject = fdo;
 
-    g_PspDeviceObject = deviceObject;
-    g_PspDevExt = devExt;
-
-    KdPrint(("BC250-PSP: Device created\n"));
-    return STATUS_SUCCESS;
-}
-
-NTSTATUS PspMapMmio(PPSP_DEVICE_EXTENSION devExt) {
-    // Try to map PSP MMIO at various addresses
-    PHYSICAL_ADDRESS pspMmioBases[] = {
-        {0xFE810000},  // GPU BAR + 0x10000
-        {0xFE820000},  // Alternative
-        {0xFE830000},  // Alternative
-    };
-
-    for (int i = 0; i < 3; i++) {
-        devExt->MmioBase = (PUCHAR)MmMapIoSpace(pspMmioBases[i], 0x4000, MmNonCached);
-        if (devExt->MmioBase) {
-            ULONG testVal = READ_REGISTER_ULONG((PULONG)devExt->MmioBase);
-            if (testVal != 0xFFFFFFFF && testVal != 0) {
-                KdPrint(("BC250-PSP: MMIO mapped at 0x%llX, test=0x%08X\n",
-                    pspMmioBases[i].QuadPart, testVal));
-                devExt->MmioPhysicalBase = pspMmioBases[i];
-                return STATUS_SUCCESS;
-            }
-            MmUnmapIoSpace(devExt->MmioBase, 0x4000);
-            devExt->MmioBase = NULL;
-        }
+    devExt->LowerDeviceObject = IoAttachDeviceToDeviceStack(fdo, physicalDeviceObject);
+    if (!devExt->LowerDeviceObject) {
+        IoDeleteDevice(fdo);
+        return STATUS_NO_SUCH_DEVICE;
     }
-    
-    return STATUS_UNSUCCESSFUL;
+
+    fdo->Flags |= DO_POWER_PAGABLE;
+    fdo->Flags &= ~DO_DEVICE_INITIALIZING;
+
+    KdPrint(("BC250-PSP: FDO attached\n"));
+    return STATUS_SUCCESS;
 }
 
 NTSTATUS PspUnload(PDRIVER_OBJECT driverObject) {
-    if (g_PspDevExt && g_PspDevExt->MmioBase) {
-        MmUnmapIoSpace(g_PspDevExt->MmioBase, 0x4000);
+    UNREFERENCED_PARAMETER(driverObject);
+
+    if (g_ControlDeviceObject) {
+        UNICODE_STRING symLink;
+        RtlInitUnicodeString(&symLink, L"\\DosDevices\\BC250PSP");
+        IoDeleteSymbolicLink(&symLink);
+        IoDeleteDevice(g_ControlDeviceObject);
     }
-    
-    UNICODE_STRING symLink;
-    RtlInitUnicodeString(&symLink, L"\\DosDevices\\BC250PSP");
-    IoDeleteSymbolicLink(&symLink);
-    
-    if (g_PspDeviceObject) {
-        IoDeleteDevice(g_PspDeviceObject);
-    }
-    
+
     KdPrint(("BC250-PSP: Unloaded\n"));
     return STATUS_SUCCESS;
 }
@@ -166,26 +187,37 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT driverObject, PUNICODE_STRING registryPath) 
     KdPrint(("BC250-PSP: DriverEntry\n"));
 
     driverObject->DriverUnload = PspUnload;
+    driverObject->DriverExtension->AddDevice = PspAddDevice;
 
-    // Create device
-    status = PspCreateDevice(driverObject);
-    if (!NT_SUCCESS(status)) return status;
+    for (ULONG i = 0; i <= IRP_MJ_MAXIMUM_FUNCTION; i++) {
+        driverObject->MajorFunction[i] = PspDispatchPassThrough;
+    }
+    driverObject->MajorFunction[IRP_MJ_CREATE] = PspDispatchCreateClose;
+    driverObject->MajorFunction[IRP_MJ_CLOSE] = PspDispatchCreateClose;
+    driverObject->MajorFunction[IRP_MJ_DEVICE_CONTROL] = PspDispatchDeviceControl;
+    driverObject->MajorFunction[IRP_MJ_PNP] = PspDispatchPnP;
+    driverObject->MajorFunction[IRP_MJ_POWER] = PspDispatchPower;
 
-    // Try to map PSP MMIO
-    status = PspMapMmio(g_PspDevExt);
-    if (!NT_SUCCESS(status)) {
-        KdPrint(("BC250-PSP: Cannot map PSP MMIO! NBIO firewall active?\n"));
-    } else {
-        // Initialize PSP
-        PspInit(g_PspDevExt);
+    {
+        UNICODE_STRING deviceName;
+        RtlInitUnicodeString(&deviceName, L"\\Device\\BC250PSP");
+        PDEVICE_OBJECT controlDevice;
+        status = IoCreateDevice(driverObject, 0, &deviceName,
+                               FILE_DEVICE_UNKNOWN, 0, FALSE, &controlDevice);
+        if (NT_SUCCESS(status)) {
+            UNICODE_STRING symLink;
+            RtlInitUnicodeString(&symLink, L"\\DosDevices\\BC250PSP");
+            status = IoCreateSymbolicLink(&symLink, &deviceName);
+            if (!NT_SUCCESS(status)) {
+                IoDeleteDevice(controlDevice);
+                return status;
+            }
+            g_ControlDeviceObject = controlDevice;
+            controlDevice->Flags &= ~DO_DEVICE_INITIALIZING;
+            KdPrint(("BC250-PSP: Control device created\n"));
+        }
     }
 
-    // Try to get device resources from PCI
-    KdPrint(("BC250-PSP: Firmware data - SOS=%u bytes, ASD=%u bytes, TA=%u bytes\n",
-        (ULONG)sizeof(g_SosFirmwareData),
-        (ULONG)sizeof(g_AsdFirmwareData),
-        (ULONG)sizeof(g_TaFirmwareData)));
-
-    KdPrint(("BC250-PSP: Driver loaded successfully\n"));
+    KdPrint(("BC250-PSP: Driver loaded\n"));
     return STATUS_SUCCESS;
 }

@@ -19,7 +19,7 @@ void Log(const char *fmt, ...) {
 }
 
 HANDLE OpenMyDriver() {
-    return CreateFileW(L"\\\\.\\AMDBC250DreamV43",
+    return CreateFileW(L"\\\\.\\BC250PSP",
         GENERIC_READ|GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
 }
 
