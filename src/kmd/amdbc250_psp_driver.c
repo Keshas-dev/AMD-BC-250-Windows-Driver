@@ -101,8 +101,9 @@ NTSTATUS PspDispatchPnP(PDEVICE_OBJECT deviceObject, PIRP irp) {
     switch (stack->MinorFunction) {
         case IRP_MN_START_DEVICE: {
             PCM_PARTIAL_RESOURCE_LIST resourceList = NULL;
-            if (stack->Parameters.StartDevice.AllocatedResources) {
-                resourceList = &stack->Parameters.StartDevice.AllocatedResources->List[0].PartialResourceList;
+            PCM_RESOURCE_LIST rawResources = stack->Parameters.StartDevice.AllocatedResources;
+            if (rawResources && rawResources->Count > 0) {
+                resourceList = &rawResources->List[0].PartialResourceList;
             }
             if (resourceList) {
                 devExt->BarCount = 0;
@@ -124,11 +125,15 @@ NTSTATUS PspDispatchPnP(PDEVICE_OBJECT deviceObject, PIRP irp) {
         case IRP_MN_STOP_DEVICE:
             KdPrint(("BC250-PSP: Device stopped\n"));
             break;
-        case IRP_MN_REMOVE_DEVICE:
+        case IRP_MN_REMOVE_DEVICE: {
+            PDEVICE_OBJECT lower = devExt->LowerDeviceObject;
             KdPrint(("BC250-PSP: Device removed\n"));
-            IoDetachDevice(devExt->LowerDeviceObject);
+            IoSkipCurrentIrpStackLocation(irp);
+            NTSTATUS st = IoCallDriver(lower, irp);
+            IoDetachDevice(lower);
             IoDeleteDevice(deviceObject);
-            break;
+            return st;
+        }
     }
 
     IoSkipCurrentIrpStackLocation(irp);
