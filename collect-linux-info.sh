@@ -2,7 +2,7 @@
 # AMD BC-250 Linux amdgpu info collection script
 # Runs on CachyOS and collects GPU/PSP/NBIO info
 
-OUTPUT_DIR="$HOME/bc250-linux-info"
+OUTPUT_DIR="./bc250-linux-info"
 mkdir -p "$OUTPUT_DIR"
 
 echo "=== AMD BC-250 Linux amdgpu Info Collection ==="

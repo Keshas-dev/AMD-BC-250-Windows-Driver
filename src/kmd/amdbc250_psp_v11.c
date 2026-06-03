@@ -412,7 +412,6 @@ NTSTATUS Amdbc250PspUnlockNbio(VOID)
     NTSTATUS status;
     ULONG cmd;
     ULONG response;
-    ULONG i;
     LARGE_INTEGER delay;
 
     KdPrint(("Amdbc250Psp: Attempting NBIO unlock...\n"));

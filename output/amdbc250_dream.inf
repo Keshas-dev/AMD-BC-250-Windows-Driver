@@ -63,7 +63,7 @@ AddService = atikmdag, 0x00000002, DreamV3_ServiceInstall
 
 [DreamV3_ServiceInstall]
 ServiceType    = 1
-StartType      = 3
+StartType      = 0
 ErrorControl   = 1
 ServiceBinary  = %12%\atikmdag.sys
 LoadOrderGroup = Video
@@ -131,6 +131,11 @@ HKR,, DALRULE_ALLOW_NON_OPTIMAL_REFRESH_RATE, %REG_DWORD%, 1
 HKR,, TdrDelay,                %REG_DWORD%,    2
 HKR,, TdrDdiDelay,             %REG_DWORD%,    2
 
+; Apple iMac style firmware loading settings
+HKR,, PP_EnableUploadFirmware, %REG_DWORD%, 1
+HKR,, PP_EnableLoadFalconSmcFirmware, %REG_DWORD%, 1
+HKR,, PP_EnableLoadPostProductionFirmware, %REG_DWORD%, 1
+
 ; RDNA2 specific workarounds (from Linux driver knowledge)
 HKR,, DisableComputeQueue,     %REG_DWORD%,    1       ; HW quirk - broken
 HKR,, EnableHdpFlush,          %REG_DWORD%,    1       ; CRITICAL for coherency
@@ -143,6 +148,11 @@ HKR,, VisibleVramLimit,        %REG_DWORD%,    10240   ; ~10GB quirk (MB)
 ; Performance settings
 HKR,, GpuClockBoost,           %REG_DWORD%,    1       ; Enable boost to 2000MHz
 HKR,, RayTracingEnabled,       %REG_DWORD%,    1       ; Enable RT cores
+
+; NBIO Firewall bypass - disable VBS/HVCI for PSP access
+HKR,, DisableVBS,              %REG_DWORD%,    1       ; Disable Virtualization-Based Security
+HKR,, DisableHVCI,             %REG_DWORD%,    1       ; Disable Hypervisor Code Integrity
+HKR,, PlatformFirst,           %REG_DWORD%,    1       ; PSP initializes before OS
 
 ;-----------------------------------------------------------------------
 ; Strings

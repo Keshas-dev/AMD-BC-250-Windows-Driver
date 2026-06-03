@@ -43,8 +43,8 @@ static PDREAM_V3_DEVICE_EXTENSION g_PciDevExt = NULL;
 /* Shared memory communication with Vulkan ICD */
 static PVOID g_SharedBuffer = NULL;
 static SIZE_T g_SharedBufferSize = 64 * 1024;  /* 64KB */
-static HANDLE g_CmdReadyEvent = NULL;
-static HANDLE g_CmdDoneEvent = NULL;
+static KEVENT g_CmdReadyEvent;
+static KEVENT g_CmdDoneEvent;
 static PVOID g_SharedSectionObject = NULL;
 
 /* Stored DDI initialization data */
