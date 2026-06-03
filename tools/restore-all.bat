@@ -9,8 +9,12 @@ pause
 
 echo.
 echo [1/7] Removing advanced boot options (F8 menu fix)...
-bcdedit /deletevalue advancedoptions
-if %errorlevel% equ 0 (echo   OK) else (echo   FAILED)
+bcdedit /set bootmenupolicy Standard
+if %errorlevel% equ 0 (echo   OK) else (
+  echo   Trying alternative method...
+  bcdedit /deletevalue advancedoptions
+  if %errorlevel% equ 0 (echo   OK) else echo   FAILED
+)
 
 echo.
 echo [2/7] Restoring Hypervisor...
