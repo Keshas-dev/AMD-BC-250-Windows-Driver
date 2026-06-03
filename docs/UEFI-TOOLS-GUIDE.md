@@ -29,14 +29,31 @@ Search for "GRUB modded shell with setup_var"
 3. Ctrl+F -> Text -> Search for "IOMMU", "PSP", "NBIO"
 4. Extract the Setup module as setup.bin
 
-### Step 2: Convert with IFRExtractor
-1. Drag setup.bin onto ifrextractor.exe
-2. Open setup.txt
-3. Search for:
-   - IOMMU -> find VarOffset
-   - PSP Support -> find VarOffset
-   - NBIO -> find VarOffset
-   - DMA Protection (DEV) -> find VarOffset
+## Steps without IFRExtractor (simpler approach)
+
+### Option A: Search in UEFITool directly
+1. Open UEFITool
+2. Load BIOS file (BC250_3.00_CHIPSETMENU.ROM)
+3. Click the "Information" dock/panel (bottom area)
+4. Navigate the tree to find "Setup" or "SetupUtility" section
+5. In Information panel, look for "VarStore" entries
+6. Search for text strings like "IOMMU", "PSP", "NBIO" 
+7. Note the VarOffset values found
+
+### Option B: Use UEFI Shell to explore
+Boot to UEFI Shell and use:
+```
+dmpstore -all > fs0:\vars.txt  (dump all variables)
+```
+Then search the output for IOMMU/PSP related variables.
+
+### Common VarOffset values (from AMI BIOS):
+- IOMMU: often at 0x1A2 or 0x1A3
+- PSP Support: often at 0x4F2 or similar
+- fTPM: often at 0x4F1 or similar
+- DMA Protection: often near 0x1A0-0x1AF range
+
+These are EXAMPLE values only - actual offsets depend on BIOS version.
 
 ### Step 3: Create UEFI Shell USB
 1. Format USB as FAT32
