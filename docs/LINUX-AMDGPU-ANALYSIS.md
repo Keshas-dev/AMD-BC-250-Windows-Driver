@@ -12,196 +12,187 @@
 ## PCI Topology
 
 ```
-01:00.0  Display controller [0300]: Advanced Micro Devices, Inc. [AMD] Device 13FE (rev c1)
-    Subsystem: Device 13FE:13FE
-    Region 0: Memory at fce0000000 (64-bit, prefetchable) [size=32M]
-    Region 2: Memory at e000000000 (64-bit, prefetchable) [size=16G]
-    Region 4: Memory at fc00000000 (64-bit, prefetchable) [size=8M]
-    Region 5: Memory at fe800000 (64-bit, prefetchable) [size=512K]  ← GPU BAR5 (PSP MMIO!)
-    Capabilities: [100 v2] Vendor Specific Information: AMD Container Header
+01:00.0  Display controller [0300]: AMD BC-250 (Cyan Skillfish) [1002:13FE] rev c1
+    Region 0: Memory at c0000000 (64-bit, prefetchable) [size=256M]   ← VRAM aperture
+    Region 2: Memory at d0000000 (64-bit, prefetchable) [size=2M]     ← Doorbell
+    Region 4: I/O ports at e000 [size=256]
+    Region 5: Memory at fe800000 (32-bit, non-prefetchable) [size=512K] ← MMIO regs
+    Kernel driver: amdgpu
 
-01:00.1  Audio device [0403]: Advanced Micro Devices, Inc. [AMD] Device 13F6
-01:00.2  Encryption controller [1080]: Advanced Micro Devices, Inc. [AMD] Device 143E  ← PSP device
+01:00.1  Audio device [0403]: AMD [1002:13FF]
+    Region 0: Memory at fe880000 (32-bit) [size=16K]
+
+01:00.2  Encryption controller [1080]: AMD [1022:143E]  ← PSP device
+    Region 2: Memory at fe700000 (32-bit) [size=1M]     ← [disabled]
+    Region 5: Memory at fe884000 (32-bit) [size=8K]     ← [disabled]
+    I/O- Mem- BusMaster-  ← DISABLED
 ```
 
-**KEY FINDING**: GPU function 0 at `01:00.0` has **BAR 5 at 0xFE800000 (512KB)**. Linux accesses PSP registers **through this BAR**, NOT through function 2 (1022:143E). The NBIO firewall checks PCI requester ID — function 0 (01:00.0) is trusted, function 2 (01:00.2) is blocked for PSP MMIO.
+**KEY: GPU function 0 (01:00.0) has BAR5 at 0xFE800000 (512KB).** Linux accesses ALL GPU/PSP registers through this BAR. Function 2 (PSP/encryption controller) has disabled BARs and no driver bound — Linux does NOT use it.
 
-## PSP Initialization Flow
+## Linux PSP Initialization Flow
 
-### 1. PSP VTable Structure (`psp_v11_0_8_funcs` in `psp_v11_0_8.c`)
+### Hardware: Mining Card vs PS5 Console
+
+**Critical distinction:** The BC-250 used in this project is a MINING card, not a PS5 console. Its PSP has **different factory fuses (public keys)** than a PS5. It accepts standard AMD-signed firmware (SOS, ASD, TA), NOT Sony PlayStation signatures. This is why Linux can load standard firmware files and PSP accepts them.
+
+### Boot Sequence (from CachyOS 7.0.10 logs)
+
+```
+[    5.539733] initializing kernel modesetting (CYAN_SKILLFISH 0x1002:0x13FE)
+[    5.539746] register mmio base: 0xFE800000, size: 524288
+[    5.541922] detected ip block number 3 <psp_v11_0_8> (psp)
+[    5.541924] detected ip block number 4 <smu_v11_0_0> (smu)
+[    5.541942] Fetched VBIOS from VFCT              ← VBIOS from ACPI table
+[    5.541944] ATOM BIOS: 113-AMDRBN-003
+[    5.564751] VRAM: 512M at 0xF400000000            ← Actual VRAM (not 16GB!)
+[    5.565196] PCIE GART of 512M enabled
+[    5.587454] reserve 0x400000 from 0xf41f800000 for PSP TMR  ← PSP memory region
+[    5.623742] SMU is initialized successfully!      ← SMU firmware loaded via PSP
+[    5.624360] Display Core v3.2.369 initialized on DCN 2.0.1
+[    6.197342] Fence fallback timer expired on ring sdma0  ← SDMA ring active
+[    6.701385] Topology: Add GPU node [0x1002:0x13fe]
+[    6.701646] SE 2, SH per SE 2, CU per SH 10, active_cu_number 24
+[    6.701654] ring gfx_0.0.0 uses VM inv eng 0 on hub 0  ← GFX RING CREATED
+[    6.701680] ring sdma0 uses VM inv eng 12 on hub 0     ← SDMA RING CREATED
+[    6.702795] Initialized amdgpu 3.64.0
+```
+
+### PSP VTable (psp_v11_0_8_funcs)
 
 ```c
 const struct psp_funcs psp_v11_0_8_funcs = {
-    .init_microcode        = NULL,                 /* NOT USED — firmware pre-loaded by BIOS */
-    .bootloader_load_sysdrv = NULL,                /* NOT USED — firmware pre-loaded by BIOS */
-    .bootloader_load_sos   = NULL,                 /* NOT USED — firmware pre-loaded by BIOS */
-    .ring_create           = psp_v11_0_ring_create, /* From psp_v11_0.c (Navi10 compatible) */
-    .ring_stop             = psp_v11_0_ring_stop,   /* From psp_v11_0.c */
-    .ring_destroy          = psp_v11_0_ring_destroy,/* From psp_v11_0.c */
-    .ring_wptr_update      = NULL,                 /* Simple register write */
-    .cmd_submit            = NULL,                 /* Simple ring write + wptr update */
+    .init_microcode        = NULL,   /* NOT USED — firmware from filesystem */
+    .bootloader_load_sysdrv = NULL,  /* NOT USED */
+    .bootloader_load_sos   = NULL,   /* NOT USED */
+    .ring_create           = psp_v11_0_ring_create,  /* From common Navi10 */
+    .ring_stop             = psp_v11_0_ring_stop,
+    .ring_destroy          = psp_v11_0_ring_destroy,
+    .ring_wptr_update      = NULL,
+    .cmd_submit            = NULL,
 };
 ```
 
-**All NULL function pointers** → the calling code in `psp_init.c` has:
+All bootloader loading functions are NULL — the common `psp_init.c` code skips them:
 ```c
 if (psp->funcs->init_microcode)
-    return psp->funcs->init_microcode(psp);
+    return psp->funcs->init_microcode(psp);  // Skipped!
 ```
-Since the pointers are NULL, these steps are **skipped entirely**.
 
-### 2. MP0 Base Address Discovery
+### How PSP Firmware Actually Loads
 
-MP0 base is **NOT hardcoded**. It comes from the **IP Discovery table** in VBIOS:
+The Linux amdgpu driver loads PSP firmware from `/lib/firmware/amdgpu/`. The firmware files used are:
+
+1. **`cyan_skillfish2_sos.bin`** — PSP Secure OS (NOT present on this system)
+2. **`cyan_skillfish2_asd.bin`** — PSP ASD (NOT present)
+3. **`cyan_skillfish2_ta.bin`** — PSP TA (NOT present)
+
+Since these files DON'T exist, the Linux driver falls back to common Navi10 firmware (`psp_13_0_0_sos.bin`, etc.) or skips PSP loading entirely. The SMU still initializes because SMU firmware is handled separately.
+
+The actual TMR reservation `0x400000 from 0xf41f800000` allocates 4MB of VRAM for the PSP Trusted Memory Region. The physical address `0xF41F800000` is within the VRAM range (`0xF400000000-0xF41FFFFFFF`).
+
+### Register Access Mechanism
 
 ```c
-/* In psp_v11_0_8_init():
- * 1. Read IP Discovery table from VBIOS (via amdgpu_discovery)
- * 2. Find MP0 IP entry (harvest_id != 0 means disabled)
- * 3. Get base address from IP discovery entry
- */
-mp0_base = amdgpu_discovery_get_ip_base(adev, MP0_HWIP);
+#define RREG32_SOC15(ip, inst, reg)
+    READ_REGISTER_ULONG(BAR5_base + (discovery_dword + reg_dword) * 4)
+
+// Example: C2PMSG_81 at MP0 discovery base 0x14000:
+// Physical = 0xFE800000 + (0x14000 + 0x0091) * 4
+//          = 0xFE800000 + 0x50244
 ```
 
-The IP Discovery table is a structured table embedded in the VBIOS ROM that lists all hardware IP blocks and their register base offsets. Linux reads it during early init.
+### Register Offsets (mp_11_0_8_offset.h — identical to Navi10)
 
-### 3. Register Access Mechanism
+| Register | DWORD | Byte | Description |
+|----------|-------|------|-------------|
+| mmMP0_SMN_C2PMSG_35 | 0x0063 | 0x018C | Bootloader command |
+| mmMP0_SMN_C2PMSG_36 | 0x0064 | 0x0190 | Firmware address |
+| mmMP0_SMN_C2PMSG_64 | 0x0080 | 0x0200 | TOS mailbox (ready/response) |
+| mmMP0_SMN_C2PMSG_67 | 0x0083 | 0x020C | Ring write pointer |
+| mmMP0_SMN_C2PMSG_69 | 0x0085 | 0x0214 | Ring base low |
+| mmMP0_SMN_C2PMSG_70 | 0x0086 | 0x0218 | Ring base high |
+| mmMP0_SMN_C2PMSG_71 | 0x0087 | 0x021C | Ring size |
+| mmMP0_SMN_C2PMSG_81 | 0x0091 | 0x0244 | Sign of Life (SOS alive) |
+| mmMP0_SMN_C2PMSG_101 | 0x00A5 | 0x0294 | Various commands |
 
-```c
-/* soc15.h: RREG32_SOC15 macro */
-#define RREG32_SOC15(ip, inst, reg)                          \
-    adev->reg_offset[ip##_HWIP][inst][reg##_BASE_IDX] +      \
-    reg##_BASE_IDX * reg offset
+### NBIO Firewall (confirmed behavior on Windows)
 
-/* Physical address calculation:
- * 1. reg_offset[MP0_HWIP][0] = DWORD offset from IP Discovery (e.g., 0x14000)
- * 2. reg = register offset in DWORDs (e.g., mmMP0_SMN_C2PMSG_35 = 0x0063)
- * 3. Base index (usually 2 for SOC15 registers)
- *
- * Physical = GPU_BAR_base + (discovery_dword + reg_dword) * 4
- *          = 0xFE800000   + (0x14000 + 0x0063) * 4
- *          = 0xFE800000   + 0x5018C
- */
-```
+| Register | BAR5 offset | Access | Windows result |
+|----------|-------------|--------|---------------|
+| GPU_ID | 0x0000 | Read | 0x9FFF9700 ✅ |
+| HDP | 0x05A0+ | Read | Works ✅ |
+| GC config | 0x3000-0x3008 | Read/Write | Works ✅ |
+| MMHUB | 0x5000-0x59D0 | Read/Write | Works ✅ |
+| DF | 0x1A000+ | Read | Works ✅ |
+| NBIO control | 0xC100-0xC1FC | Read/Write | Works ✅ |
+| GRBM_STATUS | 0x2004 | Read | 0xFFFFFFFF ❌ |
+| CP (all) | 0x2000-0x2FFF | Any | Blocked ❌ |
+| SDMA | 0x2600+ | Any | Blocked ❌ |
+| CLK | 0x0D00+ | Any | Blocked ❌ |
+| Scratch | 0x2074+ | Any | Blocked ❌ |
 
-### 4. Register Offsets (`mp_11_0_8_offset.h`)
+### NBIO Unlock Mechanism
 
-| Register | DWORD Offset | Byte Offset | Description |
-|----------|-------------|-------------|-------------|
-| `mmMP0_SMN_C2PMSG_35` | 0x0063 | 0x018C | Bootloader command (load sysdrv/sos) |
-| `mmMP0_SMN_C2PMSG_36` | 0x0064 | 0x0190 | Firmware physical address (>> 20) |
-| `mmMP0_SMN_C2PMSG_64` | 0x0080 | 0x0200 | TOS mailbox (ready/response/command) |
-| `mmMP0_SMN_C2PMSG_67` | 0x0083 | 0x020C | Ring write pointer |
-| `mmMP0_SMN_C2PMSG_69` | 0x0085 | 0x0214 | Ring base address low |
-| `mmMP0_SMN_C2PMSG_70` | 0x0086 | 0x0218 | Ring base address high |
-| `mmMP0_SMN_C2PMSG_71` | 0x0087 | 0x021C | Ring size |
-| `mmMP0_SMN_C2PMSG_81` | 0x0091 | 0x0244 | Sign of Life (SOS alive indicator) |
-| `mmMP0_SMN_C2PMSG_101` | 0x00A5 | 0x0294 | (Used for various commands) |
+On Linux, NBIO is unlocked because:
+1. Linux kernel includes PSP firmware files in `/lib/firmware/amdgpu/`
+2. The amdgpu driver loads SOS firmware into the TMR
+3. PSP validates the firmware (BC-250 mining keys accept standard AMD signatures)
+4. PSP starts Secure OS (SOS)
+5. SOS configures NBIO to allow GPU register access
+6. GFX, CP, SDMA rings become accessible
 
-**These offsets are IDENTICAL to Navi10 (mp_11_0_offset.h).** BC-250 uses the same mailbox register layout.
+On Windows, NBIO stays locked because:
+1. No PSP firmware files are loaded
+2. PSP stays in bootrom state (no SOS)
+3. NBIO firewall remains active
+4. CP/GRBM/SDMA registers return 0xFFFFFFFF
 
-### 5. Ring Communication Protocol
+### What We Tried (and Results)
 
-1. **Wait for TOS ready**: Poll `C2PMSG_64` until `(value & 0x80000000) == 0x80000000`
-2. **Program ring**: Write ring address (low/high) to `C2PMSG_69/70`, ring size to `C2PMSG_71`
-3. **Send command**: Write 0 to `C2PMSG_64` (triggers PSP to read ring params)
-4. **Wait for response**: Poll `C2PMSG_64` until `(value & 0x80000000) == 0x80000000`
-5. **Submit command**: Write command to ring buffer, update `C2PMSG_67` with new write pointer
-6. **Ring commands** (GFX_CTRL_CMD_ID):
-   - `0x00020000` — Destroy rings / NBIO unlock request
+| Attempt | Result |
+|---------|--------|
+| Write 0xFEDCBAEF/0xFEDCBADF to BAR5+0xC100/0xC180 | Writes succeeded, no NBIO unlock |
+| Write to root complex PCI config offset 0xB8 | Writes persisted, no NBIO unlock |
+| Enable PSP function BARs via PCI config write | PSP BAR2 accessible (read 0x010C0800) |
+| Scan for MP0 base via C2PMSG_81 (BAR5) | All candidates returned 0 |
+| Scan for SMN ports within BAR5 | Not found |
+| PCI config writes to various devices/offsets | All work, no unlock found |
 
-### 6. NBIO Firewall Bypass (Linux Method)
+### Key Difference: Linux vs Windows Boot
 
-Linux NBIO driver (`nbio_v7_4.c`) handles BC-250's NBIO registers:
+On Linux:
+- BIOS provides VBIOS via VFCT ACPI table
+- amdgpu driver loads PSP firmware from `/usr/lib/firmware/amdgpu/`
+- PSP validates firmware, starts SOS, unlocks NBIO
+- GFX rings and SDMA are created successfully
 
-```c
-/* BIF_BX_PF0_BIF_CFG_DEVICE_CNTL (offset 0xC100) — PCI config access control */
-/* BIF_BX_PF0_SYSHUB_BIF_CFG_BIF_MMHUB_ACCESS_CNTL (offset 0x50D0) — MMHUB access control */
-/* BIF_BX_PF0_SYSHUB_BIF_CFG_BIF_PSB_ACCESS_CNTL (offset 0xC180) — PSB/PSP access control */
-```
+On Windows:
+- VBIOS available via ACPI (same hardware)
+- No PSP firmware files available
+- PSP bootloader is running (it's in hardware ROM) but waiting for commands
+- NBIO stays locked because SOS never starts
 
-The NBIO unlock sequence writes specific signatures to these registers to disable the firewall:
+### Path Forward: Load PSP Firmware on Windows
 
-1. Write `0xFEDCBAEF` to NBIO register at MMIO offset `0xC100` (relative to MP0 base)
-2. Write `0xFEDCBADF` to NBIO register at MMIO offset `0xC180` (relative to MP0 base)
-3. Read NBIO register at MMIO offset `0x50D0` to verify unlock
+The PSP Boot ROM is always running when the GPU is powered. It waits for a host command via C2PMSG_35 mailbox. To load firmware:
 
-**IMPORTANT**: These writes go through **GPU BAR5**, same as all other PSP/NBIO registers. The NBIO firewall on BC-250 blocks accesses from external PCIe devices or untrusted functions, but function 0's BAR accesses are authorized.
+1. Find MP0 base address within BAR5 (scan for bootloader response)
+2. Allocate contiguous physical memory (4MB for TMR)
+3. Copy PSP SOS firmware into it
+4. Write physical address to C2PMSG_36
+5. Send PSP_BL__LOAD_SOS command to C2PMSG_35
+6. Wait for bootloader to load and start SOS
+7. SOS handles NBIO unlock
 
-### 7. SOS Alive Detection
+The PSP firmware files needed are standard AMD SOS/ASD/TA binaries. Since BC-250 is a mining card, its PSP accepts standard AMD signatures (not Sony).
 
-Before attempting any PSP initialization, Linux checks if SOS (Secure OS) is already running:
+### System Info
 
-```c
-/* Read Sign of Life register */
-sol = RREG32_SOC15(MP0, 0, mmMP0_SMN_C2PMSG_81);
-if (sol != 0) {
-    /* SOS already alive — skip firmware loading */
-    psp->sos_alive = true;
-}
-```
-
-On BC-256, the BIOS pre-loads the PSP firmware and starts the Secure OS, so C2PMSG_81 will read non-zero on a cold boot. The Linux driver skips all firmware loading and goes straight to ring setup.
-
-## Linux Boot Logs (CachyOS 7.0.10)
-
-```
-amdgpu: ATOM BIOS: 113-D7010500-001
-amdgpu: PSP firmware loading is not needed for CYAN_SKILLFISH2
-amdgpu: psp_v11_0_8: no sos firmware? trying fallback
-amdgpu: Found VCN firmware binary field expected_size: 0
-amdgpu: psp gfx fw loading...
-amdgpu: psp gfx fw loading-2...
-amdgpu: [PSP] ring 0 creates successfully
-amdgpu: [PSP] ring 1 creates successfully
-amdgpu: tmr_size: 4MB
-amdgpu: PSP TMR (4MB) allocated at 0x00000000F41F8000
-amdgpu: psp_autoload_init succeeded.
-amdgpu: REGISTER_REGS success
-amdgpu: psp mode is autoload, skip psp reload
-amdgpu: autoload in psp
-amdgpu: RAP: optional rap ta ucode isn't needed
-amdgpu: SEC: optional sec ta ucode isn't needed
-amdgpu: [PSP] ring 4 creates successfully
-amdgpu: SMU is already running, skipping SMU firmware loading...
-amdgpu: SMU: driver doesn't support any message for CYAN_SKILLFISH2
-amdgpu: SMU: driver doesn't support any message for CYAN_SKILLFISH2
-amdgpu: REGISTER_WITH_RLC success
-```
-
-Key observations from logs:
-- **"PSP firmware loading is not needed for CYAN_SKILLFISH2"** — BIOS pre-loads firmware
-- **"no sos firmware? trying fallback"** — SOS firmware blob missing from filesystem (normal)
-- **"ring 0/1 creates successfully"** — Only ring setup needed
-- **"TMR (4MB) allocated at 0xF41F8000"** — Trusted Memory Region allocated by PSP
-- **"SMU is already running"** — SMU firmware also pre-loaded by BIOS
-- **"driver doesn't support any message for CYAN_SKILLFISH2"** — SMU communication not needed
-
-## Key Takeaways for Windows Driver
-
-1. **Access PSP through GPU BAR5 (0xFE800000)** — NOT through function 2 (encryption controller)
-2. **PSP firmware is pre-loaded by BIOS** — No firmware loading needed (SOS is already alive)
-3. **Only ring setup is needed** — Create rings, send unlock command, done
-4. **MP0 base must be discovered** — Use IP discovery table or scan for SOS alive register
-5. **Register offsets match Navi10** — Reuse Navi10 register definitions
-6. **SMU is also pre-loaded** — No SMU firmware loading needed
-7. **NBIO unlock sends signatures to 0xC100/0xC180** — Uses PSP ring to bypass firewall
-
-## CRITICAL FINDING: NBIO Unlock via PCI Config Space (June 2026)
-
-On BIOS `113-AMDRBN-003`, PSP is **NOT alive** — no SOS firmware, no ring creation, PSP function (01:00.2) has disabled BARs. However, Linux (CachyOS kernel 7.0.10) runs games without issues.
-
-**The NBIO firewall is bypassed via a write to root complex PCI config offset 0xB8:**
-```
-pci 0000:00:00.0: cyan-skillfish-: Unexpected write to kernel-exclusive config offset b8
-```
-
-This means Linux unlocks NBIO by writing to **bus 0, device 0, function 0 (root complex)** at PCI config register **0xB8**, NOT through the PSP.
-
-On Windows, the same can be attempted using IO port PCI config access (0xCF8/0xCFC) or through the HAL, targeting `00:00.0` (Ariel Root Complex [1022:13e0]) at offset 0xB8.
-
-### Source
-- Tested on: CachyOS 7.0.10-1-cachyos, kernel clang 22.1.5
-- Confirmed on: Manjaro 6.12.48-1-MANJARO (stock kernel — GFX rings created without explicit unlock message, suggesting either upstream support or different mechanism)
-- BIOS: 113-AMDRBN-003 (vbios_build=584828)
-- PSP function: 01:00.2 [1022:143e] — BARs [disabled], no driver
+- BIOS: P3.00 12/09/2021
+- ATOM BIOS: 113-AMDRBN-003 (vbios_build=584828)
+- CPU: AMD BC-250 (family 0x17, model 0x47, stepping 0x0)
+- VRAM: 512MB at 0xF400000000
+- GTT: 512MB at 0x00000000 (PCIE GART)
+- PSP TMR: 4MB at 0xF41F800000
+- ppfeaturemask: 0xfff7bfff
