@@ -1,146 +1,70 @@
-# AMD BC-250 Dream Drivers v3.0 — Build Status Report
+# AMD BC-250 Dream Drivers — Build Status
 
-> NOTE: This build report is historical. Current workspace root is `c:\AMD-BC-250-Windows-Driver` and active build work may use updated UMD/KMD versions.
-
-## 📊 Build Environment
+## Build Environment
 
 | Component | Status | Version |
 |-----------|--------|---------|
-| **MSVC Compiler** | ✅ Found | 19.44.35225 (VS 2022 Community) |
-| **Windows SDK** | ✅ Found | 10.0.26100.0 |
-| **WDK** | ⚠️ Partial | Headers found, build tools missing |
-| **Inf2Cat** | ✅ Found | 10.0.22621.0 |
-| **Kernel Mode Headers** | ✅ Found | 10.0.26100.0/km |
-| **Kernel Mode Libs** | ✅ Found | 10.0.26100.0/km/x64 |
+| **MSVC Compiler** | ✅ | 19.44.35225 (VS 2022 Community) |
+| **Windows SDK/WDK** | ✅ | 10.0.26100.0 |
+| **Inf2Cat** | ✅ | 10.0.26100.0 |
+| **Signtool** | ✅ | 10.0.26100.0 |
+| **Test Certificate** | ✅ | CN=AMD-BC250-Signer (Root + TrustedPublisher) |
 
-## 🔨 Build Attempt Results
+## Build Method
 
-### Attempt 1: WDK Build Environment
-```
-Status: ❌ Failed
-Reason: BuildEnv.cmd not found
-Details: WDK installed but build environment scripts missing
-```
+Direct MSVC compilation via `build.bat` (no WDK build environment needed):
+- WDK headers + libraries from Windows Kit 10.0.26100.0
+- Kernel mode flags: `/kernel /DAMD64 /DAMDBC250_DREAM_V3`
+- Link: `/DRIVER /SUBSYSTEM:NATIVE /ENTRY:DriverEntry`
 
-### Attempt 2: Direct MSVC Compilation
-```
-Status: ❌ Failed
-Error: fatal error C1083: Cannot open include file: 'excpt.h'
-Reason: MSVC /kernel mode requires additional CRT headers
-Details: excpt.h is in UCRT headers, not in KM include path
-```
+## Source Files Compiled into atikmdag.sys
 
-### Attempt 3: Inf2Cat CAT Generation
-```
-Status: ❌ Failed
-Error: No installation INF found in root path
-Reason: INF file must be in output directory root for Inf2Cat
-```
+| File | Purpose | Status |
+|------|---------|--------|
+| `amdbc250_dream_kmd.c` | DriverEntry, IOCTL dispatch, WDDM callbacks | ✅ |
+| `amdbc250_dream_hw_init.c` | GPU init, rings, display, PSP init (Step 9) | ✅ |
+| `amdbc250_dream_power.c` | Power/thermal management | ✅ |
+| `amdbc250_dream_vm.c` | GPUVM, GART, page tables | ✅ |
+| `amdbc250_psp_v11.c` | PSP: GPU BAR5 map, MP0 discovery, NBIO unlock | ✅ |
 
-## 📁 Source Files Status
+## Signing
 
-| File | Size | Status |
-|------|------|--------|
-| `src\kmd\amdbc250_dream_kmd.c` | 34 KB | ✅ Ready |
-| `src\kmd\amdbc250_dream_hw_init.c` | 26.7 KB | ✅ Ready |
-| `inc\amdbc250_dream_hw.h` | 26.8 KB | ✅ Ready |
-| `inc\amdbc250_dream_kmd.h` | 14.6 KB | ✅ Ready |
-| `src\kmd\SOURCES` | 0.6 KB | ✅ Ready |
-| `src\kmd\makefile` | 0.3 KB | ✅ Ready |
-| `inf\amdbc250_dream.inf` | 4.6 KB | ✅ Ready |
+- Signed with `CN=AMD-BC250-Signer` (self-signed test certificate)
+- Certificate in: `LocalMachine\Root` + `LocalMachine\TrustedPublisher`
+- Both `atikmdag.sys` and `amdbc250_dream.cat` are signed
+- Test signing: `bcdedit /set testsigning on`
 
-**Total Source Code:** ~103 KB (~3000+ lines)
+## Output (498 KB)
 
-## 🚧 What's Needed to Successfully Build
+`output\atikmdag.sys` — single driver with PSP logic integrated.
+No separate `amdbc250_psp.sys` — PSP is compiled INTO the dream driver.
 
-### Option 1: Full WDK Installation (Recommended)
-```
-1. Install Visual Studio 2022 with:
-   - Desktop development with C++
-   - Windows Driver Kit (WDK) extension
+## PSP Integration (new in v4.3)
 
-2. Download WDK from:
-   https://docs.microsoft.com/en-us/windows-hardware/drivers/download-the-wdk
+PSP initialization runs automatically during `DreamV3HwInitialize()` as Step 9:
+1. Map GPU BAR5 (0xFE800000)
+2. Discover MP0 base by scanning DWORD offsets for SOS alive signal (C2PMSG_81)
+3. If SOS alive, create PSP rings and attempt NBIO unlock via 0xC100/0xC180
+4. All non-fatal — driver continues if PSP unavailable
 
-3. After installation:
-   - Open "Developer Command Prompt for VS 2022"
-   - Navigate to: src\kmd
-   - Run: build -cZg
+Based on Linux amdgpu `psp_v11_0_8.c` analysis — see `docs/LINUX-AMDGPU-ANALYSIS.md`.
+
+## Installation
+
+1. `bcdedit /set testsigning on` + reboot (one-time)
+2. Build: `build.bat`
+3. Device Manager → Update driver → Browse to `output\` → Select INF
+4. Reboot
+
+## Test
+
+```cmd
+output\safe-test.exe        # Basic IOCTL tests (no PSP)
+output\test-psp-init.exe    # PSP init + SOS detection
 ```
 
-### Option 2: Fix Current MSVC Build
-```
-Issue: excpt.h missing
-Fix: Add UCRT include path:
-  /I"C:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\ucrt"
+## Notes
 
-Also need to add kernel-mode libraries for linking:
-  dxgkrnl.lib from: C:\Program Files (x86)\Windows Kits\10\Lib\10.0.26100.0\km\x64
-```
-
-### Option 3: Use Pre-built Binaries
-```
-Extract from Adrenalin 18.5.1 installer:
-1. Run: amdwrest.exe -extract:C:\temp\amd
-2. Copy atikmdag.sys, atikmpag.sys to output directory
-3. Use our INF file for installation
-```
-
-## 📝 Next Steps
-
-### Immediate (To Get Working Driver)
-1. **Easiest:** Use existing Adrenalin 18.5.1 binaries with our INF
-   - Legacy staging files were expected in `..\test-build\staging-18.5.1\` if available
-   - Just need to copy + install via Device Manager
-
-2. **Medium:** Fix MSVC compilation by adding UCRT headers
-   - Edit compile-kmd.ps1 to add UCRT include path
-   - Re-run compilation
-
-3. **Best:** Install full WDK and build properly
-   - Guarantees proper kernel-mode driver
-   - Can sign with test certificate
-
-### Long-Term (Complete Driver Stack)
-- [ ] UMD (User-Mode Driver) implementation
-- [ ] D3D11 native rendering
-- [ ] Vulkan integration
-- [ ] Full display engine (VidPN)
-- [ ] Power management (DPM)
-
-## 💡 Key Learnings from Build Attempt
-
-1. **WDK is Complex**: Requires proper environment setup
-2. **MSVC /kernel flag**: Needs special include order (KM headers first, then UCRT)
-3. **Inf2Cat Quirks**: INF must be in root of output directory
-4. **Source Code is Ready**: All ~3000 lines compile-ready, just need proper build env
-
-## ✅ What We Successfully Created
-
-1. ✅ **Complete source code** (~3000 lines of RDNA2 driver code)
-2. ✅ **Proper hardware definitions** (GFX1013 correct registers)
-3. ✅ **WDDM DDI callbacks** (all required callbacks implemented)
-4. ✅ **Hardware initialization** (correct RDNA2 init sequence)
-5. ✅ **HDP coherency flush** (critical Linux quirk implemented)
-6. ✅ **Golden register programming** (hardware workarounds)
-7. ✅ **Thermal monitoring** (with auto-throttle)
-8. ✅ **64-bit fences** (GFX10 requirement)
-9. ✅ **Installation INF** (complete with registry settings)
-10. ✅ **Documentation** (README + PILNAS-APRASAS.md)
-
-## 🎯 Conclusion
-
-**Dream Drivers v3.0 source code is COMPLETE and CORRECT.**
-
-The only barrier is **build environment setup** — the code itself is ready to compile 
-once proper WDK environment is configured.
-
-**Recommended next action:**
-Use existing Adrenalin 18.5.1 binaries with our custom INF file 
-(amdbc250_dream.inf) for immediate testing, then build from source later.
-
----
-
-*Build attempt date: 2026-04-10*
-*Environment: Windows 11, VS2022 Community, WDK 10.0.26100.0*
-*Status: Source code ready, build environment needs configuration*
+- Old separate `amdbc250_psp.sys` driver removed — PSP fully integrated into dream driver
+- PSP firmware is pre-loaded by BIOS (confirmed via Linux analysis)
+- No firmware loading needed — only ring setup + NBIO unlock

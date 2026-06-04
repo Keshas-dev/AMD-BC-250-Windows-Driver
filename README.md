@@ -99,7 +99,7 @@ DF has 40 readable registers containing:
 - ✅ **WDDM coexistence** — BasicDisplay + our KMD on same DriverObject
 - ✅ **Build + sign pipeline** — `build.bat` produces signed `atikmdag.sys`
 - ✅ **No crashes** — safe-test approach (read-only + INIT_HARDWARE) works reliably
-- ✅ **PSP v11 firmware loading** (C2PMSG mailbox, bootloader handshake)
+- ✅ **PSP v11 integrated** — GPU BAR5 mapping, MP0 base auto-discovery, SOS alive check, NBIO unlock
 - ✅ **Vulkan ICD** — 13/13 tests pass with official Vulkan loader
 - ✅ **D3D9 UMD** — 45+ DDI functions, 5/5 adapter tests pass
 - ✅ **IB packet + EOP fence**, GFX10 ring buffer, HDP Flush
@@ -161,6 +161,45 @@ output\test-driver-check.exe     # New IOCTL test (GPU_INFO, FIREWALL, REG_TEST)
 ┌─────────────────────────────────────────────────┐
 │              User Applications                    │
 ├─────────────────────────────────────────────────┤
+│         safe-test.exe / test-psp-init.exe         │
+│         DeviceIoControl → \\.\AMDBC250DreamV43   │
+├─────────────────────────────────────────────────┤
+│         atikmdag.sys (KMD — WDM)                  │
+│         ├── DriverEntry (manual g_PciDevExt)      │
+│         ├── IRP_MJ_DEVICE_CONTROL handler         │
+│         ├── INIT_HARDWARE (MMIO map, Flags=1)     │
+│         ├── READ_REG / WRITE_REG (BAR5 MMIO)     │
+│         ├── GET_CAPS / GET_VRAM_INFO              │
+│         ├── ALLOC_VIDMEM (MDL-based)              │
+│         ├── PSP integrated (amdbc250_psp_v11.c)   │
+│         │   ├── GPU BAR5 (0xFE800000) mapping     │
+│         │   ├── MP0 base discovery (SOS scan)     │
+│         │   ├── PSP ring create/destroy           │
+│         │   └── NBIO unlock (0xC100/0xC180)      │
+│         ├── IOCTL_GET_GPU_INFO (0x80000C00)      │
+│         ├── IOCTL_GET_FIREWALL_STATUS (0x80000C04)│
+│         ├── IOCTL_TEST_REGISTER (0x80000C08)     │
+│         └── PM4 ring buffer (blocked by NBIO)     │
+├─────────────────────────────────────────────────┤
+│              NBIO Firewall                        │
+│         ├── Allows: GPU_ID, HDP, GC, MMHUB, DF   │
+│         ├── Writes: MMHUB ✅, GC ✅               │
+│         └── Blocks: GRBM, CP, CLK, Scratch, RSMU │
+├─────────────────────────────────────────────────┤
+│              AMD BC-250 GPU (RDNA2)               │
+│              24 CU, 16GB GDDR6, PSP v11          │
+└─────────────────────────────────────────────────┘
+```
+
+### PSP Integration (added in v4.3)
+PSP logic is **compiled directly into atikmdag.sys** — no separate PSP driver needed.
+- **File:** `src/kmd/amdbc250_psp_v11.c` (compiled into dream driver's build)
+- **Init:** Called as Step 9 during `DreamV3HwInitialize()` — non-fatal
+- **NBIO unlock:** Attempted automatically if SOS is detected alive via `C2PMSG_81`
+- **Reference:** Linux amdgpu `psp_v11_0_8.c` analysis in `docs/LINUX-AMDGPU-ANALYSIS.md`
+┌─────────────────────────────────────────────────┐
+│              User Applications                    │
+├─────────────────────────────────────────────────┤
 │         safe-test.exe / deep-test.exe             │
 │         DeviceIoControl → \\.\AMDBC250DreamV43   │
 ├─────────────────────────────────────────────────┤
@@ -194,10 +233,11 @@ output\test-driver-check.exe     # New IOCTL test (GPU_INFO, FIREWALL, REG_TEST)
 ```
 ├── src/kmd/                        # Kernel-Mode Driver
 │   ├── amdbc250_dream_kmd.c        # DriverEntry, IOCTL dispatch, InitData
-│   ├── amdbc250_dream_hw_init.c    # GPU init, ring buffers, display
+│   ├── amdbc250_dream_hw_init.c    # GPU init, ring buffers, display, PSP
 │   ├── amdbc250_dream_power.c      # Power/thermal management
 │   ├── amdbc250_dream_vm.c         # GPUVM, GART, page tables
-│   └── amdbc250_psp_v11.c          # PSP firmware loading
+│   ├── amdbc250_psp_v11.c          # PSP: BAR5 map, MP0 discovery, rings, NBIO unlock
+│   └── firmware_data.h             # Embedded PSP firmware (SOS, ASD, TA)
 ├── src/umd/                        # User-Mode Driver
 │   └── amdbc250_umd_v46.c          # D3D9 DDI (45+ functions)
 ├── src/vulkan/                     # Vulkan ICD
@@ -213,13 +253,19 @@ output\test-driver-check.exe     # New IOCTL test (GPU_INFO, FIREWALL, REG_TEST)
 │   ├── safe-test.c                 # Safe minimal test (no crashes)
 │   ├── deep-test.c                 # Deep NBIO/DF/MMHUB scan + write
 │   ├── test-wddm.c                 # Full WDDM+IOCTL test (S1-S24)
-│   ├── test-driver-check.c         # New IOCTL test (GPU_INFO, FIREWALL, REG_TEST)
+│   ├── test-psp-init.c             # PSP init test (GPU BAR5, SOS detection)
+│   ├── test-driver-check.c         # IOCTL test (GPU_INFO, FIREWALL, REG_TEST)
 │   ├── compile-safe.bat            # Compile safe-test
 │   ├── compile-deep.bat            # Compile deep-test
 │   ├── compile-wddm.bat            # Compile test-wddm
-│   └── compile-driver-check.bat    # Compile test-driver-check
+│   └── compile-psp-init.bat        # Compile test-psp-init
+├── docs/                           # Documentation
+│   ├── NBIO-FIREWALL-ANALYSIS.md   # NBIO register map
+│   ├── LINUX-AMDGPU-ANALYSIS.md    # Linux PSP v11.0_8 analysis
+│   ├── UEFI-TOOLS-GUIDE.md         # UEFI shell setup_var
+│   └── BIOS-SETTINGS.md            # BIOS settings
 ├── output/                         # Build output (signed drivers)
-│   ├── atikmdag.sys                # KMD (signed)
+│   ├── atikmdag.sys                # KMD (signed, PSP integrated)
 │   ├── amdbc250umd64.dll           # UMD
 │   ├── amdbc250vulkan.dll          # Vulkan ICD
 │   └── amdbc250_dream.inf          # Driver INF
@@ -275,15 +321,15 @@ output\test-driver-check.exe     # New IOCTL test (GPU_INFO, FIREWALL, REG_TEST)
 
 ## Roadmap
 
-### Next — NBIO Unlock Investigation
-1. **NBIO signature registers** — write sequences to 0xC100/0xC180 (0xFEDCBAEF/0xFEDCBADF)
-2. **MMHUB VMHUB manipulation** — modify VMHUB config to remap blocked register space
-3. **DF register analysis** — decode memory topology, find MMIO base 0x20000000
-4. **Linux amdgpu analysis** — study how amdgpu handles NBIO on PS5/Ariel
+### Next — NBIO Bypass via PSP
+1. ✅ **Linux PSP v11.0_8 analysis** — complete register map, init flow documented
+2. ✅ **PSP integrated into dream driver** — GPU BAR5 mapping, MP0 discovery, SOS check
+3. **PSP ring communication** — send NBIO unlock command (0xC100/0xC180 signatures)
+4. **Verify NBIO unlock** — check MMHUB register 0x50D0, retry GRBM/CP reads
 
 ### Short Term
-5. **GRBM access** — find way to read GRBM_STATUS for GPU state
-6. **CP ring buffer init** — once CP registers accessible, initialize command ring
+5. **GRBM access** — after NBIO bypass, read GRBM_STATUS for GPU state
+6. **CP ring buffer init** — initialize command ring for PM4 submission
 7. **PM4 command submission** — submit draw/compute commands via ring buffer
 8. **Real triangle rendering** — vertex buffer + PM4 draw
 

@@ -14,6 +14,9 @@ SOURCES=amdbc250_dream_kmd.c \
         amdbc250_dream_vm.c \
         amdbc250_dream_power.c \
         amdbc250_psp_v11.c
+\
+# PSP logic integrated into dream driver (amdbc250_psp_v11.c compiled in above) \
+# Separate PSP driver (amdbc250_psp_driver.c) no longer needed
 
 TARGETPATH=obj
 

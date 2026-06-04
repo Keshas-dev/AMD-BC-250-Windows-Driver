@@ -748,6 +748,12 @@ DreamV3DdiStopDevice(
         DevExt->HardwareInitialized = FALSE;
     }
 
+    /* Cleanup PSP (unmap GPU BAR5, free rings) */
+    if (DevExt->PspInitialized) {
+        Amdbc250PspCleanup();
+        DevExt->PspInitialized = FALSE;
+    }
+
     if (DevExt->MmioVirtualBase != NULL) {
         MmUnmapIoSpace(DevExt->MmioVirtualBase, DevExt->MmioSize);
         DevExt->MmioVirtualBase = NULL;
@@ -839,9 +845,6 @@ static VOID DreamV3WdmUnload(_In_ PDRIVER_OBJECT DriverObject)
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                "AMDBC250-DREAM-V4.3: WDM Unload called\n"));
     
-    /* Cleanup PSP (Platform Security Processor) */
-    Amdbc250PspCleanup();
-
     /* Free shared memory */
     if (g_SharedBuffer != NULL) {
         ExFreePoolWithTag(g_SharedBuffer, 'cmhS');
@@ -3437,18 +3440,6 @@ DreamV3DeviceControl(
                 DevExt->GfxRing.PhysicalAddress.QuadPart,
                 (ULONG64)DevExt->GfxRing.SizeInBytes / 1024));
 
-            /* Initialize PSP (Platform Security Processor) to unlock GPU registers */
-            {
-                NTSTATUS pspStatus = Amdbc250PspInit(DeviceObject);
-                if (NT_SUCCESS(pspStatus)) {
-                    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-                        "AMDBC250-DREAM-V4.3: PSP initialized successfully\n"));
-                } else {
-                    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
-                        "AMDBC250-DREAM-V4.3: PSP init failed: 0x%08X (GPU may be locked)\n", pspStatus));
-                }
-            }
-
             status = STATUS_SUCCESS;
         } else {
             status = STATUS_BUFFER_TOO_SMALL;
@@ -3829,64 +3820,8 @@ DreamV3DeviceControl(
         break;
     }
 
-    /* --- PSP Init (standalone) --- */
-    case 0x80000B98: { /* IOCTL_AMDBC250_PSP_INIT */
-        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-            "AMDBC250-DREAM-V4.3: PSP_INIT requested\n"));
+    /* PSP IOCTLs moved to amdbc250_psp driver */
 
-        if (DevExt == NULL || !DevExt->HardwareInitialized) {
-            status = STATUS_DEVICE_NOT_READY;
-            break;
-        }
-
-        status = Amdbc250PspInit(DeviceObject);
-        break;
-    }
-
-    /* --- PSP Load Firmware --- */
-    case 0x80000B9C: { /* IOCTL_AMDBC250_PSP_LOAD_FIRMWARE */
-        if (inputLen >= sizeof(AMDBC250_IOCTL_PSP_LOAD_FIRMWARE)) {
-            PAMDBC250_IOCTL_PSP_LOAD_FIRMWARE pspFw = (PAMDBC250_IOCTL_PSP_LOAD_FIRMWARE)inputBuffer;
-
-            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-                "AMDBC250-DREAM-V4.3: PSP_LOAD_FIRMWARE: type=%u, size=%u\n",
-                pspFw->FirmwareType, pspFw->FirmwareSize));
-
-            PAMDBC250_PSP_CONTEXT pspCtx = Amdbc250PspGetContext();
-            if (pspCtx == NULL || !pspCtx->Initialized) {
-                status = STATUS_DEVICE_NOT_READY;
-                break;
-            }
-
-            if (pspFw->FirmwareSize == 0 || pspFw->FirmwareSize > sizeof(pspFw->FirmwareData)) {
-                status = STATUS_INVALID_PARAMETER;
-                break;
-            }
-
-            PUCHAR fwBuffer = (PUCHAR)ExAllocatePool2(POOL_FLAG_NON_PAGED, pspFw->FirmwareSize, 'FrmP');
-            if (fwBuffer == NULL) {
-                status = STATUS_INSUFFICIENT_RESOURCES;
-                break;
-            }
-
-            RtlCopyMemory(fwBuffer, pspFw->FirmwareData, pspFw->FirmwareSize);
-
-            switch (pspFw->FirmwareType) {
-            case 0: /* SOS */
-                if (pspCtx->SosFirmware) ExFreePoolWithTag(pspCtx->SosFirmware, 'FrmP');
-                pspCtx->SosFirmware = fwBuffer;
-                pspCtx->SosFirmwareSize = pspFw->FirmwareSize;
-                break;
-            case 1: /* ASD */
-                if (pspCtx->AsdFirmware) ExFreePoolWithTag(pspCtx->AsdFirmware, 'FrmP');
-                pspCtx->AsdFirmware = fwBuffer;
-                pspCtx->AsdFirmwareSize = pspFw->FirmwareSize;
-                break;
-            case 2: /* TA */
-                if (pspCtx->TaFirmware) ExFreePoolWithTag(pspCtx->TaFirmware, 'FrmP');
-                pspCtx->TaFirmware = fwBuffer;
-                pspCtx->TaFirmwareSize = pspFw->FirmwareSize;
-                break;
     /* --- Write PCI config space (one DWORD via IO ports) --- */
     case 0x80000BB0: { /* IOCTL_AMDBC250_WRITE_PCI_CONFIG */
         if (inputLen >= sizeof(AMDBC250_IOCTL_WRITE_PCI_CONFIG)) {
@@ -4079,82 +4014,6 @@ DreamV3DeviceControl(
                     "AMDBC250-DREAM-V4.3: DISCOVER_PCI: BC-250 not found via any method\n"));
                 status = STATUS_UNSUCCESSFUL;
             }
-        } else {
-            status = STATUS_BUFFER_TOO_SMALL;
-        }
-        break;
-    }
-
-    default:
-                ExFreePoolWithTag(fwBuffer, 'FrmP');
-                status = STATUS_INVALID_PARAMETER;
-                break;
-            }
-
-            status = STATUS_SUCCESS;
-        } else {
-            status = STATUS_BUFFER_TOO_SMALL;
-        }
-        break;
-    }
-
-    /* --- PSP Send Command --- */
-    case 0x80000BA0: { /* IOCTL_AMDBC250_PSP_SEND_COMMAND */
-        if (inputLen >= sizeof(AMDBC250_IOCTL_PSP_SEND_COMMAND)) {
-            PAMDBC250_IOCTL_PSP_SEND_COMMAND pspCmd = (PAMDBC250_IOCTL_PSP_SEND_COMMAND)inputBuffer;
-            status = Amdbc250PspSendCommand(pspCmd->Command, pspCmd->Data, pspCmd->DataSize);
-        } else {
-            status = STATUS_BUFFER_TOO_SMALL;
-        }
-        break;
-    }
-
-    /* --- PSP Get Status --- */
-    case 0x80000BA4: { /* IOCTL_AMDBC250_PSP_GET_STATUS */
-        if (outputLen >= sizeof(AMDBC250_IOCTL_PSP_STATUS)) {
-            PAMDBC250_IOCTL_PSP_STATUS pspSt = (PAMDBC250_IOCTL_PSP_STATUS)outputBuffer;
-            RtlZeroMemory(pspSt, sizeof(*pspSt));
-
-            PAMDBC250_PSP_CONTEXT pspCtx = Amdbc250PspGetContext();
-            if (pspCtx) {
-                pspSt->Initialized = pspCtx->Initialized ? 1 : 0;
-                pspSt->SosAlive = pspCtx->SosAlive ? 1 : 0;
-                pspSt->FirmwareLoaded = (pspCtx->SosFirmware != NULL) ? 1 : 0;
-
-                if (pspCtx->MmioBase) {
-                    pspSt->MmioBase = (ULONG)(UINT_PTR)pspCtx->MmioBase;
-                    pspSt->SolRegister = Amdbc250PspReadRegister(0x144);
-                    pspSt->C2pmsg64 = Amdbc250PspReadRegister(0x100);
-                }
-            }
-
-            bytesReturned = sizeof(AMDBC250_IOCTL_PSP_STATUS);
-            status = STATUS_SUCCESS;
-        } else {
-            status = STATUS_BUFFER_TOO_SMALL;
-        }
-        break;
-    }
-
-    /* --- PSP Test Mailbox --- */
-    case 0x80000BA8: { /* IOCTL_AMDBC250_PSP_TEST_MAILBOX */
-        if (inputLen >= sizeof(AMDBC250_IOCTL_PSP_TEST_MAILBOX) &&
-            outputLen >= sizeof(AMDBC250_IOCTL_PSP_TEST_MAILBOX)) {
-            PAMDBC250_IOCTL_PSP_TEST_MAILBOX pspTest = (PAMDBC250_IOCTL_PSP_TEST_MAILBOX)inputBuffer;
-
-            PAMDBC250_PSP_CONTEXT pspCtx = Amdbc250PspGetContext();
-            if (pspCtx == NULL || !pspCtx->Initialized) {
-                status = STATUS_DEVICE_NOT_READY;
-                break;
-            }
-
-            Amdbc250PspWriteRegister(0x0000, pspTest->WriteValue);
-            pspTest->ReadValue = Amdbc250PspReadRegister(0x0000);
-            pspTest->SolValue = Amdbc250PspReadRegister(0x144);
-
-            RtlCopyMemory(outputBuffer, pspTest, sizeof(AMDBC250_IOCTL_PSP_TEST_MAILBOX));
-            bytesReturned = sizeof(AMDBC250_IOCTL_PSP_TEST_MAILBOX);
-            status = STATUS_SUCCESS;
         } else {
             status = STATUS_BUFFER_TOO_SMALL;
         }

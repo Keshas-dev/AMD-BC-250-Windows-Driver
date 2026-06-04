@@ -1,7 +1,7 @@
 #ifndef AMDBC250_PSP_V11_H
 #define AMDBC250_PSP_V11_H
 
-#include "ntddk.h"
+#include <ntddk.h>
 
 typedef struct _AMDBC250_PSP_CONTEXT {
     PUCHAR MmioBase;
@@ -24,12 +24,14 @@ typedef struct _AMDBC250_PSP_CONTEXT {
     BOOLEAN SosAlive;
 } AMDBC250_PSP_CONTEXT, *PAMDBC250_PSP_CONTEXT;
 
-NTSTATUS Amdbc250PspInit(PDEVICE_OBJECT DeviceObject);
+NTSTATUS Amdbc250PspInit(ULONG64 MmioPhysicalBase);
 VOID Amdbc250PspCleanup(VOID);
 NTSTATUS Amdbc250PspSendCommand(ULONG Command, PUCHAR Data, ULONG DataSize);
 PAMDBC250_PSP_CONTEXT Amdbc250PspGetContext(VOID);
 ULONG Amdbc250PspReadRegister(ULONG RegisterOffset);
 VOID Amdbc250PspWriteRegister(ULONG RegisterOffset, ULONG Value);
 VOID Amdbc250PspUnmapRegisters(VOID);
+NTSTATUS Amdbc250PspTryUnlockNbio(VOID);
+BOOLEAN Amdbc250PspValidateFirmware(PUCHAR FirmwareData, ULONG FirmwareSize, ULONG FirmwareType);
 
 #endif

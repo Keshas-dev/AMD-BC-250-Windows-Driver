@@ -94,6 +94,7 @@ cl.exe /c /kernel /W3 /Zi /Od /DAMD64 /D_AMD64_ /DAMDBC250_DREAM_V3 ^
   /I"%WDK_ROOT%\Include\%WDK_VERSION%\km\crt" ^
   /I"%WDK_ROOT%\Include\%WDK_VERSION%\shared" ^
   /I"%INC_DIR%" ^
+  /I"%SRC_DIR%\kmd" ^
   "%SRC_DIR%\kmd\amdbc250_dream_kmd.c" ^
   "%SRC_DIR%\kmd\amdbc250_dream_hw_init.c" ^
   "%SRC_DIR%\kmd\amdbc250_dream_power.c" ^
@@ -119,38 +120,39 @@ if errorlevel 1 (
     exit /b 1
 )
 
-echo.
-echo ==========================================
-echo  BUILDING PSP (PSP Driver)
-echo ==========================================
-echo.
-
-cl.exe /c /kernel /W3 /Zi /Od /DAMD64 /D_AMD64_ /GS- ^
-  /I"%WDK_ROOT%\Include\%WDK_VERSION%\km" ^
-  /I"%WDK_ROOT%\Include\%WDK_VERSION%\km\crt" ^
-  /I"%WDK_ROOT%\Include\%WDK_VERSION%\shared" ^
-  /I"%INC_DIR%" ^
-  /I"%SRC_DIR%\kmd" ^
-  "%SRC_DIR%\kmd\amdbc250_psp_driver.c"
-
-if errorlevel 1 (
-    echo PSP compilation FAILED!
-    pause
-    exit /b 1
-)
-
-echo Linking PSP...
-link.exe /DRIVER /SUBSYSTEM:NATIVE /ENTRY:DriverEntry /NODEFAULTLIB ^
-  /OUT:"%OUTPUT_DIR%\amdbc250_psp.sys" ^
-  amdbc250_psp_driver.obj ^
-  ntoskrnl.lib hal.lib wdm.lib ^
-  /LIBPATH:"%WDK_ROOT%\Lib\%WDK_VERSION%\km\x64"
-
-if errorlevel 1 (
-    echo PSP linking FAILED!
-    pause
-    exit /b 1
-)
+rem echo.
+rem echo ==========================================
+rem echo  BUILDING PSP (PSP Driver — DISABLED, integrated into dream driver)
+rem echo ==========================================
+rem echo.
+rem
+rem cl.exe /c /kernel /W3 /Zi /Od /DAMD64 /D_AMD64_ /GS- ^
+rem   /I"%WDK_ROOT%\Include\%WDK_VERSION%\km" ^
+rem   /I"%WDK_ROOT%\Include\%WDK_VERSION%\km\crt" ^
+rem   /I"%WDK_ROOT%\Include\%WDK_VERSION%\shared" ^
+rem   /I"%INC_DIR%" ^
+rem   /I"%SRC_DIR%\kmd" ^
+rem   "%SRC_DIR%\kmd\amdbc250_psp_driver.c" ^
+rem   "%SRC_DIR%\kmd\amdbc250_psp_v11.c"
+rem
+rem if errorlevel 1 (
+rem     echo PSP compilation FAILED!
+rem     pause
+rem     exit /b 1
+rem )
+rem
+rem echo Linking PSP...
+rem link.exe /DRIVER /SUBSYSTEM:NATIVE /ENTRY:DriverEntry /NODEFAULTLIB ^
+rem   /OUT:"%OUTPUT_DIR%\amdbc250_psp.sys" ^
+rem   amdbc250_psp_driver.obj amdbc250_psp_v11.obj ^
+rem   ntoskrnl.lib hal.lib wdm.lib ^
+rem   /LIBPATH:"%WDK_ROOT%\Lib\%WDK_VERSION%\km\x64"
+rem
+rem if errorlevel 1 (
+rem     echo PSP linking FAILED!
+rem     pause
+rem     exit /b 1
+rem )
 
 echo.
 echo ==========================================
@@ -251,6 +253,8 @@ if errorlevel 1 (
     echo   OK
 )
 
+rem --- PSP driver no longer built separately (integrated into atikmdag.sys) ---
+
 rem --- Sign UMD ---
 echo Signing amdbc250umd64.dll...
 "%SIGNTOOLS%\signtool.exe" sign /fd SHA256 /a /s My /n "%CERT_NAME%" ^
@@ -278,13 +282,13 @@ echo  BUILD COMPLETED!
 echo ==========================================
 echo.
 echo  Output: %OUTPUT_DIR%
-echo    atikmdag.sys      - Kernel driver
-echo    amdbc250umd64.dll - User driver
+echo    atikmdag.sys       - GPU Kernel driver (WDM, PSP integrated)
+echo    amdbc250umd64.dll  - User driver
 echo    amdbc250_dream.inf
 echo.
-echo  Install:
-echo    1. bcdedit /set testsigning on  (as Admin)
-echo    2. Reboot
-echo    3. Device Manager - Update Driver - Browse to output\
+echo  NOTES:
+echo    - PSP logic is compiled INTO atikmdag.sys (GPU BAR5 mapping, MP0 discovery)
+echo    - Separate amdbc250_psp.sys driver is DISABLED (no longer needed)
+echo    - NBIO unlock attempted automatically during StartDevice
 echo.
 pause

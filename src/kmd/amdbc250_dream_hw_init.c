@@ -29,6 +29,7 @@ Environment:
 --*/
 
 #include "amdbc250_dream_kmd.h"
+#include "amdbc250_psp_v11.h"
 
 /* Forward declarations */
 static NTSTATUS DreamV3InitCommandProcessor(_In_ PDREAM_V3_DEVICE_EXTENSION DevExt);
@@ -165,6 +166,19 @@ DreamV3HwInitialize(
     } else {
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                    "AMDBC250-DREAM-V4.3: [STEP 8/8] Display OK\n"));
+    }
+
+    /* Step 9: PSP & NBIO unlock (GPU BAR5, MP0 discovery, ring, NBIO bypass) */
+    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+               "AMDBC250-DREAM-V4.3: [STEP 9/9] PSP init\n"));
+    Status = DreamV3PspHardwareInit(DevExt);
+    if (DevExt->PspAlive) {
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                   "AMDBC250-DREAM-V4.3: [STEP 9/9] SOS alive, NBIO unlocked=%u\n",
+                   DevExt->NbioUnlocked));
+    } else {
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+                   "AMDBC250-DREAM-V4.3: [STEP 9/9] SOS not found — continuing\n"));
     }
 
     /* Set VRAM sizes */
@@ -540,6 +554,66 @@ DreamV3HwInitSdmaRing(_In_ PDREAM_V3_DEVICE_EXTENSION DevExt)
 
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                "AMDBC250-DREAM-V4.3: SDMA ring initialized\n"));
+
+    return STATUS_SUCCESS;
+}
+
+/*===========================================================================
+  DreamV3PspHardwareInit — PSP initialization & NBIO unlock
+  Maps GPU BAR5, discovers MP0 base, checks SOS, attempts NBIO bypass.
+  Non-fatal — driver continues in degraded mode if PSP unavailable.
+===========================================================================*/
+
+NTSTATUS
+DreamV3PspHardwareInit(
+    _In_ PDREAM_V3_DEVICE_EXTENSION DevExt
+    )
+{
+    NTSTATUS Status;
+    PAMDBC250_PSP_CONTEXT PspCtx;
+
+    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+               "AMDBC250-DREAM-V4.3: [STEP 9/9] PSP init (GPU BAR5 = 0xFE800000)\n"));
+
+    /* Step 9a: Initialize PSP — maps BAR5, discovers MP0 base, checks SOS */
+    Status = Amdbc250PspInit(0);
+    if (!NT_SUCCESS(Status)) {
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+                   "AMDBC250-DREAM-V4.3: PSP init FAILED: 0x%08X (non-fatal)\n", Status));
+        DevExt->PspInitialized = FALSE;
+        DevExt->PspAlive = FALSE;
+        DevExt->NbioUnlocked = FALSE;
+        return STATUS_SUCCESS; /* Non-fatal */
+    }
+
+    PspCtx = Amdbc250PspGetContext();
+    DevExt->PspInitialized = TRUE;
+    DevExt->PspAlive = PspCtx->SosAlive;
+
+    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+               "AMDBC250-DREAM-V4.3: PSP init OK — SOS alive=%u\n",
+               DevExt->PspAlive));
+
+    /* Step 9b: If SOS is alive, try NBIO unlock */
+    if (DevExt->PspAlive) {
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                   "AMDBC250-DREAM-V4.3: Attempting NBIO unlock via PSP...\n"));
+
+        Status = Amdbc250PspTryUnlockNbio();
+        if (NT_SUCCESS(Status)) {
+            DevExt->NbioUnlocked = TRUE;
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+                       "AMDBC250-DREAM-V4.3: *** NBIO UNLOCKED via PSP ***\n"));
+        } else {
+            DevExt->NbioUnlocked = FALSE;
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+                       "AMDBC250-DREAM-V4.3: NBIO unlock FAILED: 0x%08X\n", Status));
+        }
+    } else {
+        DevExt->NbioUnlocked = FALSE;
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+                   "AMDBC250-DREAM-V4.3: SOS not alive — NBIO unlock skipped\n"));
+    }
 
     return STATUS_SUCCESS;
 }

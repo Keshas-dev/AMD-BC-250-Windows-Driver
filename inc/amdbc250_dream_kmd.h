@@ -370,6 +370,11 @@ typedef struct _DREAM_V3_DEVICE_EXTENSION {
     HANDLE              DxgkDeviceHandle;    /* Device handle from DXGKRNL */
     DXGKRNL_INTERFACE   DxgkInterface;       /* DXGKRNL callbacks */
 
+    /* PSP / NBIO state */
+    BOOLEAN             PspInitialized;      /* PSP init attempted */
+    BOOLEAN             PspAlive;            /* SOS detected alive */
+    BOOLEAN             NbioUnlocked;        /* NBIO firewall bypassed */
+
     /* Diagnostics */
     ULONG               InterruptCount;
     ULONG               SubmitCount;
@@ -433,6 +438,11 @@ DreamV3HdpFlush(
 
 LONG
 DreamV3ReadTemperature(
+    _In_ PDREAM_V3_DEVICE_EXTENSION DevExt
+    );
+
+NTSTATUS
+DreamV3PspHardwareInit(
     _In_ PDREAM_V3_DEVICE_EXTENSION DevExt
     );
 
