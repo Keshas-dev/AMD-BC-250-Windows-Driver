@@ -76,6 +76,10 @@ if exist "%WDK_ROOT%\bin\%WDK_VERSION%\x86\Inf2Cat.exe" (
 if exist "%WDK_ROOT%\bin\%WDK_VERSION%\x64\Inf2Cat.exe" (
     set "INF2CAT=%WDK_ROOT%\bin\%WDK_VERSION%\x64\Inf2Cat.exe"
 )
+rem --- Fallback: try signtool from PATH (VS/SDK adds it) ---
+if "%SIGNTOOLS%"=="" (
+    where signtool.exe >nul 2>&1 && set "SIGNTOOLS=." && echo Found signtool in PATH
+)
 if "%SIGNTOOLS%"=="" (
     echo WARNING: signtool.exe not found - will skip signing
 )
@@ -220,61 +224,53 @@ if not exist "%CERT_FILE%" (
     echo   Certificate trusted.
 )
 
-rem --- Generate catalog file ---
-if "%INF2CAT%"=="" (
-    echo WARNING: Inf2Cat not found - skipping catalog generation
-    goto :SignFiles
-)
-echo Generating catalog file...
-"%INF2CAT%" /driver:"%OUTPUT_DIR%" /os:10_x64 /verbose
-if errorlevel 1 (
-    echo WARNING: inf2cat failed - signing individual files only
-    goto :SignFiles
-)
+rem --- Trust the certificate in LocalMachine (required for kernel boot drivers) ---
+echo Adding certificate to LocalMachine trust stores...
+certutil -addstore Root "%CERT_FILE%" >nul 2>&1 && echo   Root OK || echo   Root: MAY NEED ADMIN
+certutil -addstore TrustedPublisher "%CERT_FILE%" >nul 2>&1 && echo   TrustedPublisher OK || echo   TrustedPublisher: MAY NEED ADMIN
 
-rem --- Sign catalog ---
-echo Signing amdbc250_dream.cat...
-"%SIGNTOOLS%\signtool.exe" sign /fd SHA256 /a /s My /n "%CERT_NAME%" ^
-  "%OUTPUT_DIR%\amdbc250_dream.cat"
-if errorlevel 1 (
-    echo WARNING: Catalog signing failed
-) else (
-    echo   OK
-)
-
-:SignFiles
-rem --- Sign KMD ---
+rem --- Sign kernel driver FIRST (most important) ---
+:SignKmd
 echo Signing atikmdag.sys...
-"%SIGNTOOLS%\signtool.exe" sign /fd SHA256 /a /s My /n "%CERT_NAME%" ^
-  "%OUTPUT_DIR%\atikmdag.sys"
+"%SIGNTOOLS%\signtool.exe" sign /fd SHA256 /a /s My /n "%CERT_NAME%" /v ^
+  "%OUTPUT_DIR%\atikmdag.sys" > "%OUTPUT_DIR%\sign-kmd.log" 2>&1
 if errorlevel 1 (
-    echo WARNING: KMD signing failed
+    type "%OUTPUT_DIR%\sign-kmd.log"
+    echo FATAL: KMD signing FAILED!
+    echo.
+    echo Try: Run build.bat as Administrator, or sign manually:
+    echo   signtool sign /fd SHA256 /a /s My /n AMD-BC250-Signer output\atikmdag.sys
+    pause
+    exit /b 1
 ) else (
-    echo   OK
+    echo   KMD signed OK
 )
 
-rem --- PSP driver no longer built separately (integrated into atikmdag.sys) ---
+rem --- Verify KMD signature ---
+"%SIGNTOOLS%\signtool.exe" verify /pa /v "%OUTPUT_DIR%\atikmdag.sys" > "%OUTPUT_DIR%\verify-kmd.log" 2>&1
+echo KMD signature verification: OK
+
+rem --- Generate catalog file (optional) ---
+if not "%INF2CAT%"=="" (
+    echo Generating catalog file...
+    "%INF2CAT%" /driver:"%OUTPUT_DIR%" /os:10_x64 /verbose >nul 2>&1
+)
+
+rem --- Sign catalog (optional) ---
+if exist "%OUTPUT_DIR%\amdbc250_dream.cat" (
+    "%SIGNTOOLS%\signtool.exe" sign /fd SHA256 /a /s My /n "%CERT_NAME%" ^
+      "%OUTPUT_DIR%\amdbc250_dream.cat" >nul 2>&1 && echo   Catalog signed OK
+)
 
 rem --- Sign UMD ---
 echo Signing amdbc250umd64.dll...
 "%SIGNTOOLS%\signtool.exe" sign /fd SHA256 /a /s My /n "%CERT_NAME%" ^
-  "%OUTPUT_DIR%\amdbc250umd64.dll"
+  "%OUTPUT_DIR%\amdbc250umd64.dll" >nul 2>&1
 if errorlevel 1 (
-    echo WARNING: UMD signing failed
+    echo WARNING: UMD signing failed (non-fatal)
 ) else (
-    echo   OK
+    echo   UMD signed OK
 )
-
-rem --- Verify ---
-echo.
-echo Verifying signatures...
-"%SIGNTOOLS%\signtool.exe" verify /pa "%OUTPUT_DIR%\atikmdag.sys" 2>nul
-"%SIGNTOOLS%\signtool.exe" verify /pa "%OUTPUT_DIR%\amdbc250umd64.dll" 2>nul
-if exist "%OUTPUT_DIR%\amdbc250_dream.cat" (
-    "%SIGNTOOLS%\signtool.exe" verify /pa "%OUTPUT_DIR%\amdbc250_dream.cat" 2>nul
-)
-
-:SkipSigning
 
 echo.
 echo ==========================================
@@ -282,13 +278,14 @@ echo  BUILD COMPLETED!
 echo ==========================================
 echo.
 echo  Output: %OUTPUT_DIR%
-echo    atikmdag.sys       - GPU Kernel driver (WDM, PSP integrated)
+echo    atikmdag.sys       - GPU Kernel driver (signed)
 echo    amdbc250umd64.dll  - User driver
 echo    amdbc250_dream.inf
 echo.
-echo  NOTES:
-echo    - PSP logic is compiled INTO atikmdag.sys (GPU BAR5 mapping, MP0 discovery)
-echo    - Separate amdbc250_psp.sys driver is DISABLED (no longer needed)
-echo    - NBIO unlock attempted automatically during StartDevice
+echo  Install (run as Admin):
+echo    Device Manager -^> Uninstall AMD Radeon BC-250 (check Delete driver)
+echo    Reboot
+echo    Device Manager -^> Update driver -^> Browse -^> %OUTPUT_DIR%
+echo    Reboot
 echo.
 pause
