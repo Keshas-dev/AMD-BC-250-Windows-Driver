@@ -186,3 +186,22 @@ Key observations from logs:
 5. **Register offsets match Navi10** — Reuse Navi10 register definitions
 6. **SMU is also pre-loaded** — No SMU firmware loading needed
 7. **NBIO unlock sends signatures to 0xC100/0xC180** — Uses PSP ring to bypass firewall
+
+## CRITICAL FINDING: NBIO Unlock via PCI Config Space (June 2026)
+
+On BIOS `113-AMDRBN-003`, PSP is **NOT alive** — no SOS firmware, no ring creation, PSP function (01:00.2) has disabled BARs. However, Linux (CachyOS kernel 7.0.10) runs games without issues.
+
+**The NBIO firewall is bypassed via a write to root complex PCI config offset 0xB8:**
+```
+pci 0000:00:00.0: cyan-skillfish-: Unexpected write to kernel-exclusive config offset b8
+```
+
+This means Linux unlocks NBIO by writing to **bus 0, device 0, function 0 (root complex)** at PCI config register **0xB8**, NOT through the PSP.
+
+On Windows, the same can be attempted using IO port PCI config access (0xCF8/0xCFC) or through the HAL, targeting `00:00.0` (Ariel Root Complex [1022:13e0]) at offset 0xB8.
+
+### Source
+- Tested on: CachyOS 7.0.10-1-cachyos, kernel clang 22.1.5
+- Confirmed on: Manjaro 6.12.48-1-MANJARO (stock kernel — GFX rings created without explicit unlock message, suggesting either upstream support or different mechanism)
+- BIOS: 113-AMDRBN-003 (vbios_build=584828)
+- PSP function: 01:00.2 [1022:143e] — BARs [disabled], no driver
