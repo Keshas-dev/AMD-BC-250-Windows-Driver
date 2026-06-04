@@ -88,11 +88,11 @@ static NTSTATUS Amdbc250PspAllocateSharedMemory(VOID)
     PHYSICAL_ADDRESS skip = {0};
     high.QuadPart = 0x3FFFFFFFFFULL;
     g_PspContext.FirmwareBufferSize = 256 * 1024;
-    PMDL mdl = MmAllocatePagesForMdlEx(low, high, skip, g_PspContext.FirmwareBufferSize, MmCached, 0);
-    if (!mdl) return STATUS_INSUFFICIENT_RESOURCES;
+    g_PspContext.FirmwareMdl = MmAllocatePagesForMdlEx(low, high, skip, g_PspContext.FirmwareBufferSize, MmCached, 0);
+    if (!g_PspContext.FirmwareMdl) return STATUS_INSUFFICIENT_RESOURCES;
     g_PspContext.FirmwareBuffer = MmMapLockedPagesSpecifyCache(
-        mdl, KernelMode, MmCached, NULL, FALSE, NormalPagePriority);
-    if (!g_PspContext.FirmwareBuffer) { MmFreePagesFromMdl(mdl); return STATUS_INSUFFICIENT_RESOURCES; }
+        g_PspContext.FirmwareMdl, KernelMode, MmCached, NULL, FALSE, NormalPagePriority);
+    if (!g_PspContext.FirmwareBuffer) { MmFreePagesFromMdl(g_PspContext.FirmwareMdl); return STATUS_INSUFFICIENT_RESOURCES; }
     g_PspContext.FirmwarePhysical = MmGetPhysicalAddress(g_PspContext.FirmwareBuffer);
     g_PspContext.RingSize = PSP_RING_SIZE;
     g_PspContext.RingBuffer = MmAllocateContiguousMemory(g_PspContext.RingSize, low);
@@ -107,8 +107,16 @@ static NTSTATUS Amdbc250PspAllocateSharedMemory(VOID)
 
 static VOID Amdbc250PspFreeSharedMemory(VOID)
 {
-    if (g_PspContext.RingBuffer) { MmFreeContiguousMemory(g_PspContext.RingBuffer); g_PspContext.RingBuffer = NULL; }
-    if (g_PspContext.FirmwareBuffer) { MmUnmapLockedPages(g_PspContext.FirmwareBuffer, NULL); g_PspContext.FirmwareBuffer = NULL; }
+    if (g_PspContext.RingBuffer) {
+        MmFreeContiguousMemory(g_PspContext.RingBuffer);
+        g_PspContext.RingBuffer = NULL;
+    }
+    if (g_PspContext.FirmwareBuffer && g_PspContext.FirmwareMdl) {
+        MmUnmapLockedPages(g_PspContext.FirmwareBuffer, g_PspContext.FirmwareMdl);
+        MmFreePagesFromMdl(g_PspContext.FirmwareMdl);
+        g_PspContext.FirmwareBuffer = NULL;
+        g_PspContext.FirmwareMdl = NULL;
+    }
 }
 
 static NTSTATUS Amdbc250PspWaitForBootloader(VOID)
@@ -293,17 +301,29 @@ BOOLEAN Amdbc250PspValidateFirmware(PUCHAR FirmwareData, ULONG FirmwareSize, ULO
 {
     if (FirmwareData == NULL || FirmwareSize < 256)
         return FALSE;
-    ULONG headerSize = *(volatile ULONG*)FirmwareData;
-    if (headerSize == 0 || headerSize > 256 * 1024)
-        return FALSE;
-    if (headerSize != FirmwareSize)
-        return FALSE;
+
+    /* Validate firmware size range for each firmware type */
     switch (FirmwareType) {
-    case 0: if (FirmwareSize < 1024 || FirmwareSize > 256 * 1024) return FALSE; break;
-    case 1: if (FirmwareSize < 1024 || FirmwareSize > 64 * 1024) return FALSE; break;
-    case 2: if (FirmwareSize < 1024 || FirmwareSize > 512 * 1024) return FALSE; break;
-    default: return FALSE;
+    case 0: /* SOS */
+        if (FirmwareSize < 1024 || FirmwareSize > 256 * 1024) return FALSE;
+        break;
+    case 1: /* ASD */
+        if (FirmwareSize < 1024 || FirmwareSize > 64 * 1024) return FALSE;
+        break;
+    case 2: /* TA */
+        if (FirmwareSize < 1024 || FirmwareSize > 512 * 1024) return FALSE;
+        break;
+    default:
+        return FALSE;
     }
+
+    /* Verify firmware header: first 4 bytes should be the total size */
+    ULONG headerSize = *(volatile ULONG*)FirmwareData;
+    if (headerSize == 0 || headerSize > FirmwareSize + 256)
+        return FALSE; /* Header size should be close to total size */
+    if (headerSize > 256 * 1024)
+        return FALSE;
+
     return TRUE;
 }
 

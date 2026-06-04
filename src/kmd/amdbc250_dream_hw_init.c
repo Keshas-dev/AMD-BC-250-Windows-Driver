@@ -776,8 +776,8 @@ DreamV3ReadTemperature(_In_ PDREAM_V3_DEVICE_EXTENSION DevExt)
     /* Typical format: 10-bit signed value with scale factor */
     ULONG TempRaw = ThermalStatus & 0x3FF;
     
-    /* Convert to Celsius (approximate — needs calibration) */
-    LONG TempCelsius = (LONG)((TempRaw * 0.125) - 49);
+    /* Convert to Celsius using fixed-point arithmetic: Raw * 125 / 1000 - 49 */
+    LONG TempCelsius = (LONG)((TempRaw * 125) / 1000 - 49);
     
     /* Clamp to reasonable range */
     if (TempCelsius < 0) TempCelsius = 0;

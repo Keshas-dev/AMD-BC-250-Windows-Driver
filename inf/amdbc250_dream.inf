@@ -17,7 +17,7 @@ Signature="$Windows NT$"
 Provider=%AMD%
 Class=Display
 ClassGUID={4D36E968-E325-11CE-BFC1-08002BE10318}
-DriverVer=05/31/2026,4.5.2.0
+DriverVer=06/04/2026,4.3.0.0
 CatalogFile=amdbc250_dream.CAT
 
 [DestinationDirs]
@@ -89,7 +89,7 @@ HKR,, UserModeDriverName,     %REG_MULTI_SZ%, amdbc250umd64.dll
 HKR,, UserModeDriverNameWow,  %REG_MULTI_SZ%, amdbc250umd64.dll
 HKR,, InstalledDisplayDrivers, %REG_MULTI_SZ%, amdbc250umd64
 HKR,, VgaCompatible,           %REG_DWORD%,    0
-HKR,, SupportIcd,              %REG_DWORD%,    0
+HKR,, SupportIcd,              %REG_DWORD%,    1
 HKR,, D3D12UMD,                %REG_SZ%,       amdbc250umd64.dll
 HKR,, D3D12UMDFlags,           %REG_DWORD%,    0x1
 HKR,, D3D11UMD,                %REG_SZ%,       amdbc250umd64.dll

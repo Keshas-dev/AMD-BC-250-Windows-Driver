@@ -15,6 +15,7 @@ typedef struct _AMDBC250_PSP_CONTEXT {
     PVOID FirmwareBuffer;
     PHYSICAL_ADDRESS FirmwarePhysical;
     ULONG FirmwareBufferSize;
+    PMDL FirmwareMdl;              /* Save MDL for proper cleanup */
     PVOID RingBuffer;
     PHYSICAL_ADDRESS RingPhysical;
     ULONG RingSize;

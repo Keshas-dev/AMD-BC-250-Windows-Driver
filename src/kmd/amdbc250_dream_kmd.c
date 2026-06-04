@@ -129,26 +129,21 @@ DriverEntry(
     DRIVER_INITIALIZATION_DATA InitData = {0};
     NTSTATUS Status;
 
-    /* MARKER: Write immediately so we know DriverEntry ran */
-    {
-        UNICODE_STRING devPath;
+    /* Write DriverEntryRan marker using the registry path passed by PnP */
+    if (RegistryPath != NULL && RegistryPath->Buffer != NULL) {
         OBJECT_ATTRIBUTES objAttr;
         UNICODE_STRING valName;
         ULONG val = 1;
 
-        RtlInitUnicodeString(&devPath, L"\\Registry\\Machine\\SYSTEM\\CurrentControlSet\\Services\\atikmdag");
-        InitializeObjectAttributes(&objAttr, &devPath, OBJ_CASE_INSENSITIVE, NULL, NULL);
+        InitializeObjectAttributes(&objAttr, RegistryPath, OBJ_CASE_INSENSITIVE, NULL, NULL);
 
         HANDLE hKey = NULL;
-        Status = ZwOpenKey(&hKey, KEY_SET_VALUE, &objAttr);
-        if (NT_SUCCESS(Status)) {
+        if (NT_SUCCESS(ZwOpenKey(&hKey, KEY_SET_VALUE, &objAttr))) {
             RtlInitUnicodeString(&valName, L"DriverEntryRan");
             ZwSetValueKey(hKey, &valName, 0, REG_DWORD, &val, sizeof(val));
             ZwClose(hKey);
         }
     }
-
-    UNREFERENCED_PARAMETER(RegistryPath);
 
     g_DriverObject = DriverObject;
 
@@ -1265,6 +1260,10 @@ DreamV3DdiDestroyAllocation(
             (PDREAM_V3_ALLOCATION)pDestroyAllocation->pAllocationList[i];
         if (Alloc != NULL) {
             RemoveEntryList(&Alloc->ListEntry);
+            if (Alloc->VirtualAddress != NULL) {
+                MmFreeContiguousMemory(Alloc->VirtualAddress);
+                Alloc->VirtualAddress = NULL;
+            }
             ExFreePoolWithTag(Alloc, DREAM_V3_TAG_ALLOCATION);
         }
     }
@@ -4409,6 +4408,10 @@ DreamV3SdmaFillBuffer(
         return STATUS_DEVICE_NOT_READY;
     }
 
+    if (SizeBytes == 0) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
     Ring = (volatile PULONG)DevExt->SdmaRing.VirtualAddress;
     WPtr = DevExt->SdmaRing.WritePointer;
 
@@ -4416,6 +4419,11 @@ DreamV3SdmaFillBuffer(
     ULONG TotalBytes = 9 * sizeof(ULONG);
 
     if (WPtr + TotalBytes > (ULONG)DevExt->SdmaRing.SizeInBytes) {
+        /* Fill remaining space with NOPs before wrapping */
+        ULONG nopEnd = (ULONG)(DevExt->SdmaRing.SizeInBytes / sizeof(ULONG));
+        for (ULONG n = WPtr / sizeof(ULONG); n < nopEnd; n++) {
+            Ring[n] = SDMA_PKT_HDR(SDMA_OP_NOP, 0);
+        }
         WPtr = 0;
     }
 
@@ -4430,7 +4438,7 @@ DreamV3SdmaFillBuffer(
     Ring[idx + 3] = DstPhysical.HighPart;
     /* Fill value (32-bit) */
     Ring[idx + 4] = FillValue;
-    /* Size - 1 */
+    /* Size - 1 (guaranteed > 0 by SizeBytes check above) */
     Ring[idx + 5] = (ULONG)(SizeBytes - 1);
     /* EOP */
     Ring[idx + 6] = (1 << 29);
