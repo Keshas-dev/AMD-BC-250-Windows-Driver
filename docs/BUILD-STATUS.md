@@ -49,12 +49,14 @@ PSP initialization runs automatically during `DreamV3HwInitialize()` as Step 9:
 
 Based on Linux amdgpu `psp_v11_0_8.c` analysis — see `docs/LINUX-AMDGPU-ANALYSIS.md`.
 
-## Installation
+## Installation (IMPORTANT: always uninstall first!)
 
 1. `bcdedit /set testsigning on` + reboot (one-time)
 2. Build: `build.bat`
-3. Device Manager → Update driver → Browse to `output\` → Select INF
+3. Device Manager → AMD Radeon BC-250 → **Uninstall device** (check "Delete driver")
 4. Reboot
+5. Device Manager → Update driver → Browse to `output\` → Select INF
+6. Reboot
 
 ## Test
 

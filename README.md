@@ -138,10 +138,12 @@ test-tools\compile-safe.bat      # Safe minimal test (read-only)
 test-tools\compile-deep.bat      # Deep NBIO/DF/MMHUB scan + write test
 ```
 
-### Install
+### Install (IMPORTANT: always uninstall first!)
 1. `build.bat` → `output\atikmdag.sys`
-2. Device Manager → AMD Radeon BC-250 → Update Driver → Browse → `output\`
-3. Reboot
+2. Device Manager → AMD Radeon BC-250 → **Uninstall device** (check "Delete driver")
+3. **Reboot**
+4. Device Manager → AMD Radeon BC-250 → Update Driver → Browse → `output\`
+5. **Reboot**
 
 ### Test
 ```cmd
