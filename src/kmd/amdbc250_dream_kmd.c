@@ -1589,6 +1589,7 @@ DreamV3DdiPresent(
     }
 
     /* Get device extension */
+    if (g_ControlDevice == NULL) { return STATUS_SUCCESS; }
     DevExt = (PDREAM_V3_DEVICE_EXTENSION)g_ControlDevice->DeviceExtension;
     if (DevExt == NULL || !DevExt->HardwareInitialized) {
         return STATUS_SUCCESS;
@@ -4332,6 +4333,10 @@ DreamV3SdmaCopyBuffer(
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
                    "AMDBC250-DREAM-V4.3: SDMA ring not initialized\n"));
         return STATUS_DEVICE_NOT_READY;
+    }
+
+    if (SizeBytes == 0) {
+        return STATUS_INVALID_PARAMETER;
     }
 
     Ring = (volatile PULONG)DevExt->SdmaRing.VirtualAddress;
