@@ -3820,7 +3820,22 @@ DreamV3DeviceControl(
         break;
     }
 
-    /* PSP IOCTLs moved to amdbc250_psp driver */
+    /* --- PSP status (integrated into dream driver) --- */
+    case 0x80000BA4: { /* IOCTL_AMDBC250_PSP_GET_STATUS */
+        PAMDBC250_PSP_CONTEXT pspCtx = Amdbc250PspGetContext();
+        if (outputLen >= 4 * sizeof(ULONG)) {
+            PULONG out = (PULONG)outputBuffer;
+            out[0] = pspCtx->Initialized ? 1 : 0;
+            out[1] = pspCtx->SosAlive ? 1 : 0;
+            out[2] = DevExt ? (DevExt->NbioUnlocked ? 1 : 0) : 0;
+            out[3] = Amdbc250PspReadRegister(0x0244);
+            bytesReturned = 4 * sizeof(ULONG);
+            status = STATUS_SUCCESS;
+        } else {
+            status = STATUS_BUFFER_TOO_SMALL;
+        }
+        break;
+    }
 
     /* --- Write PCI config space (one DWORD via IO ports) --- */
     case 0x80000BB0: { /* IOCTL_AMDBC250_WRITE_PCI_CONFIG */
