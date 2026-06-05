@@ -3,6 +3,17 @@
 
 #include <ntddk.h>
 
+/* MP0 C2PMSG register byte offsets within the PSP mailbox block */
+#define MP0_C2PMSG_35_BYTE            0x018C
+#define MP0_C2PMSG_36_BYTE            0x0190
+#define MP0_C2PMSG_64_BYTE            0x0200
+#define MP0_C2PMSG_67_BYTE            0x020C
+#define MP0_C2PMSG_69_BYTE            0x0214
+#define MP0_C2PMSG_70_BYTE            0x0218
+#define MP0_C2PMSG_71_BYTE            0x021C
+#define MP0_C2PMSG_81_BYTE            0x0244
+#define MP0_C2PMSG_101_BYTE           0x0294
+
 typedef struct _AMDBC250_PSP_CONTEXT {
     PUCHAR MmioBase;
     ULONG MmioSize;

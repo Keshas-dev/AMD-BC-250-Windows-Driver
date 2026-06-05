@@ -6,16 +6,6 @@
 #define GPU_BAR5_PHYSICAL             0xFE800000ULL
 #define GPU_BAR5_SIZE                 0x80000
 
-#define MP0_C2PMSG_35_BYTE            0x018C
-#define MP0_C2PMSG_36_BYTE            0x0190
-#define MP0_C2PMSG_64_BYTE            0x0200
-#define MP0_C2PMSG_67_BYTE            0x020C
-#define MP0_C2PMSG_69_BYTE            0x0214
-#define MP0_C2PMSG_70_BYTE            0x0218
-#define MP0_C2PMSG_71_BYTE            0x021C
-#define MP0_C2PMSG_81_BYTE            0x0244
-#define MP0_C2PMSG_101_BYTE           0x0294
-
 #define MBOX_TOS_READY_FLAG           0x80000000
 #define MBOX_TOS_READY_MASK           0x80000000
 #define MBOX_TOS_RESP_FLAG            0x80000000
@@ -127,19 +117,43 @@ static NTSTATUS Amdbc250PspWaitForBootloader(VOID)
 static NTSTATUS Amdbc250PspIsSosAlive(PBOOLEAN Alive)
 {
     ULONG sol = Amdbc250PspReadRegister(MP0_C2PMSG_81_BYTE);
-    *Alive = (sol != 0x0);
+    *Alive = (sol & 0x80000000) ? TRUE : FALSE;
     return STATUS_SUCCESS;
 }
 
 static NTSTATUS Amdbc250PspDiscoverMp0Base(VOID)
 {
-    ULONG tryOffsets[] = { 0x00000, 0x04000, 0x08000, 0x10000, 0x14000, 0x18000, 0x1C000, 0x1E000, 0x20000 };
+    /* Primary scan: fine-grained check of the 0x0-0x8000 range
+       where the actual PSP mailbox registers live.
+       The PSP driver confirmed working MP0 base at ~0x40F4. */
+    ULONG tryOffsets[] = {
+        0x00000, 0x04000, 0x040F0, 0x040F4, 0x040F8, 0x04100, 0x0410C, 0x04200,
+        0x04400, 0x04800, 0x05000, 0x06000, 0x08000, 0x10000,
+    };
     ULONG i;
     for (i = 0; i < sizeof(tryOffsets) / sizeof(tryOffsets[0]); i++) {
         g_Mp0BaseDword = tryOffsets[i];
         ULONG sol = Amdbc250PspReadRegister(MP0_C2PMSG_81_BYTE);
         if (sol != 0 && sol != 0xFFFFFFFF) {
-            KdPrint(("BC250-PSP: MP0 base found at DWORD offset 0x%05X (SOL=0x%08X)\n", tryOffsets[i], sol));
+            /* Verify that C2PMSG_35 is also accessible (writable check) */
+            ULONG test35 = Amdbc250PspReadRegister(MP0_C2PMSG_35_BYTE);
+            if (test35 != 0xFFFFFFFF) {
+                KdPrint(("BC250-PSP: MP0 base found at DWORD offset 0x%05X (SOL=0x%08X, C35=0x%08X)\n",
+                    tryOffsets[i], sol, test35));
+                return STATUS_SUCCESS;
+            }
+            KdPrint(("BC250-PSP: Candidate at 0x%05X (SOL=0x%08X) but C2PMSG_35 blocked\n",
+                tryOffsets[i], sol));
+        }
+    }
+    /* Fallback: wider scan (original behavior) */
+    ULONG tryOffsets2[] = { 0x10000, 0x14000, 0x16000, 0x18000, 0x1C000, 0x1E000, 0x20000,
+        0x22000, 0x24000, 0x28000, 0x2C000, 0x30000, 0x34000, 0x38000, 0x3C000 };
+    for (i = 0; i < sizeof(tryOffsets2) / sizeof(tryOffsets2[0]); i++) {
+        g_Mp0BaseDword = tryOffsets2[i];
+        ULONG sol = Amdbc250PspReadRegister(MP0_C2PMSG_81_BYTE);
+        if (sol != 0 && sol != 0xFFFFFFFF) {
+            KdPrint(("BC250-PSP: MP0 base found (fallback) at DWORD offset 0x%05X (SOL=0x%08X)\n", tryOffsets2[i], sol));
             return STATUS_SUCCESS;
         }
     }

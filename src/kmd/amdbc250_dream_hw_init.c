@@ -583,6 +583,19 @@ DreamV3PspHardwareInit(
         DevExt->PspInitialized = FALSE;
         DevExt->PspAlive = FALSE;
         DevExt->NbioUnlocked = FALSE;
+
+        /* Step 9a-retry: Check if SOS was already loaded by EFI Shell injection */
+        PspCtx = Amdbc250PspGetContext();
+        if (PspCtx && PspCtx->MmioBase) {
+            ULONG sol = Amdbc250PspReadRegister(MP0_C2PMSG_81_BYTE);
+            if (sol & 0x80000000) {
+                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+                           "AMDBC250-DREAM-V4.3: SOS already alive (SOL=0x%08X) - EFI Shell injection detected!\n", sol));
+                DevExt->PspAlive = TRUE;
+                DevExt->NbioUnlocked = TRUE;
+                return STATUS_SUCCESS;
+            }
+        }
         return STATUS_SUCCESS; /* Non-fatal */
     }
 

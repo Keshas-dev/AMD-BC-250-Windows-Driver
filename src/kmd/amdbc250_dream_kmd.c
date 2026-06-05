@@ -4286,6 +4286,43 @@ DreamV3DeviceControl(
         break;
     }
 
+    /* --- NBIO Status (live check) --- */
+    case 0x80000C0C: { /* IOCTL_AMDBC250_GET_NBIO_STATUS */
+        if (outputLen >= 5 * sizeof(ULONG)) {
+            PAMDBC250_PSP_CONTEXT pspCtx = Amdbc250PspGetContext();
+            PULONG out = (PULONG)outputBuffer;
+            ULONG sol = 0;
+            ULONG grbm = 0xFFFFFFFF;
+            ULONG cp = 0xFFFFFFFF;
+            ULONG clk = 0xFFFFFFFF;
+
+            __try {
+                if (pspCtx && pspCtx->MmioBase) {
+                    sol = Amdbc250PspReadRegister(0x0244);
+                }
+                if (DevExt && DevExt->MmioVirtualBase) {
+                    grbm = READ_REGISTER_ULONG((PULONG)((PUCHAR)DevExt->MmioVirtualBase + 0x2004));
+                    cp = READ_REGISTER_ULONG((PULONG)((PUCHAR)DevExt->MmioVirtualBase + 0x2000));
+                    clk = READ_REGISTER_ULONG((PULONG)((PUCHAR)DevExt->MmioVirtualBase + 0x0D00));
+                }
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
+                    "AMDBC250-DREAM-V4.3: GET_NBIO_STATUS exception\n"));
+            }
+
+            out[0] = (sol & 0x80000000) ? 1 : 0;  /* SOS alive (live) */
+            out[1] = (grbm != 0xFFFFFFFF && grbm != 0x00000000) ? 0 : 1;  /* NBIO locked */
+            out[2] = sol;     /* C2PMSG_81 raw value */
+            out[3] = grbm;    /* GRBM_STATUS raw value */
+            out[4] = cp;      /* CP raw value */
+            bytesReturned = 5 * sizeof(ULONG);
+            status = STATUS_SUCCESS;
+        } else {
+            status = STATUS_BUFFER_TOO_SMALL;
+        }
+        break;
+    }
+
     default:
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
                    "AMDBC250-DREAM-V4.3: Unknown IOCTL 0x%08X\n", ioctlCode));
