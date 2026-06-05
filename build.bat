@@ -197,38 +197,6 @@ echo.
 echo ==========================================
 echo  SIGNING DRIVERS
 echo ==========================================
-echo.
-
-if "%SIGNTOOLS%"=="" (
-    echo WARNING: Skipping signing - signtool not found
-    goto :SkipSigning
-)
-
-rem --- Create certificate if not exists ---
-if not exist "%CERT_FILE%" (
-    echo Creating self-signed test certificate...
-    "%SIGNTOOLS%\makecert.exe" -r -pe -n "CN=%CERT_NAME%" ^
-      -ss My -sr CurrentUser ^
-      -sky signature -a sha256 -m 60 ^
-      "%CERT_FILE%"
-    if errorlevel 1 (
-        echo WARNING: Certificate creation failed - skipping signing
-        goto :SkipSigning
-    )
-    echo Certificate created.
-    
-    rem --- Trust the certificate (add to Root store) ---
-    echo Adding certificate to Root trust store...
-    certutil -addstore -user Root "%CERT_FILE%" >nul 2>&1
-    certutil -addstore -user TrustedPublisher "%CERT_FILE%" >nul 2>&1
-    echo   Certificate trusted.
-)
-
-rem --- Trust the certificate in LocalMachine (required for kernel boot drivers) ---
-echo Adding certificate to LocalMachine trust stores...
-certutil -addstore Root "%CERT_FILE%" >nul 2>&1 && echo   Root OK || echo   Root: MAY NEED ADMIN
-certutil -addstore TrustedPublisher "%CERT_FILE%" >nul 2>&1 && echo   TrustedPublisher OK || echo   TrustedPublisher: MAY NEED ADMIN
-
 rem --- Sign kernel driver FIRST (most important) ---
 :SignKmd
 echo Signing atikmdag.sys...
