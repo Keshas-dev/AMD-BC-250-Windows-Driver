@@ -5,6 +5,7 @@
 
 #define GPU_BAR5_PHYSICAL             0xFE800000ULL
 #define GPU_BAR5_SIZE                 0x80000
+#define PSP_BAR5_MAP_SIZE             0x200000  /* 2MB - needed to reach PSP regs at 0x1056C+ */
 
 #define MBOX_TOS_READY_FLAG           0x80000000
 #define MBOX_TOS_READY_MASK           0x80000000
@@ -232,8 +233,8 @@ if (MmioPhysicalBase != 0)
     pspMmioPhysical.QuadPart = MmioPhysicalBase;
 else
     pspMmioPhysical.QuadPart = GPU_BAR5_PHYSICAL;
-    g_PspContext.MmioSize = GPU_BAR5_SIZE;
-    g_PspContext.MmioBase = (PUCHAR)MmMapIoSpace(pspMmioPhysical, GPU_BAR5_SIZE, MmNonCached);
+    g_PspContext.MmioSize = PSP_BAR5_MAP_SIZE;
+    g_PspContext.MmioBase = (PUCHAR)MmMapIoSpace(pspMmioPhysical, PSP_BAR5_MAP_SIZE, MmNonCached);
     if (!g_PspContext.MmioBase) return STATUS_INSUFFICIENT_RESOURCES;
     status = Amdbc250PspDiscoverMp0Base();
     if (!NT_SUCCESS(status)) {

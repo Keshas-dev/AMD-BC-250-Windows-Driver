@@ -28,7 +28,7 @@ static BOOL InitHardware(HANDLE h) {
     UCHAR in[32] = {0}, out[32] = {0};
     DWORD br = 0;
     *(UINT64*)(in + 0)  = 0xFE800000ULL;  /* MMIO BAR5 */
-    *(UINT32*)(in + 8)  = 0x00080000;      /* 512KB */
+    *(UINT32*)(in + 8)  = 0x00200000;      /* 2MB - need this to reach PSP regs at 0x1056C+ */
     *(UINT32*)(in + 12) = 1;                /* Flags=1: map only, no GPU init */
     *(UINT64*)(in + 16) = 0xC0000000ULL;  /* VRAM BAR0 */
     *(UINT32*)(in + 24) = 0x10000000;      /* 256MB */
@@ -127,11 +127,24 @@ int main(void) {
      */
     UINT64 bar5Phys = 0xFE800000ULL;
     UINT64 candidates[] = {
-        0x14000ULL,  /* Standard Navi10 MP0 */
+        0x04000ULL,  /* PSP driver confirmed range start */
+        0x040F0ULL,  /* PSP driver working base (0x40F4-0x40F8) */
+        0x040F4ULL,  /* PSP driver: C2PMSG_81 at BAR5+0x10614 */
+        0x040F8ULL,  /* PSP driver: C2PMSG_35 at BAR5+0x1056C */
+        0x04100ULL,
+        0x04200ULL,
+        0x04400ULL,
+        0x04800ULL,
+        0x05000ULL,
+        0x06000ULL,
+        0x08000ULL,
+        0x10000ULL,
+        0x14000ULL,  /* Standard Navi10 MP0 (false positive zone) */
         0x16000ULL,  /* Alternative */
-        0x18000ULL,  /* Alternative */
-        0x1A000ULL,  /* Alternative */
-        0x1C000ULL,  /* Alternative */
+        0x18000ULL,
+        0x1A000ULL,
+        0x1C000ULL,
+        0x20000ULL,
     };
 
     UINT32 solValue = 0;
@@ -145,17 +158,46 @@ int main(void) {
             Log("  MP0 candidate 0x%llX: C2PMSG_81[0x%05X] = 0x%08X",
                 candidates[i], c2pmsg81Offset, val);
             if (val != 0 && val != 0xFFFFFFFF) {
-                Log("  *** FOUND! ***");
-                solValue = val;
-                mp0Base = candidates[i];
+                /* Verify C2PMSG_35 is also accessible */
+                UINT32 c2pmsg35Check = (UINT32)((candidates[i] + 0x0063) * 4);
+                UINT32 val35 = 0xFFFFFFFF;
+                ReadReg(h, c2pmsg35Check, &val35);
+                if (val35 != 0xFFFFFFFF) {
+                    Log("  *** FOUND! (C2PMSG_35=0x%08X) ***", val35);
+                    solValue = val;
+                    mp0Base = candidates[i];
+                } else {
+                    Log("  (C2PMSG_35=0xFFFFFFFF - blocked)");
+                }
             }
             Log("\n");
         }
     }
 
     if (mp0Base == 0) {
-        Log("WARNING: No MP0 discovery base found, using default 0x14000\n");
-        mp0Base = 0x14000;
+        Log("WARNING: No MP0 discovery base found, defaulting to 0x040F8\n");
+        mp0Base = 0x040F8;
+    }
+
+    /* Direct test of known working PSP driver offsets (BAR5 mapped as 2MB now) */
+    Log("\n=== Direct PSP driver offset test (2MB mapping) ===\n");
+    {
+        /* PSP driver confirmed: C2PMSG_35 at 0x1056C, C2PMSG_36 at 0x10570, C2PMSG_81 at 0x10614 */
+        /* These offsets are at MP0 base ~0x40F8: (0x40F8 + 0x0063) * 4 = 0x1056C */
+        UINT32 pspCandidates[] = {
+            0x040F4,  /* MP0 base for C2PMSG_81: (0x40F4 + 0x0091) * 4 = 0x10614 */
+            0x040F8,  /* MP0 base for C2PMSG_35: (0x40F8 + 0x0063) * 4 = 0x1056C */
+        };
+        for (int i = 0; i < 2; i++) {
+            UINT32 c2pmsg81 = (UINT32)((pspCandidates[i] + 0x0091) * 4);
+            UINT32 c2pmsg35 = (UINT32)((pspCandidates[i] + 0x0063) * 4);
+            UINT32 val81 = 0xFFFFFFFF, val35 = 0xFFFFFFFF;
+            ReadReg(h, c2pmsg81, &val81);
+            ReadReg(h, c2pmsg35, &val35);
+            Log("  MP0 0x%04X: C2PMSG_81[0x%05X]=0x%08X  C2PMSG_35[0x%05X]=0x%08X%s\n",
+                pspCandidates[i], c2pmsg81, val81, c2pmsg35, val35,
+                (val35 != 0xFFFFFFFF && val81 != 0xFFFFFFFF) ? " *** BOTH ACCESSIBLE ***" : "");
+        }
     }
 
     /* Calculate C2PMSG register offsets */
