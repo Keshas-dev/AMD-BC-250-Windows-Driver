@@ -211,7 +211,12 @@ NTSTATUS Amdbc250PspInit(ULONG64 MmioPhysicalBase)
 {
     NTSTATUS status;
     PHYSICAL_ADDRESS pspMmioPhysical;
-    UNREFERENCED_PARAMETER(MmioPhysicalBase);
+    /* Use the caller‑provided physical base if supplied; otherwise fall back to the
+   historic hard‑coded address. This makes the driver adaptable to platforms
+   where the PSP MMIO window is relocated. */
+if (MmioPhysicalBase != 0)
+    pspMmioPhysical.QuadPart = MmioPhysicalBase;
+else
     pspMmioPhysical.QuadPart = GPU_BAR5_PHYSICAL;
     g_PspContext.MmioSize = GPU_BAR5_SIZE;
     g_PspContext.MmioBase = (PUCHAR)MmMapIoSpace(pspMmioPhysical, GPU_BAR5_SIZE, MmNonCached);
@@ -256,11 +261,36 @@ NTSTATUS Amdbc250PspInit(ULONG64 MmioPhysicalBase)
     g_PspContext.AsdFirmwareSize = sizeof(g_AsdFirmwareData);
     g_PspContext.TaFirmware = (PUCHAR)g_TaFirmwareData;
     g_PspContext.TaFirmwareSize = sizeof(g_TaFirmwareData);
-    status = Amdbc250PspBootloaderLoadSysdrv();
-    status = Amdbc250PspBootloaderLoadSos();
-    status = Amdbc250PspRingCreate();
-    g_PspContext.Initialized = TRUE;
-    return STATUS_SUCCESS;
+    /* Load the system driver into the PSP */
+status = Amdbc250PspBootloaderLoadSysdrv();
+if (!NT_SUCCESS(status)) {
+    KdPrint(("BC250-PSP: Sysdrv load failed (0x%08X)\n", status));
+    goto cleanup;
+}
+
+/* Load the SecureOS (SOS) firmware */
+status = Amdbc250PspBootloaderLoadSos();
+if (!NT_SUCCESS(status)) {
+    KdPrint(("BC250-PSP: SOS load failed (0x%08X)\n", status));
+    goto cleanup;
+}
+
+/* Create the communication ring */
+status = Amdbc250PspRingCreate();
+if (!NT_SUCCESS(status)) {
+    KdPrint(("BC250-PSP: Ring creation failed (0x%08X)\n", status));
+    goto cleanup;
+}
+
+g_PspContext.Initialized = TRUE;
+return STATUS_SUCCESS;
+
+cleanup:
+/* Ensure we do not leak any allocated resources on partial failure */
+Amdbc250PspFreeSharedMemory();
+Amdbc250PspUnmapRegisters();
+RtlZeroMemory(&g_PspContext, sizeof(g_PspContext));
+return status;
 }
 
 VOID Amdbc250PspCleanup(VOID)

@@ -1389,7 +1389,7 @@ static void Bc250ParseDxbcShader(const UINT* pCode, SIZE_T CodeSize)
 
     /* Log shader info */
     char buf[256];
-    sprintf(buf, "BC-250 UMD: Shader DXBC v%u.%u, %u chunks, %u bytes\n",
+    sprintf_s(buf, sizeof(buf), "BC-250 UMD: Shader DXBC v%u.%u, %u chunks, %u bytes\n",
             (hdr->Version >> 8) & 0xFF, hdr->Version & 0xFF,
             hdr->NumChunks, hdr->TotalSize);
     OutputDebugStringA(buf);
