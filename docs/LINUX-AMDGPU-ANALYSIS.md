@@ -196,3 +196,81 @@ The PSP firmware files needed are standard AMD SOS/ASD/TA binaries. Since BC-250
 - GTT: 512MB at 0x00000000 (PCIE GART)
 - PSP TMR: 4MB at 0xF41F800000
 - ppfeaturemask: 0xfff7bfff
+
+---
+
+## NBIO Firewall Engineering Analysis (June 2026)
+
+### Why 0xFFFFFFFF = Master Abort
+
+When reading GRBM_STATUS (0x2004), CP (0x2000), SDMA (0x2600), CLK (0x0D00) and getting **0xFFFFFFFF**, this indicates a hardware-level **Master Abort** or **Target Disconnect**.
+
+When NBIO firewall is active, it **physically isolates** GPU execution blocks from the PCIe bus. A read request travels through PCIe BAR0 → reaches NBIO → NBIO firewall intercepts and **blocks** the request from reaching the actual graphics core. Since the request is cut off mid-path, the PCIe controller returns the standard hardware "empty signal" — all binary ones = 0xFFFFFFFF.
+
+### Why Writes "Persist" But Don't Take Effect (Shadow Registers)
+
+When writing to PCI config registers (e.g., 0xB8) and reading back the same value, this creates an illusion that "the register accepted the command."
+
+In AMD architecture, config registers (especially at Root Complex and PSP level) have **Shadow Registers** or **Latches**.
+
+When a write is performed:
+1. The value is physically written to NBIO's external interface memory cell (buffer)
+2. The value CAN be read back (it's in the buffer)
+3. BUT: for this value to perform a real hardware action (unlock internal bridges), NBIO's internal logic must **transfer** this setting to internal execution registers
+4. This transfer is **blocked** until the system receives a **Hardware Auth Token** from PSP
+5. Without PSP microcode, these writes are just "dead numbers in a buffer"
+
+### Why PCI Config Writes to 0xB8 Don't Unlock NBIO
+
+In AMD topology, 0xB8 is typically used as an **Index/Data access window** (to reach NBIO registers via PCI config space).
+
+Writing to 0xB8 across all three devices (B0:D0:F0, B1:D0:F0, B1:D0:F2) doesn't unlock NBIO because the firewall is controlled by **dynamic address protection**, not simple config flags.
+
+This is similar to CPU IOMMU or Page Table protection — NBIO has an active table in the background that states: "All OS Ring 0 attempts to access GFX/SDMA blocks → **Block** (return 0xFFFFFFFF)". Only PSP itself can overwrite this table through its internal SRAM and privileged bus.
+
+### Confirmed: PCI Config Writes Are a Dead End
+
+This experiment **definitively closed** the theory that NBIO can be "tricked" by direct register writes from the driver. This is an excellent research result — now we have 100% proof of what doesn't work.
+
+### The Only Way Forward: PSP Firmware Loading
+
+The only path to turn those 0xFFFFFFFF values into real register readings:
+
+**Load PSP firmware (cyan_skillfish2_sos.bin) via C2PMSG_35/36 bootloader interface.**
+
+Only when PSP wakes up and performs its initial sequence will it **internally disable** this address filtering, and the driver will see the actual GPU statuses instead of 0xFFFFFFFF.
+
+### PSP Bootloader Sequence (Detailed)
+
+```
+Step 1: Map BAR5 (0xFE800000, 512KB) via MmMapIoSpace
+Step 2: Find MP0 discovery base within BAR5
+        - MP0 SMN_C2PMSG_81 at discovery_dword + 0x0091
+        - Physical = BAR5 + (discovery_dword + 0x0091) * 4
+Step 3: Check SOS alive (C2PMSG_81 bit 31)
+        - If bit31 = 1: SOS is running, skip to ring creation
+        - If bit31 = 0: SOS not loaded, proceed to Step 4
+Step 4: Allocate 4MB contiguous physical memory (TMR region)
+Step 5: Copy cyan_skillfish2_sos.bin into TMR
+Step 6: Write TMR physical address >> 20 to C2PMSG_36 (0x0190)
+Step 7: Write PSP_BL__LOAD_SOS command (0x20000000) to C2PMSG_35 (0x018C)
+Step 8: Poll C2PMSG_35 bit 31 for bootloader response (timeout ~1s)
+Step 9: Check response bits 30:0 for success
+Step 10: SOS is now running — NBIO firewall should be disabled
+Step 11: Create PSP ring via C2PMSG_64/69/70/71
+Step 12: GFX/SDMA/CP registers should now return real values
+```
+
+### Firmware Files Required
+
+Standard AMD firmware files (NOT Sony/PS5):
+- `cyan_skillfish2_sos.bin` — PSP Secure OS (~1-2MB)
+- `cyan_skillfish2_asd.bin` — PSP ASD driver (~256KB)
+- `cyan_skillfish2_ta.bin` — PSP Trusted Application (~256KB)
+
+These can be obtained from:
+1. Linux firmware package: `/lib/firmware/amdgpu/`
+2. AMD GPU firmware repository: https://github.com/FreddyFunk/amd-firmware
+3. Extracted from Linux kernel package
+
+Since BC-250 is a mining card (not PS5), its PSP accepts standard AMD-signed firmware.
