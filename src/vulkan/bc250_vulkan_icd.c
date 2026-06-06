@@ -311,9 +311,134 @@ VkResult VKAPI_CALL bc250_vkGetPhysicalDeviceProperties(
 {
     UNREFERENCED_PARAMETER(physicalDevice);
     
-    /* Fill in basic GPU properties for BC-250 */
-    /* In real implementation, this would query KMD for actual hardware info */
-    memset(pProperties, 0, 256); /* Simplified - real struct is larger */
+    /* BC-250 (Cyan Skillfish) - RDNA2-based, 24 CUs, GFX1013 */
+    VkPhysicalDeviceProperties* props = (VkPhysicalDeviceProperties*)pProperties;
+    memset(props, 0, sizeof(VkPhysicalDeviceProperties));
+    
+    props->apiVersion = VK_API_VERSION_1_3;
+    props->driverVersion = 430; /* v4.3 */
+    props->vendorID = 0x1002;   /* AMD */
+    props->deviceID = 0x13FE;  /* BC-250 */
+    props->deviceType = VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU;
+    memcpy(props->deviceName, "AMD Radeon BC-250 Graphics (Dream Drivers v4.3)", 52);
+    props->limits.maxImageDimension2D = 16384;
+    props->limits.maxImageDimension3D = 2048;
+    props->limits.maxImageDimensionCube = 16384;
+    props->limits.maxImageArrayLayers = 2048;
+    props->limits.maxTexelBufferElements = 0x10000000;
+    props->limits.maxUniformBufferRange = 0x10000;
+    props->limits.maxStorageBufferRange = 0x10000000;
+    props->limits.maxPushConstantsSize = 128;
+    props->limits.maxMemoryAllocationCount = 4096;
+    props->limits.maxSamplerAllocationCount = 1024;
+    props->limits.bufferImageGranularity = 4096;
+    props->limits.sparseAddressSpaceSize = 0;
+    props->limits.maxBoundDescriptorSets = 4;
+    props->limits.maxPerStageDescriptorSamplers = 32;
+    props->limits.maxPerStageDescriptorUniformBuffers = 16;
+    props->limits.maxPerStageDescriptorStorageBuffers = 16;
+    props->limits.maxPerStageDescriptorSampledImages = 128;
+    props->limits.maxPerStageDescriptorStorageImages = 16;
+    props->limits.maxPerStageDescriptorInputAttachments = 16;
+    props->limits.maxPerStageResources = 256;
+    props->limits.maxDescriptorSetSamplers = 96;
+    props->limits.maxDescriptorSetUniformBuffers = 48;
+    props->limits.maxDescriptorSetUniformBuffersDynamic = 8;
+    props->limits.maxDescriptorSetStorageBuffers = 48;
+    props->limits.maxDescriptorSetStorageBuffersDynamic = 8;
+    props->limits.maxDescriptorSetSampledImages = 384;
+    props->limits.maxDescriptorSetStorageImages = 48;
+    props->limits.maxDescriptorSetInputAttachments = 16;
+    props->limits.maxVertexInputAttributes = 32;
+    props->limits.maxVertexInputBindings = 32;
+    props->limits.maxVertexInputAttributeOffset = 2047;
+    props->limits.maxVertexInputBindingStride = 2048;
+    props->limits.maxVertexOutputComponents = 128;
+    props->limits.maxTessellationGenerationLevel = 64;
+    props->limits.maxTessellationPatchSize = 32;
+    props->limits.maxTessellationControlPerVertexInputComponents = 128;
+    props->limits.maxTessellationControlPerVertexOutputComponents = 128;
+    props->limits.maxTessellationControlPerPatchOutputComponents = 128;
+    props->limits.maxTessellationControlTotalOutputComponents = 2048;
+    props->limits.maxTessellationDomainInputComponents = 128;
+    props->limits.maxGeometryShaderInvocations = 32;
+    props->limits.maxGeometryInputComponents = 64;
+    props->limits.maxGeometryOutputComponents = 128;
+    props->limits.maxGeometryOutputVertices = 256;
+    props->limits.maxGeometryTotalOutputComponents = 1024;
+    props->limits.maxFragmentInputComponents = 128;
+    props->limits.maxFragmentOutputAttachments = 8;
+    props->limits.maxFragmentDualSrcAttachments = 1;
+    props->limits.maxFragmentCombinedOutputResources = 8;
+    props->limits.maxComputeSharedMemorySize = 65536;
+    props->limits.maxComputeWorkGroupCount[0] = 65535;
+    props->limits.maxComputeWorkGroupCount[1] = 65535;
+    props->limits.maxComputeWorkGroupCount[2] = 65535;
+    props->limits.maxComputeWorkGroupInvocations = 1024;
+    props->limits.maxComputeWorkGroupSize[0] = 1024;
+    props->limits.maxComputeWorkGroupSize[1] = 1024;
+    props->limits.maxComputeWorkGroupSize[2] = 64;
+    props->limits.subPixelPrecisionBits = 4;
+    props->limits.subTexelPrecisionBits = 8;
+    props->limits.mipmapPrecisionBits = 4;
+    props->limits.maxDrawIndexedIndexValue = 0xFFFFFFFF;
+    props->limits.maxDrawIndirectCount = 0xFFFFFFFF;
+    props->limits.maxSamplerLodBias = 16;
+    props->limits.maxSamplerAnisotropy = 16;
+    props->limits.maxViewports = 16;
+    props->limits.maxViewportDimensions[0] = 16384;
+    props->limits.maxViewportDimensions[1] = 16384;
+    props->limits.viewportBoundsRange[0] = -32768;
+    props->limits.viewportBoundsRange[1] = 32767;
+    props->limits.viewportSubPixelBits = 8;
+    props->limits.minMemoryMapAlignment = 4096;
+    props->limits.minTexelBufferOffsetAlignment = 256;
+    props->limits.minUniformBufferOffsetAlignment = 256;
+    props->limits.minStorageBufferOffsetAlignment = 256;
+    props->limits.minTexelOffset = -8;
+    props->limits.maxTexelOffset = 7;
+    props->limits.minTexelGatherOffset = -8;
+    props->limits.maxTexelGatherOffset = 7;
+    props->limits.minInterpolationOffset = -0.5f;
+    props->limits.maxInterpolationOffset = 0.5f;
+    props->limits.subPixelInterpolationOffsetBits = 4;
+    props->limits.maxFramebufferWidth = 16384;
+    props->limits.maxFramebufferHeight = 16384;
+    props->limits.maxFramebufferLayers = 2048;
+    props->limits.framebufferColorSampleCounts = VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_4_BIT;
+    props->limits.framebufferDepthSampleCounts = VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_4_BIT;
+    props->limits.framebufferStencilSampleCounts = VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_4_BIT;
+    props->limits.framebufferNoAttachmentsSampleCounts = VK_SAMPLE_COUNT_1_BIT;
+    props->limits.maxColorAttachments = 8;
+    props->limits.sampledImageColorSampleCounts = VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_4_BIT;
+    props->limits.sampledImageIntegerSampleCounts = VK_SAMPLE_COUNT_1_BIT;
+    props->limits.sampledImageDepthSampleCounts = VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_4_BIT;
+    props->limits.sampledImageStencilSampleCounts = VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_4_BIT;
+    props->limits.storageImageSampleCounts = VK_SAMPLE_COUNT_1_BIT;
+    props->limits.maxSampleMaskWords = 1;
+    props->limits.timestampComputeAndGraphics = VK_TRUE;
+    props->limits.timestampPeriod = 100.0f;
+    props->limits.maxClipDistances = 8;
+    props->limits.maxCullDistances = 8;
+    props->limits.maxCombinedClipAndCullDistances = 8;
+    props->limits.discreteQueuePriorities = 2;
+    props->limits.pointSizeRange[0] = 1.0f; /* GFX10 */
+    props->limits.pointSizeRange[1] = 256.0f;
+    props->limits.lineWidthRange[0] = 1.0f;
+    props->limits.lineWidthRange[1] = 1.0f;    /* Wide lines unsupported */
+    props->limits.pointSizeGranularity = 1.0f;
+    props->limits.lineWidthGranularity = 1.0f;
+    props->limits.strictLines = VK_TRUE;
+    props->limits.standardSampleLocations = VK_TRUE;
+    props->limits.optimalBufferCopyOffsetAlignment = 256;
+    props->limits.optimalBufferCopyRowPitchAlignment = 256;
+    props->limits.nonCoherentAtomSize = 256;
+    
+    props->sparseProperties.residencyStandard2DBlockShape = VK_FALSE;
+    props->sparseProperties.residencyStandard2DMultisampleBlockShape = VK_FALSE;
+    props->sparseProperties.residencyStandard3DBlockShape = VK_FALSE;
+    props->sparseProperties.residencyAlignedMipSize = VK_FALSE;
+    props->sparseProperties.residencyNonResidentStrict = VK_FALSE;
     
     OutputDebugStringA("BC-250 Vulkan: GetPhysicalDeviceProperties\n");
     return VK_SUCCESS;

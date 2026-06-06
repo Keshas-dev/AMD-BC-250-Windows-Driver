@@ -328,8 +328,8 @@ typedef struct _AMDBC250_IOCTL_PCI_CONFIG {
     UINT32 Function;
 } AMDBC250_IOCTL_PCI_CONFIG, *PAMDBC250_IOCTL_PCI_CONFIG;
 
-/* --- PCI Config Read Result --- */
-typedef struct _AMDBC250_IOCTL_PCI_CONFIG {
+/* --- Read raw PCI config space by bus/device/function --- */
+typedef struct _AMDBC250_IOCTL_READ_PCI_CONFIG {
     UINT32 Bus;                   /* PCI bus number */
     UINT32 Device;                /* PCI device number */
     UINT32 Function;              /* PCI function number */
