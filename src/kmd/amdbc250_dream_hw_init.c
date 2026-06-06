@@ -189,6 +189,23 @@ DreamV3HwInitialize(
     DevExt->UsedVramBytes = 0;
     DevExt->VisibleVramBytes = min(DevExt->VisibleVramBytes, DevExt->TotalVramBytes);
 
+    /* Step 10: GFX ring init (requires NBIO unlocked) */
+    if (DevExt->NbioUnlocked) {
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                   "AMDBC250-DREAM-V4.3: [STEP 10] NBIO unlocked — initializing GFX ring\n"));
+        Status = DreamV3HwInitGfxRing(DevExt);
+        if (!NT_SUCCESS(Status)) {
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+                       "AMDBC250-DREAM-V4.3: [STEP 10] GFX ring init failed: 0x%08X\n", Status));
+        } else {
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                       "AMDBC250-DREAM-V4.3: [STEP 10] GFX ring ready\n"));
+        }
+    } else {
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                   "AMDBC250-DREAM-V4.3: [STEP 10] NBIO locked — GFX ring deferred\n"));
+    }
+
     /* Set clocks */
     DevExt->GpuClockMhz = AMDBC250_BOOST_CLOCK_MHZ;  /* Assume governor active */
     DevExt->MemoryClockMhz = AMDBC250_MEMORY_CLOCK_MHZ;

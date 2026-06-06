@@ -4310,8 +4310,19 @@ DreamV3DeviceControl(
                     "AMDBC250-DREAM-V4.3: GET_NBIO_STATUS exception\n"));
             }
 
-            out[0] = (sol & 0x80000000) ? 1 : 0;  /* SOS alive (live) */
-            out[1] = (grbm != 0xFFFFFFFF && grbm != 0x00000000) ? 0 : 1;  /* NBIO locked */
+            if (sol & 0x80000000) { out[0] = 1; } else { out[0] = 0; }
+            if (grbm != 0xFFFFFFFF && grbm != 0x00000000) {
+                out[1] = 0;  /* NBIO unlocked */
+                /* Auto-init GFX ring if needed */
+                if (DevExt && !DevExt->GfxRing.Initialized) {
+                    DreamV3HwInitGfxRing(DevExt);
+                }
+            } else {
+                out[1] = 1;  /* NBIO locked */
+            }
+            out[2] = sol;
+            out[3] = grbm;
+            out[4] = cp;
             out[2] = sol;     /* C2PMSG_81 raw value */
             out[3] = grbm;    /* GRBM_STATUS raw value */
             out[4] = cp;      /* CP raw value */
