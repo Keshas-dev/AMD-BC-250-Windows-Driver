@@ -13,9 +13,15 @@
 *.ipdb
 *.iobj
 
+# Binary outputs (not tracked in git - build from source)
+output/*.sys
+output/*.dll
+output/*.exe
+output/*.bin
+uefi/output/*.bin
+
 # Test executables (built locally, not tracked)
 test-tools/*.exe
-output/*.exe
 
 # Temp files
 *.tmp
