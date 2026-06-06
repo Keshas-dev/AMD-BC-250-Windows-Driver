@@ -1,11 +1,9 @@
 #include <ntddk.h>
 #include <wdm.h>
-#include "firmware_data.h"
 #include "amdbc250_psp_v11.h"
 
 #define GPU_BAR5_PHYSICAL             0xFE800000ULL
 #define GPU_BAR5_SIZE                 0x80000
-#define PSP_BAR5_MAP_SIZE             0x200000  /* 2MB - needed to reach PSP regs at 0x1056C+ */
 
 #define MBOX_TOS_READY_FLAG           0x80000000
 #define MBOX_TOS_READY_MASK           0x80000000
@@ -226,26 +224,25 @@ NTSTATUS Amdbc250PspInit(ULONG64 MmioPhysicalBase)
 {
     NTSTATUS status;
     PHYSICAL_ADDRESS pspMmioPhysical;
-    /* Use the caller‑provided physical base if supplied; otherwise fall back to the
-   historic hard‑coded address. This makes the driver adaptable to platforms
-   where the PSP MMIO window is relocated. */
-if (MmioPhysicalBase != 0)
-    pspMmioPhysical.QuadPart = MmioPhysicalBase;
-else
-    pspMmioPhysical.QuadPart = GPU_BAR5_PHYSICAL;
-    g_PspContext.MmioSize = PSP_BAR5_MAP_SIZE;
-    g_PspContext.MmioBase = (PUCHAR)MmMapIoSpace(pspMmioPhysical, PSP_BAR5_MAP_SIZE, MmNonCached);
+    
+    /* Use caller-provided physical base if supplied */
+    if (MmioPhysicalBase != 0)
+        pspMmioPhysical.QuadPart = MmioPhysicalBase;
+    else
+        pspMmioPhysical.QuadPart = GPU_BAR5_PHYSICAL;
+    g_PspContext.MmioSize = GPU_BAR5_SIZE;  /* Safe 512KB - PSP driver handles 2MB */
+    g_PspContext.MmioBase = (PUCHAR)MmMapIoSpace(pspMmioPhysical, GPU_BAR5_SIZE, MmNonCached);
     if (!g_PspContext.MmioBase) return STATUS_INSUFFICIENT_RESOURCES;
+    
+    /* Discover MP0 base for SOL check only */
     status = Amdbc250PspDiscoverMp0Base();
     if (!NT_SUCCESS(status)) {
-        KdPrint(("BC250-PSP: MP0 base discovery failed, trying extended scan\n"));
         ULONG tryOffsets2[] = { 0x22000, 0x24000, 0x28000, 0x2C000, 0x30000, 0x34000, 0x38000, 0x3C000 };
         ULONG i;
         for (i = 0; i < sizeof(tryOffsets2) / sizeof(tryOffsets2[0]); i++) {
             g_Mp0BaseDword = tryOffsets2[i];
             ULONG sol = Amdbc250PspReadRegister(MP0_C2PMSG_81_BYTE);
             if (sol != 0 && sol != 0xFFFFFFFF) {
-                KdPrint(("BC250-PSP: MP0 base found at DWORD offset 0x%05X (SOL=0x%08X)\n", tryOffsets2[i], sol));
                 status = STATUS_SUCCESS;
                 break;
             }
@@ -256,56 +253,17 @@ else
             return STATUS_NOT_FOUND;
         }
     }
-    status = Amdbc250PspAllocateSharedMemory();
-    if (!NT_SUCCESS(status)) { Amdbc250PspUnmapRegisters(); return status; }
-    if (!Amdbc250PspValidateFirmware((PUCHAR)g_SosFirmwareData, sizeof(g_SosFirmwareData), 0)) {
-        KdPrint(("BC250-PSP: SOS firmware validation FAILED (size=%zu)\n", sizeof(g_SosFirmwareData)));
-        Amdbc250PspFreeSharedMemory(); Amdbc250PspUnmapRegisters(); return STATUS_IMAGE_CHECKSUM_MISMATCH;
+    
+    /* Check if SOS is already alive (loaded by PSP driver) */
+    {
+        ULONG sol = Amdbc250PspReadRegister(MP0_C2PMSG_81_BYTE);
+        g_PspContext.SosAlive = (sol & 0x80000000) ? TRUE : FALSE;
+        g_PspContext.Initialized = TRUE;
+        KdPrint(("BC250-PSP: Init OK - MP0 base=0x%05X SOL=0x%08X SOS=%u\n",
+            g_Mp0BaseDword, sol, g_PspContext.SosAlive));
     }
-    if (!Amdbc250PspValidateFirmware((PUCHAR)g_AsdFirmwareData, sizeof(g_AsdFirmwareData), 1)) {
-        KdPrint(("BC250-PSP: ASD firmware validation FAILED (size=%zu)\n", sizeof(g_AsdFirmwareData)));
-        Amdbc250PspFreeSharedMemory(); Amdbc250PspUnmapRegisters(); return STATUS_IMAGE_CHECKSUM_MISMATCH;
-    }
-    if (!Amdbc250PspValidateFirmware((PUCHAR)g_TaFirmwareData, sizeof(g_TaFirmwareData), 2)) {
-        KdPrint(("BC250-PSP: TA firmware validation FAILED (size=%zu)\n", sizeof(g_TaFirmwareData)));
-        Amdbc250PspFreeSharedMemory(); Amdbc250PspUnmapRegisters(); return STATUS_IMAGE_CHECKSUM_MISMATCH;
-    }
-    g_PspContext.SosFirmware = (PUCHAR)g_SosFirmwareData;
-    g_PspContext.SosFirmwareSize = sizeof(g_SosFirmwareData);
-    g_PspContext.AsdFirmware = (PUCHAR)g_AsdFirmwareData;
-    g_PspContext.AsdFirmwareSize = sizeof(g_AsdFirmwareData);
-    g_PspContext.TaFirmware = (PUCHAR)g_TaFirmwareData;
-    g_PspContext.TaFirmwareSize = sizeof(g_TaFirmwareData);
-    /* Load the system driver into the PSP */
-status = Amdbc250PspBootloaderLoadSysdrv();
-if (!NT_SUCCESS(status)) {
-    KdPrint(("BC250-PSP: Sysdrv load failed (0x%08X)\n", status));
-    goto cleanup;
-}
-
-/* Load the SecureOS (SOS) firmware */
-status = Amdbc250PspBootloaderLoadSos();
-if (!NT_SUCCESS(status)) {
-    KdPrint(("BC250-PSP: SOS load failed (0x%08X)\n", status));
-    goto cleanup;
-}
-
-/* Create the communication ring */
-status = Amdbc250PspRingCreate();
-if (!NT_SUCCESS(status)) {
-    KdPrint(("BC250-PSP: Ring creation failed (0x%08X)\n", status));
-    goto cleanup;
-}
-
-g_PspContext.Initialized = TRUE;
-return STATUS_SUCCESS;
-
-cleanup:
-/* Ensure we do not leak any allocated resources on partial failure */
-Amdbc250PspFreeSharedMemory();
-Amdbc250PspUnmapRegisters();
-RtlZeroMemory(&g_PspContext, sizeof(g_PspContext));
-return status;
+    
+    return STATUS_SUCCESS;
 }
 
 VOID Amdbc250PspCleanup(VOID)
