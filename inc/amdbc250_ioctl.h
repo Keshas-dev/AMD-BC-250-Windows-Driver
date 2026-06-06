@@ -101,12 +101,8 @@ Environment:
 /* Read PCI config space BARs (for auto-detection when BootConfig is empty) */
 #define IOCTL_AMDBC250_READ_PCI_BAR         CTL_CODE_AMDBC250(0x75, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
-/* PSP (Platform Security Processor) firmware operations */
-#define IOCTL_AMDBC250_PSP_INIT             CTL_CODE_AMDBC250(0x76, METHOD_BUFFERED, FILE_ANY_ACCESS)
-#define IOCTL_AMDBC250_PSP_LOAD_FIRMWARE    CTL_CODE_AMDBC250(0x77, METHOD_BUFFERED, FILE_ANY_ACCESS)
-#define IOCTL_AMDBC250_PSP_SEND_COMMAND     CTL_CODE_AMDBC250(0x78, METHOD_BUFFERED, FILE_ANY_ACCESS)
+/* PSP (Platform Security Processor) - handled by separate PspDriver.sys */
 #define IOCTL_AMDBC250_PSP_GET_STATUS       CTL_CODE_AMDBC250(0x79, METHOD_BUFFERED, FILE_ANY_ACCESS)
-#define IOCTL_AMDBC250_PSP_TEST_MAILBOX     CTL_CODE_AMDBC250(0x7A, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
 /* Read raw PCI config space by bus/device/function */
 #define IOCTL_AMDBC250_READ_PCI_CONFIG      CTL_CODE_AMDBC250(0x7B, METHOD_BUFFERED, FILE_ANY_ACCESS)
@@ -332,39 +328,8 @@ typedef struct _AMDBC250_IOCTL_PCI_CONFIG {
     UINT32 Function;
 } AMDBC250_IOCTL_PCI_CONFIG, *PAMDBC250_IOCTL_PCI_CONFIG;
 
-/* --- PSP Load Firmware --- */
-typedef struct _AMDBC250_IOCTL_PSP_LOAD_FIRMWARE {
-    UINT32 FirmwareType;          /* 0=SOS, 1=ASD, 2=TA */
-    UINT32 FirmwareSize;          /* Size of firmware data */
-    UINT8  FirmwareData[1024*1024]; /* Firmware blob (max 1MB) */
-} AMDBC250_IOCTL_PSP_LOAD_FIRMWARE, *PAMDBC250_IOCTL_PSP_LOAD_FIRMWARE;
-
-/* --- PSP Send Command --- */
-typedef struct _AMDBC250_IOCTL_PSP_SEND_COMMAND {
-    UINT32 Command;               /* PSP command ID */
-    UINT32 DataSize;              /* Size of command data */
-    UINT8  Data[256];             /* Command data */
-} AMDBC250_IOCTL_PSP_SEND_COMMAND, *PAMDBC250_IOCTL_PSP_SEND_COMMAND;
-
-/* --- PSP Status --- */
-typedef struct _AMDBC250_IOCTL_PSP_STATUS {
-    UINT32 Initialized;           /* 1=PSP initialized */
-    UINT32 SosAlive;              /* 1=Secure OS is alive */
-    UINT32 FirmwareLoaded;        /* 1=Firmware loaded */
-    UINT32 MmioBase;              /* PSP MMIO base (low 32 bits) */
-    UINT32 SolRegister;           /* Sign of Life register value */
-    UINT32 C2pmsg64;              /* C2PMSG_64 value (command/status) */
-} AMDBC250_IOCTL_PSP_STATUS, *PAMDBC250_IOCTL_PSP_STATUS;
-
-/* --- PSP Test Mailbox --- */
-typedef struct _AMDBC250_IOCTL_PSP_TEST_MAILBOX {
-    UINT32 WriteValue;            /* Value to write to C2PMSG_0 */
-    UINT32 ReadValue;             /* Value read back from C2PMSG_0 */
-    UINT32 SolValue;              /* Sign of Life register value */
-} AMDBC250_IOCTL_PSP_TEST_MAILBOX, *PAMDBC250_IOCTL_PSP_TEST_MAILBOX;
-
-/* --- Read raw PCI config space by bus/device/function --- */
-typedef struct _AMDBC250_IOCTL_READ_PCI_CONFIG {
+/* --- PCI Config Read Result --- */
+typedef struct _AMDBC250_IOCTL_PCI_CONFIG {
     UINT32 Bus;                   /* PCI bus number */
     UINT32 Device;                /* PCI device number */
     UINT32 Function;              /* PCI function number */
