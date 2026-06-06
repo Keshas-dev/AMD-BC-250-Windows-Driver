@@ -84,7 +84,7 @@ DF has 40 readable registers containing:
 
 ---
 
-## Current Status (v4.3)
+## Current Status (v4.3.1)
 
 ### Working
 
@@ -99,18 +99,22 @@ DF has 40 readable registers containing:
 - ✅ **WDDM coexistence** — BasicDisplay + our KMD on same DriverObject
 - ✅ **Build + sign pipeline** — `build.bat` produces signed `atikmdag.sys`
 - ✅ **No crashes** — safe-test approach (read-only + INIT_HARDWARE) works reliably
-- ✅ **PSP v11 integrated** — GPU BAR5 mapping, MP0 base auto-discovery, SOS alive check, NBIO unlock
+- ✅ **PSP v11 integrated** — GPU BAR5 mapping, MP0 base auto-discovery, SOS alive check
 - ✅ **Vulkan ICD** — 13/13 tests pass with official Vulkan loader
 - ✅ **D3D9 UMD** — 45+ DDI functions, 5/5 adapter tests pass
 - ✅ **IB packet + EOP fence**, GFX10 ring buffer, HDP Flush
 - ✅ **SDMA copy/fill engine**, TDR reset, 40 CU unlock
-- ✅ **IOCTL_GET_GPU_INFO** (0x80000C00) — returns GPU info (Vendor, Device, CUs, Shaders)
+- ✅ **IOCTL_GET_GPU_INFO** (0x80000C00) — returns GPU info
 - ✅ **IOCTL_GET_FIREWALL_STATUS** (0x80000C04) — returns NBIO firewall status
-- ✅ **IOCTL_TEST_REGISTER** (0x80000C08) — tests register read/write
+- ✅ **IOCTL_GET_NBIO_STATUS** (0x80000C0C) — live SOS/GRBM/CP check
+- ✅ **Separate PSP driver project** — 2MB BAR5, C2PMSG_35/36 writable, firmware loading
+
+### In Progress
+- ⏳ **NBIO unlock via PSP ring** — PSP driver can create ring, SOS alive, NBIO unlock pending
+- ⏳ **GRBM/CP access** — blocked by NBIO, waiting for PSP unlock
 
 ### Known Limitations
-
-- NBIO blocks GRBM/CP/CLK/Scratch register access — GPU command submission impossible
+- NBIO blocks GRBM/CP/CLK/Scratch register access — GPU command submission impossible without PSP unlock
 - Cannot initialize GFX ring buffer (requires CP register writes)
 - Cannot submit PM4 commands (needs initialized ring buffer)
 - VCN locked by Sony firmware

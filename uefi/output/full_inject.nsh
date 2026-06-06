@@ -28,7 +28,7 @@ echo ""
 
 # --- STEP 2: Write firmware address ---
 echo "Step 2: Writing firmware address to C2PMSG_36..."
-echo "Value: 0x000007E4 (firmware at 0x7E400000 >> 20)"
+echo "IMPORTANT: Replace 0x000007E4 with actual TMR addr>>20 from Windows test!"
 mm 0xFE858190 0x000007E4 -mm -b 4
 echo ""
 

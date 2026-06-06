@@ -20,8 +20,9 @@ echo ""
 # --- STEP 2 ---
 echo "Step 2: Writing firmware address to C2PMSG_36..."
 echo "Address: 0xFE858190"
-echo "NOTE: Default value 0x000007E4 assumes firmware is at 0x7E400000 (>> 20)"
-# If your TMR address differs, change 0x000007E4 below:
+echo "IMPORTANT: Replace 0x000007E4 with actual TMR addr>>20 from Windows test!"
+echo "           Run 'test-psp-loader.exe' on Windows, look for 'TMR allocated:'"
+echo "           Example: if TMR=0x7E512000, addr>>20 = 0x000007E5"
 mm 0xFE858190 0x000007E4 -mm -b 4
 echo ""
 

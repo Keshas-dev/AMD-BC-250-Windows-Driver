@@ -57,18 +57,20 @@ Then try again.
 
 The firmware address in C2PMSG_36 must be:
 - Physical address >> 20 (MB boundary)
-- Example: If firmware is at 0x7E400000, write 0x000007E4
+- **Run `test-psp-loader.exe` on Windows first** to get actual TMR address
+- Example: If TMR=0x7E512000, write addr>>20 = 0x000007E5
+- Then update the value in `inject_psp.nsh` and `full_inject.nsh`
 
 ## Commands Reference
 
-### Read register (mm with 0)
+### Read register (read-only, no write value needed)
 ```
-mm 0xFE858244 0x00000000 -w 4
+mm 0xFE858244 -mm -b 4
 ```
 
 ### Write register
 ```
-mm 0xFE858190 0x000007E4 -w 4
+mm 0xFE858190 0x000007E5 -mm -b 4
 ```
 
 ### Wait (stall in microseconds)
