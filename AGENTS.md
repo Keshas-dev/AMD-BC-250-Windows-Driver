@@ -2,8 +2,11 @@
 
 ## Two-Project Architecture (Hybrid Model)
 - **GPU Driver** (this project): `atikmdag.sys` — WDM control device, IOCTL channel, Vulkan/D3D9
-- **PSP Driver** (separate project): `PspDriver.sys` at `C:\AMD-BC-250\AMD-BC-250-PSP-Windows-Driver` — PSP firmware loading, ring creation, NBIO unlock
+- **PSP Driver** (separate project): `PspDriver.sys` — PSP firmware loading, ring creation, NBIO unlock
+  - GitHub: https://github.com/Keshas-dev/AMD-BC-250-PSP-Driver
+  - Local: `C:\AMD-BC-250\AMD-BC-250-PSP-Windows-Driver`
 - The two drivers run in parallel. GPU driver uses 512KB BAR5 mapping; PSP driver uses 2MB BAR5 mapping for PSP register access.
+- After PSP driver unlocks NBIO, GPU driver detects it via IOCTL_GET_NBIO_STATUS and can access GRBM/CP registers.
 
 ## Build
 - Run `build.bat` (requires VS2022 + WDK 10.0.26100.0, auto-detects E: or C:)

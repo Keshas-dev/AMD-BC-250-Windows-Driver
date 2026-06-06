@@ -6,6 +6,17 @@ AMD BC-250 Windows 11 driver project by Keshass. Goal: fully working GPU driver 
 
 **Everyone welcome!** GPU drivers, WDDM, Vulkan experience — or just want to help.
 
+## Hybrid Driver Architecture
+
+This project works in tandem with the **AMD BC-250 PSP Driver**:
+
+| Driver | Project | Purpose |
+|--------|---------|---------|
+| `atikmdag.sys` | [This repo](https://github.com/Keshas-dev/AMD-BC-250-Windows-Driver) | GPU WDM driver: IOCTL channel, Vulkan, D3D9, MMIO access |
+| `PspDriver.sys` | [PSP repo](https://github.com/Keshas-dev/AMD-BC-250-PSP-Driver) | PSP firmware loading, NBIO firewall bypass |
+
+The PSP driver is required to unlock NBIO before the GPU driver can access GRBM/CP registers. Once unlocked, `IOCTL_GET_NBIO_STATUS` detects the change and GPU initialization can proceed.
+
 ---
 
 ## Hardware
