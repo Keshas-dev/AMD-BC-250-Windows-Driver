@@ -55,7 +55,7 @@
 - All tests use `\\.\AMDBC250DreamV43` device path
 
 ## Source Layout
-- `src\kmd\` — Kernel driver (kmd.c + hw_init.c + psp_v11.c + vm.c + power.c)
+- `src\kmd\` — Kernel driver (kmd.c + hw_init.c + psp.c + vm.c + power.c)
 - `src\umd\` — D3D9 UMD (amdbc250_umd_v46.c)
 - `src\vulkan\` — Vulkan ICD (bc250_vulkan_icd.c)
 - `inc\` — Shared headers (ioctl.h, psp_v11.h, kmd.h, hw.h)

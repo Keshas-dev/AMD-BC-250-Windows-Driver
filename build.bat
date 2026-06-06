@@ -103,7 +103,7 @@ cl.exe /c /kernel /W3 /Zi /Od /DAMD64 /D_AMD64_ /DAMDBC250_DREAM_V3 ^
   "%SRC_DIR%\kmd\amdbc250_dream_hw_init.c" ^
   "%SRC_DIR%\kmd\amdbc250_dream_power.c" ^
   "%SRC_DIR%\kmd\amdbc250_dream_vm.c" ^
-  "%SRC_DIR%\kmd\amdbc250_psp_v11.c"
+  "%SRC_DIR%\kmd\amdbc250_psp.c"
 
 if errorlevel 1 (
     echo KMD compilation FAILED!
@@ -114,7 +114,7 @@ if errorlevel 1 (
 echo Linking KMD...
 link.exe /DRIVER /SUBSYSTEM:NATIVE /ENTRY:DriverEntry ^
   /OUT:"%OUTPUT_DIR%\atikmdag.sys" ^
-  amdbc250_dream_kmd.obj amdbc250_dream_hw_init.obj amdbc250_dream_power.obj amdbc250_dream_vm.obj amdbc250_psp_v11.obj ^
+  amdbc250_dream_kmd.obj amdbc250_dream_hw_init.obj amdbc250_dream_power.obj amdbc250_dream_vm.obj amdbc250_psp.obj ^
   ntoskrnl.lib wdm.lib win32k.lib ntstrsafe.lib BufferOverflowK.lib hal.lib ^
   /LIBPATH:"%WDK_ROOT%\Lib\%WDK_VERSION%\km\x64"
 
@@ -137,7 +137,7 @@ rem   /I"%WDK_ROOT%\Include\%WDK_VERSION%\shared" ^
 rem   /I"%INC_DIR%" ^
 rem   /I"%SRC_DIR%\kmd" ^
 rem   "%SRC_DIR%\kmd\amdbc250_psp_driver.c" ^
-rem   "%SRC_DIR%\kmd\amdbc250_psp_v11.c"
+rem   "%SRC_DIR%\kmd\amdbc250_psp.c"
 rem
 rem if errorlevel 1 (
 rem     echo PSP compilation FAILED!
@@ -148,7 +148,7 @@ rem
 rem echo Linking PSP...
 rem link.exe /DRIVER /SUBSYSTEM:NATIVE /ENTRY:DriverEntry /NODEFAULTLIB ^
 rem   /OUT:"%OUTPUT_DIR%\amdbc250_psp.sys" ^
-rem   amdbc250_psp_driver.obj amdbc250_psp_v11.obj ^
+rem   amdbc250_psp_driver.obj amdbc250_psp.obj ^
 rem   ntoskrnl.lib hal.lib wdm.lib ^
 rem   /LIBPATH:"%WDK_ROOT%\Lib\%WDK_VERSION%\km\x64"
 rem

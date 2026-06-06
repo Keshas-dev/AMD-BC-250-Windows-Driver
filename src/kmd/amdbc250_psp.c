@@ -1,6 +1,6 @@
 #include <ntddk.h>
 #include <wdm.h>
-#include "amdbc250_psp_v11.h"
+#include "amdbc250_psp.h"
 
 #define GPU_BAR5_PHYSICAL             0xFE800000ULL
 #define GPU_BAR5_SIZE                 0x80000

@@ -31,7 +31,7 @@ Environment:
 
 #include "amdbc250_dream_kmd.h"
 #include "amdbc250_ioctl.h"
-#include "amdbc250_psp_v11.h"
+#include "amdbc250_psp.h"
 
 static PDRIVER_OBJECT g_DriverObject = NULL;
 

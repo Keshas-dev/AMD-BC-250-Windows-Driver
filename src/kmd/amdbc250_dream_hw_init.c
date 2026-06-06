@@ -29,7 +29,7 @@ Environment:
 --*/
 
 #include "amdbc250_dream_kmd.h"
-#include "amdbc250_psp_v11.h"
+#include "amdbc250_psp.h"
 
 /* Forward declarations */
 static NTSTATUS DreamV3InitCommandProcessor(_In_ PDREAM_V3_DEVICE_EXTENSION DevExt);
