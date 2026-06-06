@@ -363,3 +363,4 @@ PSP logic is **compiled directly into atikmdag.sys** — no separate PSP driver 
 
 Source code for educational purposes. Use at your own risk.
 ACO compiler: MIT license (Mesa project).
+## "If you need a tool and nobody has built it yet, then build it yourself."
