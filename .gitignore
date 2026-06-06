@@ -69,6 +69,8 @@ output/ioctl-test.log
 tools/*.sh
 tools/*.log
 tools/*.txt
+tools/**/*.exe
+tools/**/*.zip
 
 # Junk from PowerShell
 qc
