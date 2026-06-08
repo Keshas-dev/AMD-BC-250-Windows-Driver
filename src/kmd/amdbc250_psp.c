@@ -132,29 +132,65 @@ BOOLEAN Amdbc250PspKiqAvailable(VOID)
 NTSTATUS Amdbc250PspKiqSubmit(ULONG* Pm4Commands, ULONG DwordCount)
 {
     IO_STATUS_BLOCK iosb;
-    ULONG wptrReg[2] = { 0, 0 }; /* reg_id=0 for MEC_WPTR */
+    ULONG wptrReg[2] = { 0, 0 };
 
     if (!g_KiqRingVa || !g_PspProxyHandle) return STATUS_DEVICE_NOT_READY;
     if (DwordCount == 0 || DwordCount > g_KiqRingSize / sizeof(ULONG) - 8)
         return STATUS_INVALID_PARAMETER;
 
-    /* Copy PM4 commands to KIQ ring */
     PUCHAR ringByte = (PUCHAR)g_KiqRingVa;
     ULONG offset = g_KiqWptr % g_KiqRingSize;
-
-    /* Check space */
     if (offset + DwordCount * sizeof(ULONG) > g_KiqRingSize)
-        offset = 0; /* Wrap */
+        offset = 0;
 
     RtlCopyMemory(ringByte + offset, Pm4Commands, DwordCount * sizeof(ULONG));
     g_KiqWptr = offset + DwordCount * sizeof(ULONG);
 
-    /* Trigger KIQ via PSP_REG_PROG (write MEC WPTR) */
     wptrReg[1] = g_KiqWptr;
     ZwDeviceIoControlFile(g_PspProxyHandle, NULL, NULL, NULL,
         &iosb, PSP_IOCTL_REG_PROG, wptrReg, sizeof(wptrReg), NULL, 0);
 
     return STATUS_SUCCESS;
+}
+
+/* Read GPU register via KIQ COPY_DATA PM4 packet */
+ULONG Amdbc250PspKiqReadReg(ULONG GpuRegOffset)
+{
+    if (!g_KiqRingVa || !g_PspProxyHandle) return 0xFFFFFFFF;
+
+    /* Reserve 2 DWORDS at end of ring for response */
+    ULONG respOffset = (g_KiqRingSize / sizeof(ULONG)) - 2;
+    volatile PULONG ring = (volatile PULONG)g_KiqRingVa;
+    ring[respOffset] = 0xDEADDEAD;
+    ring[respOffset + 1] = 0xDEADDEAD;
+
+    /* Build COPY_DATA PM4 packet: read from GPU reg, write to ring */
+    ULONG pkt[8] = {0};
+    ULONG64 respVa = g_KiqRingPa + respOffset * sizeof(ULONG);
+
+    /* PACKET3_COPY_DATA: IT_OPCODE=0x41, copies GPU register to memory */
+    pkt[0] = 0xC0034100 | 4;  /* IT_COPY_DATA, 4 DWORD payload */
+    pkt[1] = GpuRegOffset;     /* SRC_LO (GPU register offset) */
+    pkt[2] = 0xFE800000;        /* SRC_HI (BAR5 base) */
+    pkt[3] = (ULONG)(respVa & 0xFFFFFFFF);   /* DST_LO */
+    pkt[4] = (ULONG)(respVa >> 32);           /* DST_HI */
+
+    /* Submit */
+    g_KiqWptr = 0;
+    RtlCopyMemory(g_KiqRingVa, pkt, sizeof(pkt));
+    IO_STATUS_BLOCK iosb;
+    ULONG wptrReg[2] = { 0, sizeof(pkt) };
+    ZwDeviceIoControlFile(g_PspProxyHandle, NULL, NULL, NULL,
+        &iosb, PSP_IOCTL_REG_PROG, wptrReg, sizeof(wptrReg), NULL, 0);
+
+    /* Wait for response (poll ring) */
+    ULONG waited = 0;
+    while (waited < 100) {
+        if (ring[respOffset] != 0xDEADDEAD) return ring[respOffset];
+        KeStallExecutionProcessor(1000); /* 1ms */
+        waited++;
+    }
+    return 0xFFFFFFFF;
 }
 
 /* Close PSP proxy handle */

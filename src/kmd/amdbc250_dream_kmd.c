@@ -4302,11 +4302,11 @@ DreamV3DeviceControl(
                     sol = Amdbc250PspReadRegister(0x0244);
                 }
                 if (DevExt && DevExt->MmioVirtualBase) {
-                    /* Use PSP proxy if available (bypasses NBIO) */
+                    /* Try KIQ first - bypasses NBIO firewall */
                     if (Amdbc250PspKiqAvailable()) {
-                        grbm = Amdbc250PspProxyReadReg(0x2004);
-                        cp   = Amdbc250PspProxyReadReg(0x2000);
-                        clk  = Amdbc250PspProxyReadReg(0x0D00);
+                        grbm = Amdbc250PspKiqReadReg(0x2004);
+                        cp   = Amdbc250PspKiqReadReg(0x2000);
+                        clk  = Amdbc250PspKiqReadReg(0x0D00);
                     } else {
                         grbm = READ_REGISTER_ULONG((PULONG)((PUCHAR)DevExt->MmioVirtualBase + 0x2004));
                         cp = READ_REGISTER_ULONG((PULONG)((PUCHAR)DevExt->MmioVirtualBase + 0x2000));
