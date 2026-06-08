@@ -839,50 +839,47 @@ VkResult VKAPI_CALL bc250_vkQueueSubmit(
     UNREFERENCED_PARAMETER(fence);
     
     BC250_VK_DEVICE* dev = &g_Device;
-    
-    /* If KMD not available, skip */
-    if (dev->kmdDevice == INVALID_HANDLE_VALUE) {
-        return VK_SUCCESS;
+    if (dev->kmdDevice == INVALID_HANDLE_VALUE) return VK_SUCCESS;
+
+    /* Allocate DMA buffer for PM4 commands via KMD IOCTL */
+    ULONG allocReq = 0x10000; /* 64KB buffer */
+    ULONG64 allocResp[2] = {0};
+    DWORD ret = 0;
+    PVOID dmaBuf = NULL;
+    ULONG64 dmaBufPa = 0;
+
+    if (DeviceIoControl(dev->kmdDevice, 0x80000930, /* ALLOC_DMA_BUFFER */
+                        &allocReq, sizeof(allocReq),
+                        allocResp, sizeof(allocResp), &ret, NULL)) {
+        dmaBufPa = allocResp[0];
+        dmaBuf    = (PVOID)(ULONG_PTR)allocResp[1];
     }
-    
-    /* Try to get shared buffer via IOCTL 0x80000A00 */
-    static PVOID sharedBuf = NULL;
-    static uint32_t sharedBufSize = 0;
-    
-    if (sharedBuf == NULL) {
-        ULONG64 bufInfo[2] = {0};
-        DWORD ret = 0;
-        if (DeviceIoControl(dev->kmdDevice, 0x80000A00,
-                            NULL, 0, bufInfo, sizeof(bufInfo), &ret, NULL)) {
-            sharedBuf = (PVOID)(ULONG_PTR)bufInfo[0];
-            sharedBufSize = (uint32_t)bufInfo[1];
-        }
-    }
-    
-    if (sharedBuf != NULL) {
-        /* Write PM4 commands to shared memory */
-        volatile PULONG cmd = (volatile PULONG)sharedBuf;
-        ULONG offset = 0;
+
+    if (dmaBuf) {
+        volatile PULONG cmd = (volatile PULONG)dmaBuf;
         
         /* NOP padding */
-        cmd[offset++] = PM4_TYPE3_HDR(IT_NOP, 0);
+        cmd[0] = 0x80000000;
         
-        /* EOP fence packet */
-        cmd[offset++] = PM4_TYPE3_HDR(IT_EVENT_WRITE_EOP, 4);
-        cmd[offset++] = 0xA0000246;  /* EVENT_TYPE=EOP, EVENT_INDEX=5, DATA_SEL=1, INT_SEL=1 */
-        cmd[offset++] = 0;           /* Fence addr low */
-        cmd[offset++] = 0;           /* Fence addr high */
-        cmd[offset++] = (ULONG)((uint64_t)dev->fenceValue & 0xFFFFFFFF);
-        cmd[offset++] = (ULONG)((uint64_t)dev->fenceValue >> 32);
+        /* EOP fence packet (IT_EVENT_WRITE_EOP = 0x46) */
+        cmd[1] = 0xC0034600;  /* PM4_TYPE3_HDR(IT_EVENT_WRITE_EOP, 4) */
+        cmd[2] = 0xA0000246;  /* EVENT_TYPE=EOP, EVENT_INDEX=5, INT_SEL=1 */
+        cmd[3] = (ULONG)(dmaBufPa & 0xFFFFFFFF);    /* Fence addr low */
+        cmd[4] = (ULONG)(dmaBufPa >> 32);            /* Fence addr high */
+        cmd[5] = (ULONG)(dev->fenceValue & 0xFFFFFFFF);
+        cmd[6] = (ULONG)((ULONG64)dev->fenceValue >> 32);
+
+        /* Submit to KMD ring via SUBMIT_COMMANDS */
+        struct { ULONG64 GpuVa; ULONG64 Size; ULONG32 Fence; ULONG32 Queue; } sc = {0};
+        sc.GpuVa = dmaBufPa;
+        sc.Size   = 7 * sizeof(ULONG);
+        sc.Fence  = dev->fenceValue;
+        sc.Queue  = 0; /* GFX ring */
         
-        /* Signal KMD to process commands via IOCTL 0x80000A01 */
-        DWORD ret = 0;
-        DeviceIoControl(dev->kmdDevice, 0x80000A01, NULL, 0, NULL, 0, &ret, NULL);
+        DeviceIoControl(dev->kmdDevice, 0x80000880, /* SUBMIT_COMMANDS */
+                        &sc, sizeof(sc), NULL, 0, &ret, NULL);
         
         dev->fenceValue++;
-    } else {
-        /* Fallback: use old IOCTL path (may crash on some systems) */
-        OutputDebugStringA("BC-250 Vulkan: QueueSubmit - shared buffer not available\n");
     }
     
     return VK_SUCCESS;
