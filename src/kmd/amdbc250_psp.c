@@ -5,12 +5,13 @@
 #define GPU_BAR5_PHYSICAL             0xFE800000ULL
 #define GPU_BAR5_SIZE                 0x80000
 
-/* PSP driver IOCTL codes (must match PspDriver.sys) */
-#define PSP_IOCTL_READ_REG    CTL_CODE(FILE_DEVICE_UNKNOWN, 0x800, METHOD_BUFFERED, FILE_ANY_ACCESS)
-#define PSP_IOCTL_WRITE_REG   CTL_CODE(FILE_DEVICE_UNKNOWN, 0x801, METHOD_BUFFERED, FILE_ANY_ACCESS)
-#define PSP_IOCTL_REG_PROG    CTL_CODE(FILE_DEVICE_UNKNOWN, 0x815, METHOD_BUFFERED, FILE_ANY_ACCESS)
-#define PSP_IOCTL_GET_GPU_INFO CTL_CODE(FILE_DEVICE_UNKNOWN, 0x816, METHOD_BUFFERED, FILE_ANY_ACCESS)
-#define PSP_DEVICE_NAME       L"\\Device\\AmdBcPsp"
+/* PSP driver IOCTL codes (must match PspDriver.sys from AGENTS.md) */
+#define PSP_IOCTL_READ_REG      CTL_CODE(FILE_DEVICE_UNKNOWN, 0x800, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define PSP_IOCTL_WRITE_REG     CTL_CODE(FILE_DEVICE_UNKNOWN, 0x801, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define PSP_IOCTL_INIT_HW       CTL_CODE(FILE_DEVICE_UNKNOWN, 0x803, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define PSP_IOCTL_BOOT_SEQ      CTL_CODE(FILE_DEVICE_UNKNOWN, 0x810, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define PSP_IOCTL_GET_GPU_INFO  CTL_CODE(FILE_DEVICE_UNKNOWN, 0x815, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define PSP_IOCTL_LOAD_TOC      CTL_CODE(FILE_DEVICE_UNKNOWN, 0x820, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
 static HANDLE g_PspProxyHandle = NULL;
 static BOOLEAN g_PspProxyAvailable = FALSE;
@@ -41,23 +42,22 @@ static BOOLEAN PspProxyInit(VOID)
     if (NT_SUCCESS(status)) {
         g_PspProxyAvailable = TRUE;
 
-        /* Query PSP for GPU/KIQ info */
+        /* Try to get GPU info (KIQ ring PA, FW status) via PSP_GET_GPU_INFO (0x815) */
         ULONG gpuInfo[8] = {0};
         IO_STATUS_BLOCK iosb2;
         status = ZwDeviceIoControlFile(g_PspProxyHandle, NULL, NULL, NULL,
             &iosb2, PSP_IOCTL_GET_GPU_INFO, NULL, 0, gpuInfo, sizeof(gpuInfo));
-        if (NT_SUCCESS(status) && gpuInfo[4]) {
-            g_KiqRingPa = ((ULONG64)gpuInfo[5] << 32) | gpuInfo[4];
-            g_KiqRingSize = gpuInfo[6];
-            /* Map KIQ ring into our VA space for direct PM4 writes */
-            PHYSICAL_ADDRESS kiqPa;
-            kiqPa.QuadPart = g_KiqRingPa;
-            g_KiqRingVa = MmMapIoSpace(kiqPa, g_KiqRingSize, MmNonCached);
-            if (g_KiqRingVa) {
-                g_KiqAvailable = TRUE;
-                KdPrint(("BC250-PSP: KIQ ring mapped PA=0x%llX VA=%p size=%u\n",
-                    g_KiqRingPa, g_KiqRingVa, g_KiqRingSize));
-            }
+        if (NT_SUCCESS(status) && gpuInfo[0]) {
+            /* gpuInfo[0]=C2PMSG_81, [1]=C2PMSG_35, [2]=C2PMSG_36
+             * [3]=ring_pa_lo, [4]=ring_pa_hi, [5]=fw_status */
+            KdPrint(("BC250-PSP: Proxy opened, SOS=0x%08X FW=%u\n", gpuInfo[0], gpuInfo[5]));
+        }
+        KdPrint(("BC250-PSP: Proxy to PSP driver opened\n"));
+        return TRUE;
+    }
+    KdPrint(("BC250-PSP: PSP driver proxy not available (0x%08X)\n", status));
+    return FALSE;
+}
         } else {
             KdPrint(("BC250-PSP: Proxy opened, KIQ not available (GPU FW status=%u)\n", gpuInfo[0]));
         }
