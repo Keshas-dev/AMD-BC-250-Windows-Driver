@@ -6,12 +6,17 @@
 #define GPU_BAR5_SIZE                 0x80000
 
 /* PSP driver IOCTL codes (must match PspDriver.sys) */
-#define PSP_IOCTL_READ_REG   CTL_CODE(FILE_DEVICE_UNKNOWN, 0x800, METHOD_BUFFERED, FILE_ANY_ACCESS)
-#define PSP_IOCTL_WRITE_REG  CTL_CODE(FILE_DEVICE_UNKNOWN, 0x801, METHOD_BUFFERED, FILE_ANY_ACCESS)
-#define PSP_DEVICE_NAME     L"\\Device\\AmdBcPsp"
+#define PSP_IOCTL_READ_REG    CTL_CODE(FILE_DEVICE_UNKNOWN, 0x800, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define PSP_IOCTL_WRITE_REG   CTL_CODE(FILE_DEVICE_UNKNOWN, 0x801, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define PSP_IOCTL_REG_PROG    CTL_CODE(FILE_DEVICE_UNKNOWN, 0x815, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define PSP_IOCTL_GET_GPU_INFO CTL_CODE(FILE_DEVICE_UNKNOWN, 0x816, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define PSP_DEVICE_NAME       L"\\Device\\AmdBcPsp"
 
 static HANDLE g_PspProxyHandle = NULL;
 static BOOLEAN g_PspProxyAvailable = FALSE;
+static BOOLEAN g_KiqAvailable = FALSE;
+static ULONG64 g_KiqRingBase = 0;
+static ULONG g_KiqRingSize = 0;
 
 /* Initialize PSP proxy - open handle to PSP driver for GPU register access */
 static BOOLEAN PspProxyInit(VOID)
@@ -33,17 +38,29 @@ static BOOLEAN PspProxyInit(VOID)
 
     if (NT_SUCCESS(status)) {
         g_PspProxyAvailable = TRUE;
-        KdPrint(("BC250-PSP: Proxy to PSP driver opened\n"));
+
+        /* Query PSP for GPU/KIQ info */
+        ULONG gpuInfo[8] = {0};
+        IO_STATUS_BLOCK iosb2;
+        status = ZwDeviceIoControlFile(g_PspProxyHandle, NULL, NULL, NULL,
+            &iosb2, PSP_IOCTL_GET_GPU_INFO, NULL, 0, gpuInfo, sizeof(gpuInfo));
+        if (NT_SUCCESS(status) && gpuInfo[4]) {
+            g_KiqRingBase = ((ULONG64)gpuInfo[5] << 32) | gpuInfo[4];
+            g_KiqRingSize = gpuInfo[6];
+            g_KiqAvailable = TRUE;
+            KdPrint(("BC250-PSP: Proxy opened, KIQ base=0x%llX size=%u\n", g_KiqRingBase, g_KiqRingSize));
+        } else {
+            KdPrint(("BC250-PSP: Proxy opened, KIQ not available (GPU FW status=%u)\n", gpuInfo[0]));
+        }
         return TRUE;
     }
-    KdPrint(("BC250-PSP: PSP driver proxy not available (0x%08X)\n", status));
     return FALSE;
 }
 
-/* Read GPU register via PSP driver proxy (bypasses NBIO firewall) */
+/* Read GPU register via PSP/KIQ proxy */
 ULONG Amdbc250PspProxyReadReg(ULONG GpuRegOffset)
 {
-    ULONG inBuf[2] = { GpuRegOffset, 0 };
+    ULONG inBuf[3] = { GpuRegOffset, 0, 1 }; /* 1 = read */
     ULONG outBuf[2] = { 0, 0 };
     IO_STATUS_BLOCK iosb;
 
@@ -51,20 +68,25 @@ ULONG Amdbc250PspProxyReadReg(ULONG GpuRegOffset)
         return Amdbc250PspReadRegister(GpuRegOffset);
     }
 
+    if (g_KiqAvailable) {
+        /* Use KIQ: send register read command via PSP REG_PROG */
+        NTSTATUS status = ZwDeviceIoControlFile(g_PspProxyHandle, NULL, NULL, NULL,
+            &iosb, PSP_IOCTL_REG_PROG, inBuf, sizeof(inBuf), outBuf, sizeof(outBuf));
+        if (NT_SUCCESS(status)) return outBuf[0];
+    }
+
+    /* Fallback: direct PSP MMIO read */
     NTSTATUS status = ZwDeviceIoControlFile(g_PspProxyHandle, NULL, NULL, NULL,
         &iosb, PSP_IOCTL_READ_REG, inBuf, sizeof(inBuf), outBuf, sizeof(outBuf));
+    if (NT_SUCCESS(status)) return outBuf[0];
 
-    if (NT_SUCCESS(status)) {
-        return outBuf[0];
-    }
-    /* Fallback to direct read */
     return Amdbc250PspReadRegister(GpuRegOffset);
 }
 
-/* Write GPU register via PSP driver proxy (bypasses NBIO firewall) */
+/* Write GPU register via PSP/KIQ proxy */
 VOID Amdbc250PspProxyWriteReg(ULONG GpuRegOffset, ULONG Value)
 {
-    ULONG inBuf[3] = { GpuRegOffset, Value, 0 };
+    ULONG inBuf[3] = { GpuRegOffset, Value, 0 }; /* 0 = write */
     IO_STATUS_BLOCK iosb;
 
     if (!g_PspProxyHandle && !PspProxyInit()) {
@@ -72,15 +94,29 @@ VOID Amdbc250PspProxyWriteReg(ULONG GpuRegOffset, ULONG Value)
         return;
     }
 
+    if (g_KiqAvailable) {
+        ZwDeviceIoControlFile(g_PspProxyHandle, NULL, NULL, NULL,
+            &iosb, PSP_IOCTL_REG_PROG, inBuf, 3 * sizeof(ULONG), NULL, 0);
+        return;
+    }
+
+    /* Fallback: direct PSP MMIO write */
     ZwDeviceIoControlFile(g_PspProxyHandle, NULL, NULL, NULL,
         &iosb, PSP_IOCTL_WRITE_REG, inBuf, 3 * sizeof(ULONG), NULL, 0);
 }
 
-/* Check if PSP proxy is available for GPU register access */
+/* Check if PSP proxy is available */
 BOOLEAN Amdbc250PspProxyAvailable(VOID)
 {
     if (!g_PspProxyHandle) PspProxyInit();
     return g_PspProxyAvailable;
+}
+
+/* Check if KIQ is available for GPU register access */
+BOOLEAN Amdbc250PspKiqAvailable(VOID)
+{
+    if (!g_PspProxyHandle) PspProxyInit();
+    return g_KiqAvailable;
 }
 
 /* Close PSP proxy handle */
@@ -90,7 +126,7 @@ VOID Amdbc250PspProxyCleanup(VOID)
         ZwClose(g_PspProxyHandle);
         g_PspProxyHandle = NULL;
         g_PspProxyAvailable = FALSE;
-        KdPrint(("BC250-PSP: Proxy to PSP driver closed\n"));
+        g_KiqAvailable = FALSE;
     }
 }
 

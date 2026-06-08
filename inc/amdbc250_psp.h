@@ -50,6 +50,7 @@ BOOLEAN Amdbc250PspValidateFirmware(PUCHAR FirmwareData, ULONG FirmwareSize, ULO
 ULONG Amdbc250PspProxyReadReg(ULONG GpuRegOffset);
 VOID Amdbc250PspProxyWriteReg(ULONG GpuRegOffset, ULONG Value);
 BOOLEAN Amdbc250PspProxyAvailable(VOID);
+BOOLEAN Amdbc250PspKiqAvailable(VOID);
 VOID Amdbc250PspProxyCleanup(VOID);
 
 #endif
