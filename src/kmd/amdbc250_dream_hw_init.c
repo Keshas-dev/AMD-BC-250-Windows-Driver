@@ -189,21 +189,26 @@ DreamV3HwInitialize(
     DevExt->UsedVramBytes = 0;
     DevExt->VisibleVramBytes = min(DevExt->VisibleVramBytes, DevExt->TotalVramBytes);
 
-    /* Step 10: GFX ring init (requires NBIO unlocked) */
+    /* Step 10: GFX ring init (via NBIO or PSP proxy) */
     if (DevExt->NbioUnlocked) {
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                    "AMDBC250-DREAM-V4.3: [STEP 10] NBIO unlocked — initializing GFX ring\n"));
         Status = DreamV3HwInitGfxRing(DevExt);
-        if (!NT_SUCCESS(Status)) {
-            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
-                       "AMDBC250-DREAM-V4.3: [STEP 10] GFX ring init failed: 0x%08X\n", Status));
-        } else {
-            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-                       "AMDBC250-DREAM-V4.3: [STEP 10] GFX ring ready\n"));
-        }
+    } else if (Amdbc250PspProxyAvailable()) {
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                   "AMDBC250-DREAM-V4.3: [STEP 10] Using PSP proxy for GFX ring init\n"));
+        Status = DreamV3HwInitGfxRing(DevExt); /* Uses proxy internally */
     } else {
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-                   "AMDBC250-DREAM-V4.3: [STEP 10] NBIO locked — GFX ring deferred\n"));
+                   "AMDBC250-DREAM-V4.3: [STEP 10] NBIO locked + no PSP proxy — deferred\n"));
+        Status = STATUS_DEVICE_NOT_READY;
+    }
+    if (!NT_SUCCESS(Status)) {
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+                   "AMDBC250-DREAM-V4.3: [STEP 10] GFX ring init failed: 0x%08X\n", Status));
+    } else {
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                   "AMDBC250-DREAM-V4.3: [STEP 10] GFX ring ready\n"));
     }
 
     /* Set clocks */

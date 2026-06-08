@@ -746,6 +746,7 @@ DreamV3DdiStopDevice(
     /* Cleanup PSP (unmap GPU BAR5, free rings) */
     if (DevExt->PspInitialized) {
         Amdbc250PspCleanup();
+        Amdbc250PspProxyCleanup();
         DevExt->PspInitialized = FALSE;
     }
 

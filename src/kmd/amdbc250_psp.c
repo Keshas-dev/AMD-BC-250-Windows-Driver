@@ -5,6 +5,95 @@
 #define GPU_BAR5_PHYSICAL             0xFE800000ULL
 #define GPU_BAR5_SIZE                 0x80000
 
+/* PSP driver IOCTL codes (must match PspDriver.sys) */
+#define PSP_IOCTL_READ_REG   CTL_CODE(FILE_DEVICE_UNKNOWN, 0x800, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define PSP_IOCTL_WRITE_REG  CTL_CODE(FILE_DEVICE_UNKNOWN, 0x801, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define PSP_DEVICE_NAME     L"\\Device\\AmdBcPsp"
+
+static HANDLE g_PspProxyHandle = NULL;
+static BOOLEAN g_PspProxyAvailable = FALSE;
+
+/* Initialize PSP proxy - open handle to PSP driver for GPU register access */
+static BOOLEAN PspProxyInit(VOID)
+{
+    NTSTATUS status;
+    UNICODE_STRING deviceName;
+    OBJECT_ATTRIBUTES oa;
+    IO_STATUS_BLOCK iosb;
+
+    if (g_PspProxyHandle) return TRUE;
+
+    RtlInitUnicodeString(&deviceName, L"\\DosDevices\\AmdBcPsp");
+    InitializeObjectAttributes(&oa, &deviceName, OBJ_KERNEL_HANDLE, NULL, NULL);
+
+    status = ZwCreateFile(&g_PspProxyHandle,
+        GENERIC_READ | GENERIC_WRITE, &oa, &iosb, NULL,
+        FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ | FILE_SHARE_WRITE,
+        FILE_OPEN_IF, FILE_SYNCHRONOUS_IO_NONALERT, NULL, 0);
+
+    if (NT_SUCCESS(status)) {
+        g_PspProxyAvailable = TRUE;
+        KdPrint(("BC250-PSP: Proxy to PSP driver opened\n"));
+        return TRUE;
+    }
+    KdPrint(("BC250-PSP: PSP driver proxy not available (0x%08X)\n", status));
+    return FALSE;
+}
+
+/* Read GPU register via PSP driver proxy (bypasses NBIO firewall) */
+ULONG Amdbc250PspProxyReadReg(ULONG GpuRegOffset)
+{
+    ULONG inBuf[2] = { GpuRegOffset, 0 };
+    ULONG outBuf[2] = { 0, 0 };
+    IO_STATUS_BLOCK iosb;
+
+    if (!g_PspProxyHandle && !PspProxyInit()) {
+        return Amdbc250PspReadRegister(GpuRegOffset);
+    }
+
+    NTSTATUS status = ZwDeviceIoControlFile(g_PspProxyHandle, NULL, NULL, NULL,
+        &iosb, PSP_IOCTL_READ_REG, inBuf, sizeof(inBuf), outBuf, sizeof(outBuf));
+
+    if (NT_SUCCESS(status)) {
+        return outBuf[0];
+    }
+    /* Fallback to direct read */
+    return Amdbc250PspReadRegister(GpuRegOffset);
+}
+
+/* Write GPU register via PSP driver proxy (bypasses NBIO firewall) */
+VOID Amdbc250PspProxyWriteReg(ULONG GpuRegOffset, ULONG Value)
+{
+    ULONG inBuf[3] = { GpuRegOffset, Value, 0 };
+    IO_STATUS_BLOCK iosb;
+
+    if (!g_PspProxyHandle && !PspProxyInit()) {
+        Amdbc250PspWriteRegister(GpuRegOffset, Value);
+        return;
+    }
+
+    ZwDeviceIoControlFile(g_PspProxyHandle, NULL, NULL, NULL,
+        &iosb, PSP_IOCTL_WRITE_REG, inBuf, 3 * sizeof(ULONG), NULL, 0);
+}
+
+/* Check if PSP proxy is available for GPU register access */
+BOOLEAN Amdbc250PspProxyAvailable(VOID)
+{
+    if (!g_PspProxyHandle) PspProxyInit();
+    return g_PspProxyAvailable;
+}
+
+/* Close PSP proxy handle */
+VOID Amdbc250PspProxyCleanup(VOID)
+{
+    if (g_PspProxyHandle) {
+        ZwClose(g_PspProxyHandle);
+        g_PspProxyHandle = NULL;
+        g_PspProxyAvailable = FALSE;
+        KdPrint(("BC250-PSP: Proxy to PSP driver closed\n"));
+    }
+}
+
 #define MBOX_TOS_READY_FLAG           0x80000000
 #define MBOX_TOS_READY_MASK           0x80000000
 #define MBOX_TOS_RESP_FLAG            0x80000000

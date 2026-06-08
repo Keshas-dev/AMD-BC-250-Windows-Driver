@@ -46,4 +46,10 @@ VOID Amdbc250PspUnmapRegisters(VOID);
 NTSTATUS Amdbc250PspTryUnlockNbio(VOID);
 BOOLEAN Amdbc250PspValidateFirmware(PUCHAR FirmwareData, ULONG FirmwareSize, ULONG FirmwareType);
 
+/* PSP Proxy - GPU register access via PSP driver (bypasses NBIO firewall) */
+ULONG Amdbc250PspProxyReadReg(ULONG GpuRegOffset);
+VOID Amdbc250PspProxyWriteReg(ULONG GpuRegOffset, ULONG Value);
+BOOLEAN Amdbc250PspProxyAvailable(VOID);
+VOID Amdbc250PspProxyCleanup(VOID);
+
 #endif
