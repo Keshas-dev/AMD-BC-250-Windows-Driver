@@ -15,8 +15,10 @@
 static HANDLE g_PspProxyHandle = NULL;
 static BOOLEAN g_PspProxyAvailable = FALSE;
 static BOOLEAN g_KiqAvailable = FALSE;
-static ULONG64 g_KiqRingBase = 0;
+static ULONG64 g_KiqRingPa = 0;
 static ULONG g_KiqRingSize = 0;
+static PVOID g_KiqRingVa = NULL;     /* Mapped KIQ ring VA */
+static ULONG g_KiqWptr = 0;           /* Current KIQ write pointer */
 
 /* Initialize PSP proxy - open handle to PSP driver for GPU register access */
 static BOOLEAN PspProxyInit(VOID)
@@ -45,10 +47,17 @@ static BOOLEAN PspProxyInit(VOID)
         status = ZwDeviceIoControlFile(g_PspProxyHandle, NULL, NULL, NULL,
             &iosb2, PSP_IOCTL_GET_GPU_INFO, NULL, 0, gpuInfo, sizeof(gpuInfo));
         if (NT_SUCCESS(status) && gpuInfo[4]) {
-            g_KiqRingBase = ((ULONG64)gpuInfo[5] << 32) | gpuInfo[4];
+            g_KiqRingPa = ((ULONG64)gpuInfo[5] << 32) | gpuInfo[4];
             g_KiqRingSize = gpuInfo[6];
-            g_KiqAvailable = TRUE;
-            KdPrint(("BC250-PSP: Proxy opened, KIQ base=0x%llX size=%u\n", g_KiqRingBase, g_KiqRingSize));
+            /* Map KIQ ring into our VA space for direct PM4 writes */
+            PHYSICAL_ADDRESS kiqPa;
+            kiqPa.QuadPart = g_KiqRingPa;
+            g_KiqRingVa = MmMapIoSpace(kiqPa, g_KiqRingSize, MmNonCached);
+            if (g_KiqRingVa) {
+                g_KiqAvailable = TRUE;
+                KdPrint(("BC250-PSP: KIQ ring mapped PA=0x%llX VA=%p size=%u\n",
+                    g_KiqRingPa, g_KiqRingVa, g_KiqRingSize));
+            }
         } else {
             KdPrint(("BC250-PSP: Proxy opened, KIQ not available (GPU FW status=%u)\n", gpuInfo[0]));
         }
@@ -119,9 +128,42 @@ BOOLEAN Amdbc250PspKiqAvailable(VOID)
     return g_KiqAvailable;
 }
 
+/* Submit PM4 commands via KIQ ring + trigger via PSP */
+NTSTATUS Amdbc250PspKiqSubmit(ULONG* Pm4Commands, ULONG DwordCount)
+{
+    IO_STATUS_BLOCK iosb;
+    ULONG wptrReg[2] = { 0, 0 }; /* reg_id=0 for MEC_WPTR */
+
+    if (!g_KiqRingVa || !g_PspProxyHandle) return STATUS_DEVICE_NOT_READY;
+    if (DwordCount == 0 || DwordCount > g_KiqRingSize / sizeof(ULONG) - 8)
+        return STATUS_INVALID_PARAMETER;
+
+    /* Copy PM4 commands to KIQ ring */
+    PUCHAR ringByte = (PUCHAR)g_KiqRingVa;
+    ULONG offset = g_KiqWptr % g_KiqRingSize;
+
+    /* Check space */
+    if (offset + DwordCount * sizeof(ULONG) > g_KiqRingSize)
+        offset = 0; /* Wrap */
+
+    RtlCopyMemory(ringByte + offset, Pm4Commands, DwordCount * sizeof(ULONG));
+    g_KiqWptr = offset + DwordCount * sizeof(ULONG);
+
+    /* Trigger KIQ via PSP_REG_PROG (write MEC WPTR) */
+    wptrReg[1] = g_KiqWptr;
+    ZwDeviceIoControlFile(g_PspProxyHandle, NULL, NULL, NULL,
+        &iosb, PSP_IOCTL_REG_PROG, wptrReg, sizeof(wptrReg), NULL, 0);
+
+    return STATUS_SUCCESS;
+}
+
 /* Close PSP proxy handle */
 VOID Amdbc250PspProxyCleanup(VOID)
 {
+    if (g_KiqRingVa) {
+        MmUnmapIoSpace(g_KiqRingVa, g_KiqRingSize);
+        g_KiqRingVa = NULL;
+    }
     if (g_PspProxyHandle) {
         ZwClose(g_PspProxyHandle);
         g_PspProxyHandle = NULL;
