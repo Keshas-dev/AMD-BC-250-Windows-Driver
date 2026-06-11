@@ -57,15 +57,14 @@ static BOOLEAN PspProxyInit(VOID)
         FILE_OPEN_IF, FILE_SYNCHRONOUS_IO_NONALERT, NULL, 0);
 
     if (NT_SUCCESS(status)) {
-        g_PspProxyAvailable = TRUE;
-
-        /* Try to get GPU info (KIQ ring PA, FW status) via PSP_GET_GPU_INFO (0x815) */
+        /* Try to get GPU info — only mark proxy available if PSP driver is initialized */
         PSP_GPU_INFO_REMOTE gpuInfo;
         IO_STATUS_BLOCK iosb2;
         RtlZeroMemory(&gpuInfo, sizeof(gpuInfo));
         status = ZwDeviceIoControlFile(g_PspProxyHandle, NULL, NULL, NULL,
             &iosb2, PSP_IOCTL_GET_GPU_INFO, NULL, 0, &gpuInfo, sizeof(gpuInfo));
         if (NT_SUCCESS(status)) {
+            g_PspProxyAvailable = TRUE;
             g_GpcomRingPa = gpuInfo.RingBufferPA;
             g_GpcomRingSize = 0x1000;
             g_GpcomRingAvailable = (gpuInfo.RingBufferPA != 0) ? TRUE : FALSE;
@@ -79,7 +78,10 @@ static BOOLEAN PspProxyInit(VOID)
                 KdPrint(("BC250-PSP: GPCOM ring PA=0x%llX VA=%p\n", ringPhys.QuadPart, g_GpcomRingVa));
             }
         } else {
-            KdPrint(("BC250-PSP: PSP_GET_GPU_INFO failed (0x%08X)\n", status));
+            KdPrint(("BC250-PSP: PSP driver handle opened but not initialized (0x%08X)\n", status));
+            ZwClose(g_PspProxyHandle);
+            g_PspProxyHandle = NULL;
+            return FALSE;
         }
         KdPrint(("BC250-PSP: Proxy to PSP driver opened\n"));
         return TRUE;

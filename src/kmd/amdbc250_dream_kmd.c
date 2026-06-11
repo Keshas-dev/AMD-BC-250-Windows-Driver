@@ -2522,24 +2522,26 @@ DreamV3DeviceControl(
         case 0x80000800: /* GET_CAPS */
             if (outputLen >= sizeof(ULONG) * 7) {
                 PULONG d = (PULONG)outputBuffer;
-                d[0] = 430;  /* Version 4.3.0 */
-                d[1] = 24;   /* CUs */
-                d[2] = 2000; /* GPU clock MHz */
-                d[3] = 1750; /* Memory clock MHz */
-                d[4] = 0;    /* Temperature */
-                d[5] = 0;    /* Throttle */
-                d[6] = 0;    /* Throttle count */
+                d[0] = 430;                                  /* Version */
+                d[1] = 0x05;                                 /* Caps flags */
+                d[2] = AMDBC250_BOOST_CLOCK_MHZ;             /* Max clock MHz */
+                d[3] = AMDBC250_MEMORY_CLOCK_MHZ;            /* Memory clock MHz */
+                d[4] = AMDBC250_MAX_COMPUTE_UNITS;            /* CUs */
+                d[5] = AMDBC250_STREAM_PROCESSORS;            /* SPs */
+                d[6] = AMDBC250_RT_ACCELERATORS;              /* RT accelerators */
                 bytesReturned = sizeof(ULONG) * 7;
             }
             status = STATUS_SUCCESS;
             goto Cleanup;
         case 0x80000804: /* GET_VRAM_INFO */
-            if (outputLen >= sizeof(ULONG) * 3) {
-                PULONG d = (PULONG)outputBuffer;
-                d[0] = 16384; /* Total MB */
-                d[1] = 4096;  /* Visible MB */
-                d[2] = 0;     /* Used MB */
-                bytesReturned = sizeof(ULONG) * 3;
+            if (outputLen >= sizeof(ULONG64) * 3 + sizeof(ULONG)) {
+                PULONG64 d64 = (PULONG64)outputBuffer;
+                d64[0] = 16ULL * 1024 * 1024 * 1024;        /* Total bytes (16GB) */
+                d64[1] = 4ULL * 1024 * 1024 * 1024;          /* Visible bytes (4GB) */
+                d64[2] = 0;                                   /* Used bytes */
+                PULONG d32 = (PULONG)(d64 + 3);
+                d32[0] = 2;                                   /* Segment count */
+                bytesReturned = sizeof(ULONG64) * 3 + sizeof(ULONG);
             }
             status = STATUS_SUCCESS;
             goto Cleanup;
@@ -3388,6 +3390,8 @@ DreamV3DeviceControl(
                 KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                     "AMDBC250-DREAM-V4.3: NBIO_MAP flag set - skipping GPU init\n"));
                 DevExt->HardwareInitialized = TRUE;
+                DevExt->GpuClockMhz = AMDBC250_BOOST_CLOCK_MHZ;
+                DevExt->MemoryClockMhz = AMDBC250_MEMORY_CLOCK_MHZ;
                 status = STATUS_SUCCESS;
                 break;
             }
