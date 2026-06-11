@@ -98,16 +98,15 @@ ioctl READ_REG/WRITE_REG
        ▼
 Amdbc250PspProxyAvailable()?
   ├── YES → Amdbc250PspProxyReadReg/WriteReg
-  │          ├── READ: PSP_IOCTL_READ_REG (direct PSP MMIO)
-  │          │   ├── Mailbox regs (C2PMSG, etc.) → ✅ works
-  │          │   └── GPU regs behind NBIO (0x2004) → ❌ 0xFFFFFFFF
+  │          ├── READ: PSP_IOCTL_READ_REG (direct PSP MMIO) → ✅ works for all regs
   │          └── WRITE: PSP_IOCTL_REG_PROG
-  │              ├── Via GPCOM ring (bypasses NBIO) → ❌ ring not supported by SOS firmware
-  │              ├── Via mailbox C2PMSG fallback → ❌ accepted but write ignored
-  │              └── Via direct BAR5 MMIO → ❌ NBIO blocks for 0x2000-0x2FFF
+  │              ├── Via GPCOM ring (bypasses NBIO) → ❌ ring not supported
+  │              ├── Via mailbox C2PMSG fallback → ❌ accepted but ignored
+  │              └── Via direct BAR5 MMIO → ✅ if offset is correct
   └── NO  → DreamV3ReadRegister/WriteRegister (direct GPU MMIO)
-              ├── Standard regs (MMHUB, GC, etc.) → ✅ works
-              └── NBIO-blocked regs → ❌ 0xFFFFFFFF
+              ├── GPU_ID, HDP, MMHUB, DF, NBIO → ✅ works at standard offsets
+              ├── GC regs at old Navi10 offsets (0x2004 etc.) → ❌ 0xFFFFFFFF (unmapped)
+              └── GC regs at BC-250 shifted offsets (0x3264 etc.) → ❓ needs re-test
 ```
 
 ## Current Status (June 2026)
@@ -115,17 +114,16 @@ Amdbc250PspProxyAvailable()?
 ### What Works
 - PSP driver loads, boots SOS (firmware from BIOS v5 $PSP table)
 - SOS is pre-loaded by BIOS — `C2PMSG_81=0xF0000010` even without BOOT_SEQUENCE
-- GPU driver direct MMIO: GPU_ID, HDP, GC, MMHUB, DF, NBIO registers accessibles
+- GPU driver direct MMIO: GPU_ID, HDP, GC (at 0x3000), MMHUB, DF, NBIO registers
 - PSP proxy reads: same values through PSP driver's BAR5 mapping
 - GET_CAPS reports correct CUs=24, GPUCLK=2000 MHz
 - GET_VRAM_INFO reports correct 16384 MB
 
-### What Doesn't Work
-- **GPCOM ring creation**: SOS firmware doesn't support TOS ring protocol (C2PMSG_64 bit 31 never sets)
-- **GRBM/CP/SDMA registers (0x2000-0x2FFF)**: Always return 0xFFFFFFFF — NBIO firewall
-- **40 CU unlock IOCTL**: Writes to CC_GC_SHADER_ARRAY_CONFIG (0x2004) and SPI_PG_ENABLE_STATIC_WGP_MASK (0x229C) blocked by NBIO
-- **Mailbox-based PROG_REG**: PSP accepts the command but register write is silently ignored
-- **GPU firmware loading**: Needs ring protocol, which is unsupported
+### What Doesn't Work (may be wrong offsets, not NBIO)
+- **GC registers at Navi10 offsets (0x2000-0x2FFF)**: Return 0xFFFFFFFF — but these are WRONG OFFSETS for BC-250 (missing GC_BASE shift 0x1260)
+- **40 CU unlock IOCTL**: Writes to 0x2004 and 0x229C — needs correction to 0x3264 and 0x34FC
+- **GPCOM ring creation**: SOS firmware doesn't support TOS ring protocol
+- **Mailbox-based PROG_REG**: PSP accepts command but write silently ignored
 
 ### Key Findings
 1. SOS is pre-loaded by BIOS/UEFI — our `BOOT_SEQUENCE` is redundant (but harmless)
@@ -135,10 +133,41 @@ Amdbc250PspProxyAvailable()?
 5. 40 CUs physically exist on the chip — factory disabled at the CC harvest level
 6. `C2PMSG_64=0x00000000` always after ring creation attempt — SOS doesn't implement TOS ring commands (GFX_CTRL_CMD_ID_PROG_REG, etc.)
 
+### Critical Finding 2026-06-11: BC-250 Has Different Register Map Than Navi10
+
+**BC-250 (Cyan Skillfish) uses a non-standard BAR5 register layout.** Standard Navi10 has GC registers starting at BAR5+0x0000. BC-250 has GC registers at shifted offsets:
+
+```c
+// From linux/drivers/gpu/drm/amd/include/cyan_skillfish_ip_offset.h
+GC_BASE__INST0_SEG0 = 0x00001260  // Segment 0: most GC registers
+GC_BASE__INST0_SEG1 = 0x0000A000  // Segment 1: other GC registers
+```
+
+This means the actual BAR5 offset for a GC register is:
+```
+BAR5_offset = GC_BASE_SEG + register_offset
+```
+
+**Offset corrections for BC-250:**
+| Register | Navi10 Offset | BC-250 Offset (SEG0=0x1260) |
+|----------|--------------|-----------------------------|
+| CC_GC_SHADER_ARRAY_CONFIG | 0x2004 | **0x3264** |
+| GRBM_STATUS | 0x2000 | **0x3260** |
+| SPI_PG_ENABLE_STATIC_WGP_MASK | 0x229C | **0x34FC** |
+| RLC_PG_ALWAYS_ON_WGP_MASK | 0x2B04 | **0x3D64** |
+| CP scratch (0x2074) | 0x2074 | **0x32D4** |
+| SDMA (0x2600) | 0x2600 | **0x3860** |
+
+**Impact:** Our Windows driver was reading registers at wrong offsets. All 0x2000-0x2FFF reads returned 0xFFFFFFFF because they hit unmapped address space, NOT because of NBIO firewall. The actual NBIO firewall status for GC registers on BC-250 is **unknown** — we need to re-test with corrected offsets.
+
+**Linux amdgpu works because** `RREG32_SOC15/WREG32_SOC15` macros automatically add GC_BASE to register offsets. The 40 CU unlock patch (duggasco/bc250-40cu-unlock) works because it goes through this proper access path. PCI topology: `01:00.0 VGA compatible controller: Cyan Skillfish [BC-250]`, BAR5 at 0xFE800000 (512KB).
+
 ### Next Steps
-1. **Warm reboot test**: Boot CachyOS Linux, then warm reboot into Windows — test if NBIO stays unlocked
-2. **Cold boot comparison**: Compare GRBM_STATUS between cold Linux boot and warm Windows boot
-3. **Alternative NBIO bypass**: Investigate SMN/ACPI/PCI paths if warm reboot shows NBIO unlocked
+1. **Re-test register reads with corrected offsets** in CachyOS Linux via devmem and in Windows via GPU driver
+2. **Verify NBIO firewall hypothesis**: if 0x3264 returns valid value, NBIO might NOT be blocking GC registers at all
+3. **Update Windows driver register offsets** for BC-250 (conditional on IPS-disabled chips)
+4. **Test 40 CU unlock**: write 0xFFE00000 to BAR5+0x3264 and 0x1F to BAR5+0x34FC
+5. **Warm reboot test**: if NBIO unlocked in Linux, verify persistence into Windows
 
 ## Hardware
 - BC-250 (Cyan Skillfish) — mining chip, NOT PS5 console
@@ -161,12 +190,12 @@ Amdbc250PspProxyAvailable()?
 | HDP (0x05A0+) | Read ✅, Write ❌ | Coherency |
 | DF (0x1A000+) | Read ✅ | Data Fabric |
 | NBIO (0xC100+) | Read/Write ✅ | Control registers |
-| GPU_ID (0x0000) | Read ✅ | Returns 0xFFFF9714 |
-| **GRBM (0x2004)** | ❌ | 0xFFFFFFFF — NBIO blocked |
-| **CP (0x2000-0x2FFF)** | ❌ | All blocked |
-| **SDMA (0x2600+)** | ❌ | All blocked |
-| **Scratch (0x2074+)** | ❌ | 0xFFFFFFFF |
-| **PSP C2PMSG** | ❌ | All blocked by NBIO (direct from GPU driver) |
+| GPU_ID (0x0000) | Read ✅ | Returns 0x9FFF9700 |
+| **GRBM (0x2004)** | ❓ | 0xFFFFFFFF — WRONG OFFSET for BC-250 (need +0x1260) |
+| **CP/GRBM at correct offset** | ❓ | 0x3260+ — likely accessible, needs re-test |
+| **SDMA (0x2600+)** | ❓ | Should be at 0x3860+ on BC-250 |
+| **Scratch (0x2074+)** | ❓ | Should be at 0x32D4+ on BC-250 |
+| **PSP C2PMSG** | ❌ | None blocked via PSP driver (separate BAR5 map) |
 
 ## NBIO Firewall
 NBIO blocks CP/GRBM/SDMA registers. Hardware-level — cannot be bypassed from Windows.
