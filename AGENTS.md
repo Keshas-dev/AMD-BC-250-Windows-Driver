@@ -101,11 +101,44 @@ Amdbc250PspProxyAvailable()?
   │          ├── READ: PSP_IOCTL_READ_REG (direct PSP MMIO)
   │          │   ├── Mailbox regs (C2PMSG, etc.) → ✅ works
   │          │   └── GPU regs behind NBIO (0x2004) → ❌ 0xFFFFFFFF
-  │          └── WRITE: PSP_IOCTL_REG_PROG (GPCOM PROG_REG) → ✅ bypasses NBIO
+  │          └── WRITE: PSP_IOCTL_REG_PROG
+  │              ├── Via GPCOM ring (bypasses NBIO) → ❌ ring not supported by SOS firmware
+  │              ├── Via mailbox C2PMSG fallback → ❌ accepted but write ignored
+  │              └── Via direct BAR5 MMIO → ❌ NBIO blocks for 0x2000-0x2FFF
   └── NO  → DreamV3ReadRegister/WriteRegister (direct GPU MMIO)
               ├── Standard regs (MMHUB, GC, etc.) → ✅ works
               └── NBIO-blocked regs → ❌ 0xFFFFFFFF
 ```
+
+## Current Status (June 2026)
+
+### What Works
+- PSP driver loads, boots SOS (firmware from BIOS v5 $PSP table)
+- SOS is pre-loaded by BIOS — `C2PMSG_81=0xF0000010` even without BOOT_SEQUENCE
+- GPU driver direct MMIO: GPU_ID, HDP, GC, MMHUB, DF, NBIO registers accessibles
+- PSP proxy reads: same values through PSP driver's BAR5 mapping
+- GET_CAPS reports correct CUs=24, GPUCLK=2000 MHz
+- GET_VRAM_INFO reports correct 16384 MB
+
+### What Doesn't Work
+- **GPCOM ring creation**: SOS firmware doesn't support TOS ring protocol (C2PMSG_64 bit 31 never sets)
+- **GRBM/CP/SDMA registers (0x2000-0x2FFF)**: Always return 0xFFFFFFFF — NBIO firewall
+- **40 CU unlock IOCTL**: Writes to CC_GC_SHADER_ARRAY_CONFIG (0x2004) and SPI_PG_ENABLE_STATIC_WGP_MASK (0x229C) blocked by NBIO
+- **Mailbox-based PROG_REG**: PSP accepts the command but register write is silently ignored
+- **GPU firmware loading**: Needs ring protocol, which is unsupported
+
+### Key Findings
+1. SOS is pre-loaded by BIOS/UEFI — our `BOOT_SEQUENCE` is redundant (but harmless)
+2. Linux `psp_v11_0_8` driver skips ALL firmware loading and ALL command submission — SOS handles everything internally
+3. NBIO firewall is activated by Windows boot process — cannot be unlocked from Windows
+4. The only way to unlock NBIO is to cold boot from an environment where NBIO stays unlocked (Linux)
+5. 40 CUs physically exist on the chip — factory disabled at the CC harvest level
+6. `C2PMSG_64=0x00000000` always after ring creation attempt — SOS doesn't implement TOS ring commands (GFX_CTRL_CMD_ID_PROG_REG, etc.)
+
+### Next Steps
+1. **Warm reboot test**: Boot CachyOS Linux, then warm reboot into Windows — test if NBIO stays unlocked
+2. **Cold boot comparison**: Compare GRBM_STATUS between cold Linux boot and warm Windows boot
+3. **Alternative NBIO bypass**: Investigate SMN/ACPI/PCI paths if warm reboot shows NBIO unlocked
 
 ## Hardware
 - BC-250 (Cyan Skillfish) — mining chip, NOT PS5 console
