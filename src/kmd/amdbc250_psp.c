@@ -12,14 +12,31 @@
 #define PSP_IOCTL_BOOT_SEQ      CTL_CODE(FILE_DEVICE_UNKNOWN, 0x810, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #define PSP_IOCTL_GET_GPU_INFO  CTL_CODE(FILE_DEVICE_UNKNOWN, 0x815, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #define PSP_IOCTL_LOAD_TOC      CTL_CODE(FILE_DEVICE_UNKNOWN, 0x820, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define PSP_IOCTL_REG_PROG      CTL_CODE(FILE_DEVICE_UNKNOWN, 0x816, METHOD_BUFFERED, FILE_ANY_ACCESS)
+
+/* PSP_GPU_INFO struct (must match PspIoctl.h from PSP driver repo) */
+typedef struct _PSP_GPU_INFO_REMOTE {
+    ULONG RingBufferPA;
+    ULONG FwLoaded;
+    ULONG FwCount;
+    ULONGLONG TMRBase;
+    ULONG TMSSize;
+    ULONG GfxVersion;
+    ULONG C2pmsg64;
+    ULONG C2pmsg81;
+    ULONG TmrInitialized;
+} PSP_GPU_INFO_REMOTE;
 
 static HANDLE g_PspProxyHandle = NULL;
 static BOOLEAN g_PspProxyAvailable = FALSE;
-static BOOLEAN g_KiqAvailable = FALSE;
-static ULONG64 g_KiqRingPa = 0;
-static ULONG g_KiqRingSize = 0;
-static PVOID g_KiqRingVa = NULL;     /* Mapped KIQ ring VA */
-static ULONG g_KiqWptr = 0;           /* Current KIQ write pointer */
+static BOOLEAN g_GpcomRingAvailable = FALSE; /* GPCOM ring created by PSP driver */
+static ULONG64 g_GpcomRingPa = 0;           /* GPCOM ring physical address (returned by PSP_GET_GPU_INFO) */
+static ULONG g_GpcomRingSize = 0;
+static PVOID g_GpcomRingVa = NULL;          /* Mapped GPCOM ring VA */
+/* NOTE: g_GpcomRingVa points to the PSP GPCOM ring, NOT a KIQ ring.
+   The KIQ ring is a separate GPU ring. The current code incorrectly
+   writes PM4 packets into the GPCOM ring, which does not work.
+   See Amdbc250PspKiqReadReg and Amdbc250PspKiqSubmit. */
 
 /* Initialize PSP proxy - open handle to PSP driver for GPU register access */
 static BOOLEAN PspProxyInit(VOID)
@@ -43,14 +60,26 @@ static BOOLEAN PspProxyInit(VOID)
         g_PspProxyAvailable = TRUE;
 
         /* Try to get GPU info (KIQ ring PA, FW status) via PSP_GET_GPU_INFO (0x815) */
-        ULONG gpuInfo[8] = {0};
+        PSP_GPU_INFO_REMOTE gpuInfo;
         IO_STATUS_BLOCK iosb2;
+        RtlZeroMemory(&gpuInfo, sizeof(gpuInfo));
         status = ZwDeviceIoControlFile(g_PspProxyHandle, NULL, NULL, NULL,
-            &iosb2, PSP_IOCTL_GET_GPU_INFO, NULL, 0, gpuInfo, sizeof(gpuInfo));
-        if (NT_SUCCESS(status) && gpuInfo[0]) {
-            /* gpuInfo[0]=C2PMSG_81, [1]=C2PMSG_35, [2]=C2PMSG_36
-             * [3]=ring_pa_lo, [4]=ring_pa_hi, [5]=fw_status */
-            KdPrint(("BC250-PSP: Proxy opened, SOS=0x%08X FW=%u\n", gpuInfo[0], gpuInfo[5]));
+            &iosb2, PSP_IOCTL_GET_GPU_INFO, NULL, 0, &gpuInfo, sizeof(gpuInfo));
+        if (NT_SUCCESS(status)) {
+            g_GpcomRingPa = gpuInfo.RingBufferPA;
+            g_GpcomRingSize = 0x1000;
+            g_GpcomRingAvailable = (gpuInfo.RingBufferPA != 0) ? TRUE : FALSE;
+            KdPrint(("BC250-PSP: Proxy opened, C2PMSG_81=0x%08X FW=%u RingPA=0x%08X Ring=%s\n",
+                gpuInfo.C2pmsg81, gpuInfo.FwCount, (ULONG)g_GpcomRingPa,
+                g_GpcomRingAvailable ? "YES" : "NO"));
+            if (g_GpcomRingAvailable && g_GpcomRingPa) {
+                PHYSICAL_ADDRESS ringPhys;
+                ringPhys.QuadPart = g_GpcomRingPa;
+                g_GpcomRingVa = MmMapIoSpace(ringPhys, g_GpcomRingSize, MmNonCached);
+                KdPrint(("BC250-PSP: GPCOM ring PA=0x%llX VA=%p\n", ringPhys.QuadPart, g_GpcomRingVa));
+            }
+        } else {
+            KdPrint(("BC250-PSP: PSP_GET_GPU_INFO failed (0x%08X)\n", status));
         }
         KdPrint(("BC250-PSP: Proxy to PSP driver opened\n"));
         return TRUE;
@@ -58,33 +87,20 @@ static BOOLEAN PspProxyInit(VOID)
     KdPrint(("BC250-PSP: PSP driver proxy not available (0x%08X)\n", status));
     return FALSE;
 }
-        } else {
-            KdPrint(("BC250-PSP: Proxy opened, KIQ not available (GPU FW status=%u)\n", gpuInfo[0]));
-        }
-        return TRUE;
-    }
-    return FALSE;
-}
 
-/* Read GPU register via PSP/KIQ proxy */
+/* Read GPU register via PSP proxy */
 ULONG Amdbc250PspProxyReadReg(ULONG GpuRegOffset)
 {
-    ULONG inBuf[3] = { GpuRegOffset, 0, 1 }; /* 1 = read */
-    ULONG outBuf[2] = { 0, 0 };
     IO_STATUS_BLOCK iosb;
+    ULONG outBuf[2] = { 0, 0 };
 
     if (!g_PspProxyHandle && !PspProxyInit()) {
         return Amdbc250PspReadRegister(GpuRegOffset);
     }
 
-    if (g_KiqAvailable) {
-        /* Use KIQ: send register read command via PSP REG_PROG */
-        NTSTATUS status = ZwDeviceIoControlFile(g_PspProxyHandle, NULL, NULL, NULL,
-            &iosb, PSP_IOCTL_REG_PROG, inBuf, sizeof(inBuf), outBuf, sizeof(outBuf));
-        if (NT_SUCCESS(status)) return outBuf[0];
-    }
-
-    /* Fallback: direct PSP MMIO read */
+    /* Direct PSP MMIO read via PSP driver (mailbox/csr registers work;
+       GPU registers behind NBIO firewall return 0xFFFFFFFF) */
+    ULONG inBuf[2] = { GpuRegOffset, 0 };
     NTSTATUS status = ZwDeviceIoControlFile(g_PspProxyHandle, NULL, NULL, NULL,
         &iosb, PSP_IOCTL_READ_REG, inBuf, sizeof(inBuf), outBuf, sizeof(outBuf));
     if (NT_SUCCESS(status)) return outBuf[0];
@@ -103,7 +119,7 @@ VOID Amdbc250PspProxyWriteReg(ULONG GpuRegOffset, ULONG Value)
         return;
     }
 
-    if (g_KiqAvailable) {
+    if (g_GpcomRingAvailable) {
         ZwDeviceIoControlFile(g_PspProxyHandle, NULL, NULL, NULL,
             &iosb, PSP_IOCTL_REG_PROG, inBuf, 3 * sizeof(ULONG), NULL, 0);
         return;
@@ -121,90 +137,47 @@ BOOLEAN Amdbc250PspProxyAvailable(VOID)
     return g_PspProxyAvailable;
 }
 
-/* Check if KIQ is available for GPU register access */
+/* Check if GPCOM ring is available (needed for register writes via PSP) */
 BOOLEAN Amdbc250PspKiqAvailable(VOID)
 {
     if (!g_PspProxyHandle) PspProxyInit();
-    return g_KiqAvailable;
+    return g_GpcomRingAvailable;
 }
 
-/* Submit PM4 commands via KIQ ring + trigger via PSP */
+/* BROKEN: Writes PM4 packets to GPCOM ring — does NOT work.
+   The GPCOM ring expects GPCOM commands (PROG_REG, etc.), not PM4.
+   A proper KIQ ring implementation needs:
+   1. A separate KIQ ring buffer allocated in system memory
+   2. KIQ doorbell register setup (via PSP mailbox or config)
+   3. PM4 packet submission via KIQ doorbell, not GPCOM
+   This function is kept for reference but returns STATUS_NOT_IMPLEMENTED. */
 NTSTATUS Amdbc250PspKiqSubmit(ULONG* Pm4Commands, ULONG DwordCount)
 {
-    IO_STATUS_BLOCK iosb;
-    ULONG wptrReg[2] = { 0, 0 };
-
-    if (!g_KiqRingVa || !g_PspProxyHandle) return STATUS_DEVICE_NOT_READY;
-    if (DwordCount == 0 || DwordCount > g_KiqRingSize / sizeof(ULONG) - 8)
-        return STATUS_INVALID_PARAMETER;
-
-    PUCHAR ringByte = (PUCHAR)g_KiqRingVa;
-    ULONG offset = g_KiqWptr % g_KiqRingSize;
-    if (offset + DwordCount * sizeof(ULONG) > g_KiqRingSize)
-        offset = 0;
-
-    RtlCopyMemory(ringByte + offset, Pm4Commands, DwordCount * sizeof(ULONG));
-    g_KiqWptr = offset + DwordCount * sizeof(ULONG);
-
-    wptrReg[1] = g_KiqWptr;
-    ZwDeviceIoControlFile(g_PspProxyHandle, NULL, NULL, NULL,
-        &iosb, PSP_IOCTL_REG_PROG, wptrReg, sizeof(wptrReg), NULL, 0);
-
-    return STATUS_SUCCESS;
+    return STATUS_NOT_IMPLEMENTED;
 }
 
-/* Read GPU register via KIQ COPY_DATA PM4 packet */
+/* BROKEN: Writes a PM4 COPY_DATA packet to the GPCOM ring — does NOT work.
+   The GPCOM ring processes GPCOM commands (PROG_REG, etc.), not PM4 packets.
+   The "doorbell" writes register 0 with sizeof(pkt)=20, which is not a KIQ doorbell.
+   Returns 0xFFFFFFFF (timeout) in all cases.
+   Use PSP_IOCTL_READ_REG (Amdbc250PspProxyReadReg) for register reads instead. */
 ULONG Amdbc250PspKiqReadReg(ULONG GpuRegOffset)
 {
-    if (!g_KiqRingVa || !g_PspProxyHandle) return 0xFFFFFFFF;
-
-    /* Reserve 2 DWORDS at end of ring for response */
-    ULONG respOffset = (g_KiqRingSize / sizeof(ULONG)) - 2;
-    volatile PULONG ring = (volatile PULONG)g_KiqRingVa;
-    ring[respOffset] = 0xDEADDEAD;
-    ring[respOffset + 1] = 0xDEADDEAD;
-
-    /* Build COPY_DATA PM4 packet: read from GPU reg, write to ring */
-    ULONG pkt[8] = {0};
-    ULONG64 respVa = g_KiqRingPa + respOffset * sizeof(ULONG);
-
-    /* PACKET3_COPY_DATA: IT_OPCODE=0x41, copies GPU register to memory */
-    pkt[0] = 0xC0034100 | 4;  /* IT_COPY_DATA, 4 DWORD payload */
-    pkt[1] = GpuRegOffset;     /* SRC_LO (GPU register offset) */
-    pkt[2] = 0xFE800000;        /* SRC_HI (BAR5 base) */
-    pkt[3] = (ULONG)(respVa & 0xFFFFFFFF);   /* DST_LO */
-    pkt[4] = (ULONG)(respVa >> 32);           /* DST_HI */
-
-    /* Submit */
-    g_KiqWptr = 0;
-    RtlCopyMemory(g_KiqRingVa, pkt, sizeof(pkt));
-    IO_STATUS_BLOCK iosb;
-    ULONG wptrReg[2] = { 0, sizeof(pkt) };
-    ZwDeviceIoControlFile(g_PspProxyHandle, NULL, NULL, NULL,
-        &iosb, PSP_IOCTL_REG_PROG, wptrReg, sizeof(wptrReg), NULL, 0);
-
-    /* Wait for response (poll ring) */
-    ULONG waited = 0;
-    while (waited < 100) {
-        if (ring[respOffset] != 0xDEADDEAD) return ring[respOffset];
-        KeStallExecutionProcessor(1000); /* 1ms */
-        waited++;
-    }
     return 0xFFFFFFFF;
 }
 
 /* Close PSP proxy handle */
 VOID Amdbc250PspProxyCleanup(VOID)
 {
-    if (g_KiqRingVa) {
-        MmUnmapIoSpace(g_KiqRingVa, g_KiqRingSize);
-        g_KiqRingVa = NULL;
+    if (g_GpcomRingVa) {
+        MmUnmapIoSpace(g_GpcomRingVa, g_GpcomRingSize);
+        g_GpcomRingVa = NULL;
     }
     if (g_PspProxyHandle) {
         ZwClose(g_PspProxyHandle);
         g_PspProxyHandle = NULL;
         g_PspProxyAvailable = FALSE;
-        g_KiqAvailable = FALSE;
+        g_GpcomRingAvailable = FALSE;
     }
 }
 

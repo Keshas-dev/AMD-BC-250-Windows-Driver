@@ -3509,7 +3509,7 @@ DreamV3DeviceControl(
         break;
     }
 
-    /* --- Read GPU register --- */
+    /* --- Read GPU register (via PSP proxy when available) --- */
     case 0x80000B88: { /* IOCTL_AMDBC250_READ_REG */
         if (inputLen >= sizeof(AMDBC250_IOCTL_REG_ACCESS) &&
             outputLen >= sizeof(AMDBC250_IOCTL_REG_ACCESS)) {
@@ -3520,20 +3520,26 @@ DreamV3DeviceControl(
                 break;
             }
 
-            ULONG value = DreamV3ReadRegister(DevExt, RegAcc->RegisterOffset);
+            ULONG value;
+            if (Amdbc250PspProxyAvailable()) {
+                value = Amdbc250PspProxyReadReg(RegAcc->RegisterOffset);
+            } else {
+                value = DreamV3ReadRegister(DevExt, RegAcc->RegisterOffset);
+            }
             RegAcc->Value = value;
             bytesReturned = sizeof(AMDBC250_IOCTL_REG_ACCESS);
 
             KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_TRACE_LEVEL,
-                "AMDBC250-DREAM-V4.3: READ_REG[0x%04X] = 0x%08X\n",
-                RegAcc->RegisterOffset, value));
+                "AMDBC250-DREAM-V4.3: READ_REG[0x%04X] = 0x%08X%s\n",
+                RegAcc->RegisterOffset, value,
+                Amdbc250PspProxyAvailable() ? " (via PSP)" : ""));
         } else {
             status = STATUS_BUFFER_TOO_SMALL;
         }
         break;
     }
 
-    /* --- Write GPU register --- */
+    /* --- Write GPU register (via PSP proxy when available) --- */
     case 0x80000B8C: { /* IOCTL_AMDBC250_WRITE_REG */
         if (inputLen >= sizeof(AMDBC250_IOCTL_REG_ACCESS)) {
             PAMDBC250_IOCTL_REG_ACCESS RegAcc = (PAMDBC250_IOCTL_REG_ACCESS)inputBuffer;
@@ -3543,11 +3549,16 @@ DreamV3DeviceControl(
                 break;
             }
 
-            DreamV3WriteRegister(DevExt, RegAcc->RegisterOffset, RegAcc->Value);
+            if (Amdbc250PspProxyAvailable()) {
+                Amdbc250PspProxyWriteReg(RegAcc->RegisterOffset, RegAcc->Value);
+            } else {
+                DreamV3WriteRegister(DevExt, RegAcc->RegisterOffset, RegAcc->Value);
+            }
 
             KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_TRACE_LEVEL,
-                "AMDBC250-DREAM-V4.3: WRITE_REG[0x%04X] = 0x%08X\n",
-                RegAcc->RegisterOffset, RegAcc->Value));
+                "AMDBC250-DREAM-V4.3: WRITE_REG[0x%04X] = 0x%08X%s\n",
+                RegAcc->RegisterOffset, RegAcc->Value,
+                Amdbc250PspProxyAvailable() ? " (via PSP)" : ""));
             status = STATUS_SUCCESS;
         } else {
             status = STATUS_BUFFER_TOO_SMALL;
