@@ -3526,19 +3526,13 @@ DreamV3DeviceControl(
                 break;
             }
 
-            ULONG value;
-            if (Amdbc250PspProxyAvailable()) {
-                value = Amdbc250PspProxyReadReg(RegAcc->RegisterOffset);
-            } else {
-                value = DreamV3ReadRegister(DevExt, RegAcc->RegisterOffset);
-            }
+            ULONG value = DreamV3ReadRegister(DevExt, RegAcc->RegisterOffset);
             RegAcc->Value = value;
             bytesReturned = sizeof(AMDBC250_IOCTL_REG_ACCESS);
 
             KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_TRACE_LEVEL,
-                "AMDBC250-DREAM-V4.3: READ_REG[0x%04X] = 0x%08X%s\n",
-                RegAcc->RegisterOffset, value,
-                Amdbc250PspProxyAvailable() ? " (via PSP)" : ""));
+                "AMDBC250-DREAM-V4.3: READ_REG[0x%04X] = 0x%08X\n",
+                RegAcc->RegisterOffset, value));
         } else {
             status = STATUS_BUFFER_TOO_SMALL;
         }
@@ -3555,16 +3549,11 @@ DreamV3DeviceControl(
                 break;
             }
 
-            if (Amdbc250PspProxyAvailable()) {
-                Amdbc250PspProxyWriteReg(RegAcc->RegisterOffset, RegAcc->Value);
-            } else {
-                DreamV3WriteRegister(DevExt, RegAcc->RegisterOffset, RegAcc->Value);
-            }
+            DreamV3WriteRegister(DevExt, RegAcc->RegisterOffset, RegAcc->Value);
 
             KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_TRACE_LEVEL,
-                "AMDBC250-DREAM-V4.3: WRITE_REG[0x%04X] = 0x%08X%s\n",
-                RegAcc->RegisterOffset, RegAcc->Value,
-                Amdbc250PspProxyAvailable() ? " (via PSP)" : ""));
+                "AMDBC250-DREAM-V4.3: WRITE_REG[0x%04X] = 0x%08X\n",
+                RegAcc->RegisterOffset, RegAcc->Value));
             status = STATUS_SUCCESS;
         } else {
             status = STATUS_BUFFER_TOO_SMALL;
