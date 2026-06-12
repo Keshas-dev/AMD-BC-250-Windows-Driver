@@ -47,6 +47,13 @@ Linux has full support via AMDGPU, but Windows has zero official GPU drivers. Th
 | File | Description |
 |------|-------------|
 | [PILNAS-APRASAS.md](PILNAS-APRASAS.md) | Full technical specification (Lithuanian) |
+| [GC_BASE-REGISTER-ANALYSIS.md](GC_BASE-REGISTER-ANALYSIS.md) | GC_BASE=0x1260 offset correction analysis |
+| [NBIO-FIREWALL-ANALYSIS.md](NBIO-FIREWALL-ANALYSIS.md) | NBIO firewall behavioral analysis |
+| [PSP-PROXY-BYPASS.md](PSP-PROXY-BYPASS.md) | PSP proxy bypass rationale and architecture |
+| [RING-INIT-STATUS.md](RING-INIT-STATUS.md) | Ring init blockers and KIQ path forward |
+| [REGISTER-MAP-BC250.md](REGISTER-MAP-BC250.md) | Complete BC-250 register map (tested offsets) |
+| [BIOS-5.00-NOTES.md](BIOS-5.00-NOTES.md) | BIOS 5.00 specific findings |
+| [LINUX-AMDGPU-ANALYSIS.md](LINUX-AMDGPU-ANALYSIS.md) | Linux PSP v11.0_8 driver analysis |
 | [BUILD-STATUS.md](BUILD-STATUS.md) | Build environment notes |
 | [D3D12-UMD-RESEARCH.md](D3D12-UMD-RESEARCH.md) | D3D12 UMD research notes |
 

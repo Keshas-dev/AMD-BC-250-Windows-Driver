@@ -107,6 +107,12 @@ Amdbc250PspProxyAvailable()?
               ├── GPU_ID, HDP, MMHUB, DF, NBIO → ✅ works at standard offsets
               ├── GC regs at old Navi10 offsets (0x2004 etc.) → ❌ 0xFFFFFFFF (unmapped)
               └── GC regs at BC-250 shifted offsets (0x3264 etc.) → ✅ confirmed working
+
+NOTE: PSP proxy BYPASSED (commit 7eec13a). All READ_REG/WRITE_REG IOCTLs
+now use DreamV3ReadRegister/WriteRegister directly. PSP proxy mapped
+PSP BAR0 (0xFD600000) which returns 0xFFFFFFFF for non-PSP registers.
+Direct GPU BAR5 (0xFE800000) MMIO works correctly for all accessible registers.
+```
 ```
 
 ## Current Status (June 2026)
@@ -114,16 +120,38 @@ Amdbc250PspProxyAvailable()?
 ### What Works
 - PSP driver loads, boots SOS (firmware from BIOS v5 $PSP table)
 - SOS is pre-loaded by BIOS — `C2PMSG_81=0xF0000010` even without BOOT_SEQUENCE
-- GPU driver direct MMIO: GPU_ID, HDP, GC (at 0x3000), MMHUB, DF, NBIO registers
-- **GC registers at BC-250 corrected offsets (0x3260+)** — GRBM=0x0, CC=0x0, SPI=0x2000, SDMA=0x8E0, Scratch=0x4D585042
+- GPU driver direct MMIO: GPU_ID, HDP, GC, MMHUB, DF, NBIO registers
+- **GC registers at BC-250 corrected offsets (0x3260+)** — GRBM=0x0, CC=0x0, SPI=0x2000, Scratch=0x4D585042
 - PSP proxy reads: same values through PSP driver's BAR5 mapping
 - GET_CAPS reports correct CUs=24, GPUCLK=2000 MHz
 - GET_VRAM_INFO reports correct 16384 MB
+- **SPI writes at 0x34FC (GC_BASE+0x229C)** — 0x2000→0x3F00→0x2000 restore works via GPU BAR5 direct MMIO ✅
+- **CP ring CNTL/RPTR/WPTR at GC_BASE-shifted offsets** — WRITABLE (0xDA68/0xDA6C/0xDA78)
+- **KIQ BASE_LO at 0xE060 (GC_BASE+0xCE00)** — first writable ring BASE register! ✅
+- **COMPUTE_BASE_HI at 0xDB64** — writable (but BASE_LO read-only)
+- **KIQ_RPTR/WPTR at 0xE06C/0xE078** — WRITABLE ✅
 
 ### What Doesn't Work
-- **Writes to CC/SPI registers** (0x3264/0x34FC) — silently ignored, GC likely power-gated
+- **GFX ring BASE_LO at 0xDA60 (GC_BASE+0xC800)** — READ-ONLY (hardwired, cannot set ring buffer address)
+- **KIQ_CNTL at 0xE068** — READ-ONLY (cannot enable KIQ ring)
+- **CP_ME_CNTL/MEC_CNTL at 0xC060/0xC0E0** — NBIO blocks writes (halt/resume impossible)
 - **GPCOM ring creation**: SOS firmware doesn't support TOS ring protocol
 - **Mailbox-based PROG_REG**: PSP accepts command but write silently ignored
+
+### Critical Finding 2026-06-12: CP Ring Register Writes at GC_BASE-Shifted Offsets
+- GC_BASE=0x1260 applies to CP ring registers (0xC800+ range) — confirmed by write-back test
+- **CP_RING0_CNTL [0xDA68]**: 0x0 → 0x1 ✅ WRITABLE
+- **CP_RING0_RPTR [0xDA6C]**: 0x0 → 0xDEADBEEF ✅ WRITABLE
+- **CP_RING0_WPTR [0xDA78]**: 0x0 → 0xDEADBEEF ✅ WRITABLE
+- **CP_RING0_BASE_LO [0xDA60]**: 0x0 → 0x0 ❌ READ-ONLY (chicken-and-egg problem)
+- **Conclusion: NBIO does NOT block GC_BASE aliases (0xDA60+), but BASE_LO is hardware read-only**
+
+### Critical Finding 2026-06-12: KIQ BASE_LO at 0xE060 is WRITABLE
+- KIQ_BASE_LO [0xE060]: 0x0 → 0xDEADBEEF ✅ WRITABLE — **only writable ring BASE on BC-250**
+- KIQ_CNTL [0xE068]: 0x0 → 0x0 ❌ READ-ONLY (but might auto-enable with BASE set)
+- KIQ_RPTR [0xE06C], WPTR [0xE078]: WRITABLE ✅
+- Native NBIO offset 0xCE00 range: all read-only ❌
+- **This is the primary path forward for ring-based command submission**
 
 ### Key Findings
 1. SOS is pre-loaded by BIOS/UEFI — our `BOOT_SEQUENCE` is redundant (but harmless)
@@ -133,6 +161,19 @@ Amdbc250PspProxyAvailable()?
 5. The card has 512MB VRAM (BIOS P3.00 on this unit)
 6. `CC_GC_SHADER_ARRAY_CONFIG` = 0x0 means all CUs disabled at array level; `SPI_PG_ENABLE_STATIC_WGP_MASK` = 0x2000 (only WGP 5 enabled)
 7. `C2PMSG_64=0x00000000` always after ring creation attempt — SOS doesn't implement TOS ring commands (GFX_CTRL_CMD_ID_PROG_REG, etc.)
+8. **NBIO blocks all writes to 0xC000+ range from ALL paths** (direct GPU BAR5, PSP BAR0, SMN, GC_BASE aliased addresses where native offset is 0xC000+)
+9. **CP_ME_CNTL/MEC_CNTL at 0xC060/0xC0E0 NOT in GC space** — GC_BASE-shifted addresses (0xD2C0/0xD2E0) return 0xFFFFFFFF
+
+### Changes This Session (2026-06-12)
+- **hw.h SCRATCH fixed**: 0x8500 → GC_BASE+0x2074 (0x32D4 — confirmed CP alive at this offset)
+- **hw.h ring registers**: All CP ring (0xC800+), compute (0xC900+), HQD (0xC860+) shifted by GC_BASE=0x1260
+- **KIQ registers added** to hw.h at GC_BASE+0xCE00 (Navi10 native 0xCE00 → BC-250 0xE060)
+- **kmd.h include order fixed**: GC_BASE, MP1_BASE, THM_BASE moved before hw.h include (was indirectly using undefined constant)
+- **Duplicate GC_BASE definitions removed** from bottom of kmd.h (defined once at top)
+- **CP_ME_CNTL/MEC_CNTL documented** as NBIO addresses (NOT GC_BASE-shifted, unmapped at 0xD2C0)
+- **PSP driver GC_BASE fix**: Added AMDBC250_GC_BASE constant to PspIoctl.h/PspDriver.c; fixed 7 hardcoded Navi10 offsets; version 3.0.0.3 (commit 5e24b0d)
+- **GPU driver PSP proxy bypass**: Always use direct GPU BAR5 MMIO (not PSP proxy which maps wrong BAR0)
+- **Both repos committed and pushed**: GPU driver PSP proxy bypass (e513122→7eec13a), PSP driver GC_BASE fix (5e24b0d)
 
 ### Critical Finding 2026-06-11: BC-250 Has Different Register Map Than Navi10
 
@@ -246,9 +287,11 @@ Linux `cyan_skillfish_ip_offset.h` + `thm_11_0_2_offset.h` suggest THM_BASE=0x16
 1. ~~**GC_BASE=0x1260 applied**~~ ✅
 2. ~~**NBIO NOT blocking confirmed**~~ ✅  
 3. ~~**THM corrected to 0x8000**~~ ✅
-4. **Test WGP/CC writes through GPU driver** — verify SPI_PG_ENABLE_STATIC_WGP_MASK writability via IOCTL
-5. **Try compute shader** — GFX ring init + first PM4 dispatch without SMU
-6. **If fails** — revisit SMU via PSP proxy or SMN path
+4. ~~**Test WGP/CC writes through GPU driver**~~ ✅ — SPI at 0x34FC writable
+5. **Install new driver** — replace loaded driver with build from 7eec13a
+6. **Test ring init** — verify scratch test passes at corrected offset, ring init succeeds
+7. **If GFX BASE_LO still read-only** → implement KIQ ring (BASE_LO at 0xE060 writable)
+8. **Try compute shader** — allocate ring buffer + PM4 dispatch
 
 ## Hardware
 - BC-250 (Cyan Skillfish) — mining chip, NOT PS5 console
@@ -274,15 +317,20 @@ Linux `cyan_skillfish_ip_offset.h` + `thm_11_0_2_offset.h` suggest THM_BASE=0x16
 | GPU_ID (0x0000) | Read ✅ | Returns 0x9FFF9700 |
 | GRBM_STATUS (0x3260) | Read ✅ | BC-250 corrected offset (0x1260+0x2000), = 0x0 |
 | CC_GC_SHADER_ARRAY_CONFIG (0x3264) | Read ✅ | BC-250 corrected offset (0x1260+0x2004), = 0x0 |
-| SPI_PG_ENABLE_STATIC_WGP_MASK (0x34FC) | Read ✅ | BC-250 corrected offset (0x1260+0x229C), = 0x2000 |
-| SDMA (0x3860) | Read ✅ | BC-250 offset (0x1260+0x2600), = 0x8E0 |
+| SPI_PG_ENABLE_STATIC_WGP_MASK (0x34FC) | Read ✅/Write ✅ | BC-250 corrected offset (0x1260+0x229C), = 0x2000 |
+| RLC_PG_ALWAYS_ON_WGP_MASK (0x3D64) | Read ✅ | BC-250 offset (0x1260+0x2B04) |
 | Scratch (0x32D4) | Read ✅ | BC-250 offset (0x1260+0x2074), = 0x4D585042 (CP alive) |
 | **PSP C2PMSG** | ❌ | None blocked via PSP driver (separate BAR5 map) |
+| **CP_RING0_BASE_LO (0xDA60)** | Read only ❌ | GC_BASE-shifted (0x1260+0xC800), hardware read-only |
+| **CP_RING0_CNTL/RPTR/WPTR (0xDA68-0xDA78)** | Write ✅ | GC_BASE-shifted, accessible for read/write |
+| **COMPUTE_BASE_HI (0xDB64)** | Write ✅ | But BASE_LO (0xDB60) read-only |
+| **KIQ_BASE_LO (0xE060)** | Write ✅ | ONLY writable ring BASE register found |
+| **CP_ME_CNTL (0xC060)** | Read only ❌ | NBIO address, writes silently ignored |
 
 ## NBIO Firewall
 NBIO on BC-250 does NOT block GC/GRBM/SDMA registers at corrected offsets (confirmed via Linux devmem).
-NBIO may block CP command submission (ring writes) but register-level access is unrestricted.
-On some Navi10/Navi21 cards NBIO blocks GC registers, but BC-250 (Cyan Skillfish) appears to have this firewall disabled.
+NBIO blocks writes to 0xC000+ range from ALL paths — direct GPU BAR5, PSP BAR0, SMN, GC_BASE aliased addresses.
+GC_BASE aliases (0xDA60+) bypass NBIO for registers where native offset is 0xC800+ — but some registers (BASE_LO) are still hardware read-only.
 
 ## PSP Proxy (GPU Driver)
 - `src/kmd/amdbc250_psp.c` — kernel-mode proxy that opens `\\.\AmdBcPsp` and sends IOCTLs
@@ -374,3 +422,5 @@ PSP Driver (AMD-BC-250-PSP-Windows-Driver/)
 - Spinlock held during mailbox polling blocks ALL other threads
 - C2PMSG_81 save/restore clobbers PSP response — do NOT restore
 - Both drivers share BAR5 — running MMIO tests with GPU driver active may cause black screen
+- GC_BASE_SHIFTED ring addresses (0xDA60+) bypass NBIO firewall (0xC800+ native) but BASE registers remain read-only by hardware
+- KIQ at 0xE060 is the ONLY writable ring BASE — all GFX/COMPUTE BASE_LO registers are read-only

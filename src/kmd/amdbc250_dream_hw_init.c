@@ -443,12 +443,6 @@ DreamV3HwInitGfxRing(
                          CP_ME_CNTL__ME_HALT | CP_ME_CNTL__PFP_HALT);
     KeStallExecutionProcessor(10);
 
-    /* Program ring base (GFX10: 256-byte aligned) */
-    DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_GFX_RING0_BASE_LO,
-                         (ULONG)(RingPhys.QuadPart & 0xFFFFFF00));
-    DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_GFX_RING0_BASE_HI,
-                         (ULONG)(RingPhys.QuadPart >> 40));
-
     /* Calculate ring size (log2 of size in DWORDs) */
     RbBufSz = 0;
     {
@@ -456,15 +450,64 @@ DreamV3HwInitGfxRing(
         while (Sz > 1) { Sz >>= 1; RbBufSz++; }
     }
 
-    /* Program ring control */
-    RbCntl = (RbBufSz & CP_RING0_CNTL__RB_BUFSZ_MASK) |
-             ((1 << CP_RING0_CNTL__RB_BLKSZ_SHIFT) & CP_RING0_CNTL__RB_BLKSZ_MASK) |
-             CP_RING0_CNTL__RPTR_WRITEBACK_ENABLE;
-    DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_GFX_RING0_CNTL, RbCntl);
+    /* Try GFX ring first (BASE_LO is typically read-only on BC-250) */
+    ULONG BaseLoVal = (ULONG)(RingPhys.QuadPart & 0xFFFFFF00);
+    ULONG BaseHiVal = (ULONG)(RingPhys.QuadPart >> 40);
 
-    /* Initialize pointers */
-    DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_GFX_RING0_RPTR, 0);
-    DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_GFX_RING0_WPTR, 0);
+    DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_GFX_RING0_BASE_LO, BaseLoVal);
+    DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_GFX_RING0_BASE_HI, BaseHiVal);
+
+    /* Check if GFX BASE_LO was actually written (read-only on BC-250) */
+    ULONG GfxBaseCheck = DreamV3ReadRegister(DevExt, AMDBC250_REG_CP_GFX_RING0_BASE_LO);
+    DevExt->UseKiqRing = FALSE;
+
+    if (GfxBaseCheck != BaseLoVal) {
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+                   "AMDBC250-DREAM-V4.3: GFX ring BASE_LO read-only (got 0x%08X, expected 0x%08X)\n",
+                   GfxBaseCheck, BaseLoVal));
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+                   "AMDBC250-DREAM-V4.3: Falling back to KIQ ring (BASE_LO at 0xE060 is writable)\n"));
+
+        /* Try KIQ ring instead — KIQ_BASE_LO at 0xE060 is writable! */
+        DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_KIQ_BASE_LO, BaseLoVal);
+        DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_KIQ_BASE_HI, BaseHiVal);
+        KeStallExecutionProcessor(1);
+
+        ULONG KiqBaseCheck = DreamV3ReadRegister(DevExt, AMDBC250_REG_CP_KIQ_BASE_LO);
+        if (KiqBaseCheck == BaseLoVal) {
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                       "AMDBC250-DREAM-V4.3: KIQ BASE_LO write VERIFIED (0x%08X)\n", KiqBaseCheck));
+            DevExt->UseKiqRing = TRUE;
+
+            /* Program KIQ ring control (may be read-only — try anyway) */
+            RbCntl = (RbBufSz & CP_RING0_CNTL__RB_BUFSZ_MASK) |
+                     ((1 << CP_RING0_CNTL__RB_BLKSZ_SHIFT) & CP_RING0_CNTL__RB_BLKSZ_MASK) |
+                     CP_RING0_CNTL__RPTR_WRITEBACK_ENABLE;
+            DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_KIQ_CNTL, RbCntl);
+
+            /* Initialize KIQ pointers */
+            DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_KIQ_RPTR, 0);
+            DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_KIQ_WPTR, 0);
+        } else {
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
+                       "AMDBC250-DREAM-V4.3: KIQ BASE_LO also read-only (0x%08X) — ring unusable\n",
+                       KiqBaseCheck));
+        }
+    } else {
+        /* GFX ring base IS writable (unusual for BC-250) — use it */
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                   "AMDBC250-DREAM-V4.3: GFX ring BASE_LO writable — using GFX ring\n"));
+
+        /* Program ring control */
+        RbCntl = (RbBufSz & CP_RING0_CNTL__RB_BUFSZ_MASK) |
+                 ((1 << CP_RING0_CNTL__RB_BLKSZ_SHIFT) & CP_RING0_CNTL__RB_BLKSZ_MASK) |
+                 CP_RING0_CNTL__RPTR_WRITEBACK_ENABLE;
+        DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_GFX_RING0_CNTL, RbCntl);
+
+        /* Initialize pointers */
+        DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_GFX_RING0_RPTR, 0);
+        DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_GFX_RING0_WPTR, 0);
+    }
 
     /* Initialize command processor */
     NTSTATUS Status = DreamV3InitCommandProcessor(DevExt);
@@ -479,8 +522,9 @@ DreamV3HwInitGfxRing(
     DevExt->GfxRing.Initialized = TRUE;
 
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-               "AMDBC250-DREAM-V4.3: GFX ring initialized at PA=0x%llX\n",
-               RingPhys.QuadPart));
+               "AMDBC250-DREAM-V4.3: %s ring initialized at PA=0x%llX (size=%dKB)\n",
+               DevExt->UseKiqRing ? "KIQ" : "GFX",
+               RingPhys.QuadPart, (ULONG)(RingSize / 1024)));
 
     return STATUS_SUCCESS;
 }

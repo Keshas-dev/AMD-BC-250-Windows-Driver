@@ -384,6 +384,9 @@ typedef struct _DREAM_V3_DEVICE_EXTENSION {
     BOOLEAN             PspAlive;            /* SOS detected alive */
     BOOLEAN             NbioUnlocked;        /* NBIO firewall bypassed */
 
+    /* Ring mode: GFX (BASE_LO read-only on BC-250) vs KIQ */
+    BOOLEAN             UseKiqRing;          /* TRUE = use KIQ regs (0xE060+), not GFX regs */
+
     /* Diagnostics */
     ULONG               InterruptCount;
     ULONG               SubmitCount;
