@@ -230,18 +230,25 @@ Linux `cyan_skillfish_ip_offset.h` + `thm_11_0_2_offset.h` suggest THM_BASE=0x16
 
 **Conclusion:** Linux IP offset headers (`cyan_skillfish_ip_offset.h`) may apply to different BIOS/silicon revision. Our P4.00G BIOS uses legacy Navi10 THM layout at 0x8000.
 
-### Next Steps
-1. ~~**Re-test register reads with corrected offsets**~~ ✅ DONE
-2. ~~**Verify NBIO firewall hypothesis**~~ ✅ DONE
-3. ~~**Update Windows driver register offsets** (GC)~~ ✅ DONE
-4. ~~**Research SMU v11.8 offsets + protocol**~~ ✅ DONE
-5. ~~**Fix SMU C2PMSG offsets in driver**~~ ✅ DONE
-6. ~~**Fix SMU protocol + message IDs in driver**~~ ✅ DONE
-7. **Rebuild driver with corrected SMU offsets** (needs VC++ compiler)
-8. **Test SMU TestMessage + GetSmuVersion with corrected offsets** via GPU driver IOCTL
-9. **If SMU responds:** test RequestActiveWgp (0x18) → power up WGPs
-10. **If WGPs power up:** write SPI_PG_ENABLE_STATIC_WGP_MASK to enable all WGPs
-11. **Test 40 CU unlock:** write 0xFFE00000 to CC_GC_SHADER_ARRAY_CONFIG (if writable after SMU power-up)
+### SMU Communication Status + Future Options
+**SMU firmware does NOT respond** at any known offsets (neither Navi10 0x16104+ nor BC-250 0x16A08+):
+- Both offset ranges return readable zeros (registers exist) but writes are silently ignored
+- No response to TestMessage (0x1), GetSmuVersion (0x2), or any other command
+- SMU likely power-gated, not running, or this chip revision lacks SMU firmware
+
+**Future options (saved for reference):**
+1. **PSP proxy writes** — route SPI/CC register writes through PspDriver.sys IOCTL_WRITE_REG (separate BAR5 mapping might behave differently)
+2. **SMN access** — try reaching SMU through NBIO SMN index/data registers (0xD00/0xD04 in PCI config space, IOCTL 0x80000BC4)
+3. **Direct GPU driver writes (CURRENT CHOICE)** — write SPI_PG_ENABLE_STATIC_WGP_MASK directly, try compute shader without SMU involvement
+4. **Linux PPT table path** — read clock/voltage from ATOM BIOS PPT table (Linux cyan_skillfish_ppt.c approach), skip SMU entirely
+
+### Current Plan
+1. ~~**GC_BASE=0x1260 applied**~~ ✅
+2. ~~**NBIO NOT blocking confirmed**~~ ✅  
+3. ~~**THM corrected to 0x8000**~~ ✅
+4. **Test WGP/CC writes through GPU driver** — verify SPI_PG_ENABLE_STATIC_WGP_MASK writability via IOCTL
+5. **Try compute shader** — GFX ring init + first PM4 dispatch without SMU
+6. **If fails** — revisit SMU via PSP proxy or SMN path
 
 ## Hardware
 - BC-250 (Cyan Skillfish) — mining chip, NOT PS5 console

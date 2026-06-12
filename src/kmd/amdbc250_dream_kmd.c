@@ -644,11 +644,11 @@ DreamV3DdiStartDevice(
                 regInfo->DataLength == sizeof(ULONG)) {
                 ULONG regValue = *(PULONG)regInfo->Data;
                 if (regValue == 1) {
-                    /* Unlock 40 CUs! */
+                    /* Enable all WGPs (bits 8-13, verified via write-back) */
                     DreamV3WriteRegister(DevExt, AMDBC250_REG_CC_GC_SHADER_ARRAY_CONFIG, 0xFFE00000);
-                    DreamV3WriteRegister(DevExt, AMDBC250_REG_SPI_PG_ENABLE_STATIC_WGP_MASK, 0x0000001F);
+                    DreamV3WriteRegister(DevExt, AMDBC250_REG_SPI_PG_ENABLE_STATIC_WGP_MASK, 0x00003F00);
                     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
-                        "AMDBC250-DREAM-V4.3: *** 40 CU UNLOCKED via registry ***\n"));
+                        "AMDBC250-DREAM-V4.3: *** WGP UNLOCK via registry (SPI=0x3F00) ***\n"));
                 }
             }
         }
@@ -3242,21 +3242,23 @@ DreamV3DeviceControl(
             ULONG enable = InData[0]; /* 0=disable (stock 24CU), 1=enable (40CU) */
 
             if (enable) {
-                /* Write CC_GC_SHADER_ARRAY_CONFIG (BC-250: 0x3264): 0xFFF80000 → 0xFFE00000 */
+                /* Write CC_GC_SHADER_ARRAY_CONFIG (BC-250: 0x3264): confirmed read-only */
                 DreamV3WriteRegister(DevExt, AMDBC250_REG_CC_GC_SHADER_ARRAY_CONFIG, 0xFFE00000);
-                /* Write SPI_PG_ENABLE_STATIC_WGP_MASK (BC-250: 0x34FC): 0x7 → 0x1F */
-                DreamV3WriteRegister(DevExt, AMDBC250_REG_SPI_PG_ENABLE_STATIC_WGP_MASK, 0x0000001F);
+                /* Write SPI_PG_ENABLE_STATIC_WGP_MASK (BC-250: 0x34FC):
+                 * BC-250 WGP bits are 8-13 (verified via write-back test).
+                 * Stock: bit13=WGP5 (0x2000). Enable all: bits 8-13 (0x3F00). */
+                DreamV3WriteRegister(DevExt, AMDBC250_REG_SPI_PG_ENABLE_STATIC_WGP_MASK, 0x00003F00);
 
                 KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
-                    "AMDBC250-DREAM-V4.3: *** 40 CU UNLOCK ENABLED *** "
-                    "CC=0xFFF80000->0xFFE00000 SPI=0x7->0x1F\n"));
+                    "AMDBC250-DREAM-V4.3: *** WGP UNLOCK ENABLED *** "
+                    "SPI=0x2000->0x3F00 (WGP0-5)\n"));
             } else {
-                /* Restore stock 24 CUs */
+                /* Restore stock (WGP5 only) */
                 DreamV3WriteRegister(DevExt, AMDBC250_REG_CC_GC_SHADER_ARRAY_CONFIG, 0xFFF80000);
-                DreamV3WriteRegister(DevExt, AMDBC250_REG_SPI_PG_ENABLE_STATIC_WGP_MASK, 0x00000007);
+                DreamV3WriteRegister(DevExt, AMDBC250_REG_SPI_PG_ENABLE_STATIC_WGP_MASK, 0x00002000);
 
                 KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-                    "AMDBC250-DREAM-V4.3: 40 CU unlock DISABLED (stock 24 CU)\n"));
+                    "AMDBC250-DREAM-V4.3: WGP unlock DISABLED (WGP5 only, stock)\n"));
             }
             status = STATUS_SUCCESS;
         } else {
