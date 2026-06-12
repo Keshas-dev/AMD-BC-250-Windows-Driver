@@ -23,6 +23,15 @@ Environment:
 #include <wdm.h>
 #include <dispmprt.h>
 #include <d3dkmddi.h>
+
+/* ===== BC-250 (Cyan Skillfish) Base Offsets =====
+ * MUST be defined BEFORE hw.h include since hw.h uses these constants.
+ * See: cyan_skillfish_ip_offset.h
+ */
+#define AMDBC250_GC_BASE                        0x1260
+#define AMDBC250_MP1_BASE                       0x16000
+#define AMDBC250_THM_BASE                       0x08000
+
 #include "amdbc250_dream_hw.h"
 
 /* Resource type definitions (normally from miniport.h) */
@@ -32,7 +41,7 @@ Environment:
 
 /*===========================================================================
   Version Information
-============================================================================*/
+===========================================================================*/
 
 #define AMDBC250_DREAM_V3_VERSION_MAJOR    4
 #define AMDBC250_DREAM_V3_VERSION_MINOR    3
@@ -942,22 +951,6 @@ typedef struct {
     ULONG PixelFormat;          // HUBPREQ_FORMAT_*
     ULONG VidPnSourceId;        // Display output ID
 } DISPLAY_FLIP_REQUEST, *PDISPLAY_FLIP_REQUEST;
-
-/* ===== BC-250 (Cyan Skillfish) Corrected Register Offsets =====
- *
- * BC-250 has a non-standard BAR5 layout vs Navi10.
- * GC registers start at GC_BASE__INST0_SEG0 = 0x1260, not BAR5+0x0000.
- * All GC-relative offsets below must be shifted by GC_BASE.
- *
- * See: cyan_skillfish_ip_offset.h (GC_BASE__INST0_SEG0 = 0x00001260)
- */
-#define AMDBC250_GC_BASE                        0x1260
-
-/* MP1_BASE (SMU) — from cyan_skillfish_ip_offset.h: MP1_BASE__INST0_SEG0 = 0x00016000 */
-#define AMDBC250_MP1_BASE                       0x16000
-
-/* THM_BASE (Thermal) — from cyan_skillfish_ip_offset.h: THM_BASE__INST0_SEG0 = 0x00016600 */
-#define AMDBC250_THM_BASE                       0x08000
 
 /* CC_GC_SHADER_ARRAY_CONFIG — CU enumeration (Navi10: 0x2004) */
 #define AMDBC250_REG_CC_GC_SHADER_ARRAY_CONFIG  (AMDBC250_GC_BASE + 0x2004)

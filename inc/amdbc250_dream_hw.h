@@ -188,48 +188,64 @@ Environment:
 #define AMDBC250_REG_CHIP_FAMILY        0x00000E10  /* Chip family ID        */
 #define AMDBC250_REG_ASIC_REVISION      0x00000E14  /* ASIC revision         */
 
-/* --- Scratch Registers --- */
-#define AMDBC250_REG_SCRATCH_REG0       0x00008500
-#define AMDBC250_REG_SCRATCH_REG1       0x00008504
-#define AMDBC250_REG_SCRATCH_REG2       0x00008508
-#define AMDBC250_REG_SCRATCH_REG3       0x0000850C
-#define AMDBC250_REG_SCRATCH_REG4       0x00008510
-#define AMDBC250_REG_SCRATCH_REG5       0x00008514
-#define AMDBC250_REG_SCRATCH_REG6       0x00008518
-#define AMDBC250_REG_SCRATCH_REG7       0x0000851C
+/* --- Scratch Registers (BC-250 corrected: GC_BASE + 0x2074) --- */
+#define AMDBC250_REG_SCRATCH_REG0       (AMDBC250_GC_BASE + 0x00002074)  /* 0x32D4 */
+#define AMDBC250_REG_SCRATCH_REG1       (AMDBC250_GC_BASE + 0x00002078)  /* 0x32D8 */
+#define AMDBC250_REG_SCRATCH_REG2       (AMDBC250_GC_BASE + 0x0000207C)  /* 0x32DC */
+#define AMDBC250_REG_SCRATCH_REG3       (AMDBC250_GC_BASE + 0x00002080)  /* 0x32E0 */
+#define AMDBC250_REG_SCRATCH_REG4       (AMDBC250_GC_BASE + 0x00002084)  /* 0x32E4 */
+#define AMDBC250_REG_SCRATCH_REG5       (AMDBC250_GC_BASE + 0x00002088)  /* 0x32E8 */
+#define AMDBC250_REG_SCRATCH_REG6       (AMDBC250_GC_BASE + 0x0000208C)  /* 0x32EC */
+#define AMDBC250_REG_SCRATCH_REG7       (AMDBC250_GC_BASE + 0x00002090)  /* 0x32F0 */
 
 /* --- Graphics Command Processor (GFX10 CP) --- */
-#define AMDBC250_REG_CP_ME_CNTL         0x0000C060  /* CP ME control         */
-#define AMDBC250_REG_CP_ME_STATUS       0x0000C064  /* CP ME status          */
-#define AMDBC250_REG_CP_PFP_UCODE_ADDR  0x0000C0A0  /* PFP firmware addr     */
-#define AMDBC250_REG_CP_PFP_UCODE_DATA  0x0000C0A4  /* PFP firmware data     */
-#define AMDBC250_REG_CP_ME_UCODE_ADDR   0x0000C0B0  /* ME firmware addr      */
-#define AMDBC250_REG_CP_ME_UCODE_DATA   0x0000C0B4  /* ME firmware data      */
-#define AMDBC250_REG_CP_MEC_CNTL        0x0000C0E0  /* MEC (compute) control */
-#define AMDBC250_REG_CP_MEC_STATUS      0x0000C0E4  /* MEC status            */
+/* NOTE: CP_ME_CNTL/MEC_CNTL at 0xC060-C0FF are NBIO addresses, NOT shifted by GC_BASE.
+ *       NBIO firewall BLOCKS writes to 0xC000-0xCFFF from ALL paths.
+ *       BC-250 (Cyan Skillfish) has these registers at native Navi10 offsets.
+ *       GC_BASE-shifted aliases (0xD2C0, 0xD2E0) return 0xFFFFFFFF (unmapped).
+ *       Writes are silently ignored; CP halt/resume via registers does not work. */
+#define AMDBC250_REG_CP_ME_CNTL         0x0000C060  /* CP ME control (NBIO, readonly)  */
+#define AMDBC250_REG_CP_ME_STATUS       0x0000C064  /* CP ME status (NBIO)             */
+#define AMDBC250_REG_CP_PFP_UCODE_ADDR  0x0000C0A0  /* PFP firmware addr (NBIO)        */
+#define AMDBC250_REG_CP_PFP_UCODE_DATA  0x0000C0A4  /* PFP firmware data (NBIO)        */
+#define AMDBC250_REG_CP_ME_UCODE_ADDR   0x0000C0B0  /* ME firmware addr (NBIO)         */
+#define AMDBC250_REG_CP_ME_UCODE_DATA   0x0000C0B4  /* ME firmware data (NBIO)         */
+#define AMDBC250_REG_CP_MEC_CNTL        0x0000C0E0  /* MEC (compute) control (NBIO)    */
+#define AMDBC250_REG_CP_MEC_STATUS      0x0000C0E4  /* MEC status (NBIO)               */
 
-/* --- GFX10 Ring Buffer (GFX10 style) --- */
-#define AMDBC250_REG_CP_GFX_RING0_BASE_LO   0x0000C800  /* Ring base low     */
-#define AMDBC250_REG_CP_GFX_RING0_BASE_HI   0x0000C804  /* Ring base high    */
-#define AMDBC250_REG_CP_GFX_RING0_CNTL      0x0000C808  /* Ring control      */
-#define AMDBC250_REG_CP_GFX_RING0_RPTR      0x0000C80C  /* Ring read ptr     */
-#define AMDBC250_REG_CP_GFX_RING0_RPTR_ADDR_LO  0x0000C810
-#define AMDBC250_REG_CP_GFX_RING0_RPTR_ADDR_HI  0x0000C814
-#define AMDBC250_REG_CP_GFX_RING0_WPTR      0x0000C818  /* Ring write ptr    */
-#define AMDBC250_REG_CP_GFX_RING0_WPTR_POLL 0x0000C81C  /* WPTR poll control */
-#define AMDBC250_REG_CP_GFX_RING0_DOORBELL  0x0000C820  /* Doorbell control  */
+/* --- GFX10 Ring Buffer (GFX10 style, BC-250: shift by GC_BASE=0x1260) --- */
+#define AMDBC250_REG_CP_GFX_RING0_BASE_LO   (AMDBC250_GC_BASE + 0x0000C800)  /* 0xDA60 */
+#define AMDBC250_REG_CP_GFX_RING0_BASE_HI   (AMDBC250_GC_BASE + 0x0000C804)  /* 0xDA64 */
+#define AMDBC250_REG_CP_GFX_RING0_CNTL      (AMDBC250_GC_BASE + 0x0000C808)  /* 0xDA68 */
+#define AMDBC250_REG_CP_GFX_RING0_RPTR      (AMDBC250_GC_BASE + 0x0000C80C)  /* 0xDA6C */
+#define AMDBC250_REG_CP_GFX_RING0_RPTR_ADDR_LO  (AMDBC250_GC_BASE + 0x0000C810)  /* 0xDA70 */
+#define AMDBC250_REG_CP_GFX_RING0_RPTR_ADDR_HI  (AMDBC250_GC_BASE + 0x0000C814)  /* 0xDA74 */
+#define AMDBC250_REG_CP_GFX_RING0_WPTR      (AMDBC250_GC_BASE + 0x0000C818)  /* 0xDA78 */
+#define AMDBC250_REG_CP_GFX_RING0_WPTR_POLL (AMDBC250_GC_BASE + 0x0000C81C)  /* 0xDA7C */
+#define AMDBC250_REG_CP_GFX_RING0_DOORBELL  (AMDBC250_GC_BASE + 0x0000C820)  /* 0xDA80 */
 
-/* --- Compute Rings (GFX10 has 2 compute rings per MEC) --- */
-#define AMDBC250_REG_CP_COMPUTE_RING0_BASE_LO   0x0000C900
-#define AMDBC250_REG_CP_COMPUTE_RING0_CNTL      0x0000C908
-#define AMDBC250_REG_CP_COMPUTE_RING0_RPTR      0x0000C90C
-#define AMDBC250_REG_CP_COMPUTE_RING0_WPTR      0x0000C918
+/* --- Compute Rings (GFX10, BC-250: shift by GC_BASE=0x1260) --- */
+#define AMDBC250_REG_CP_COMPUTE_RING0_BASE_LO   (AMDBC250_GC_BASE + 0x0000C900)  /* 0xDB60 */
+#define AMDBC250_REG_CP_COMPUTE_RING0_CNTL      (AMDBC250_GC_BASE + 0x0000C908)  /* 0xDB68 */
+#define AMDBC250_REG_CP_COMPUTE_RING0_RPTR      (AMDBC250_GC_BASE + 0x0000C90C)  /* 0xDB6C */
+#define AMDBC250_REG_CP_COMPUTE_RING0_WPTR      (AMDBC250_GC_BASE + 0x0000C918)  /* 0xDB78 */
 
-/* --- GFX10 HQD (Hardware Queue Dispatcher) --- */
-#define AMDBC250_REG_CP_HQD_ACTIVE          0x0000C860  /* HQD active mask   */
-#define AMDBC250_REG_CP_HQD_VMID            0x0000C864  /* HQD VMID          */
-#define AMDBC250_REG_CP_HQD_PERSISTENT_STATE 0x0000C868 /* HQD persistent    */
-#define AMDBC250_REG_CP_HQD_SEMA_CMD        0x0000C870  /* HQD semaphore     */
+/* --- GFX10 HQD (Hardware Queue Dispatcher, BC-250: shift by GC_BASE=0x1260) --- */
+#define AMDBC250_REG_CP_HQD_ACTIVE          (AMDBC250_GC_BASE + 0x0000C860)  /* 0xDAC0 */
+#define AMDBC250_REG_CP_HQD_VMID            (AMDBC250_GC_BASE + 0x0000C864)  /* 0xDAC4 */
+#define AMDBC250_REG_CP_HQD_PERSISTENT_STATE (AMDBC250_GC_BASE + 0x0000C868) /* 0xDAC8 */
+#define AMDBC250_REG_CP_HQD_SEMA_CMD        (AMDBC250_GC_BASE + 0x0000C870)  /* 0xDAD0 */
+
+/* --- KIQ (Kernel Interface Queue, BC-250: shift by GC_BASE=0x1260) --- */
+/* KIQ_BASE_LO at 0xE060 is WRITABLE — only writable BASE register found on BC-250.
+ * KIQ_CNTL at 0xE068 is READ-ONLY (writes silently ignored).
+ * KIQ_RPTR/WPTR at 0xE06C/0xE078 are WRITABLE.
+ * Native NBIO offsets (0xCE00+) are all read-only. */
+#define AMDBC250_REG_CP_KIQ_BASE_LO      (AMDBC250_GC_BASE + 0x0000CE00)  /* 0xE060, WRITABLE */
+#define AMDBC250_REG_CP_KIQ_BASE_HI      (AMDBC250_GC_BASE + 0x0000CE04)  /* 0xE064 */
+#define AMDBC250_REG_CP_KIQ_CNTL         (AMDBC250_GC_BASE + 0x0000CE08)  /* 0xE068, readonly */
+#define AMDBC250_REG_CP_KIQ_RPTR         (AMDBC250_GC_BASE + 0x0000CE0C)  /* 0xE06C, WRITABLE */
+#define AMDBC250_REG_CP_KIQ_WPTR         (AMDBC250_GC_BASE + 0x0000CE18)  /* 0xE078, WRITABLE */
 
 /* --- Interrupt Handler (IH) — GFX10 style --- */
 #define AMDBC250_REG_IH_RB_BASE_LO          0x00003800  /* IH ring base low  */
