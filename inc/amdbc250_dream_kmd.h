@@ -943,4 +943,32 @@ typedef struct {
     ULONG VidPnSourceId;        // Display output ID
 } DISPLAY_FLIP_REQUEST, *PDISPLAY_FLIP_REQUEST;
 
+/* ===== BC-250 (Cyan Skillfish) Corrected Register Offsets =====
+ *
+ * BC-250 has a non-standard BAR5 layout vs Navi10.
+ * GC registers start at GC_BASE__INST0_SEG0 = 0x1260, not BAR5+0x0000.
+ * All GC-relative offsets below must be shifted by GC_BASE.
+ *
+ * See: cyan_skillfish_ip_offset.h (GC_BASE__INST0_SEG0 = 0x00001260)
+ */
+#define AMDBC250_GC_BASE                        0x1260
+
+/* MP1_BASE (SMU) — from cyan_skillfish_ip_offset.h: MP1_BASE__INST0_SEG0 = 0x00016000 */
+#define AMDBC250_MP1_BASE                       0x16000
+
+/* THM_BASE (Thermal) — from cyan_skillfish_ip_offset.h: THM_BASE__INST0_SEG0 = 0x00016600 */
+#define AMDBC250_THM_BASE                       0x16600
+
+/* CC_GC_SHADER_ARRAY_CONFIG — CU enumeration (Navi10: 0x2004) */
+#define AMDBC250_REG_CC_GC_SHADER_ARRAY_CONFIG  (AMDBC250_GC_BASE + 0x2004)
+
+/* SPI_PG_ENABLE_STATIC_WGP_MASK — WGP dispatch gate (Navi10: 0x229C) */
+#define AMDBC250_REG_SPI_PG_ENABLE_STATIC_WGP_MASK (AMDBC250_GC_BASE + 0x229C)
+
+/* GRBM_STATUS — Graphics Backend status (Navi10: 0x2000) */
+#define AMDBC250_REG_GRBM_STATUS                (AMDBC250_GC_BASE + 0x2000)
+
+/* RLC_PG_ALWAYS_ON_WGP_MASK — RLC power gating (Navi10: 0x2B04) */
+#define AMDBC250_REG_RLC_PG_ALWAYS_ON_WGP_MASK  (AMDBC250_GC_BASE + 0x2B04)
+
 #endif /* _AMDBC250_DREAM_V3_KMD_H_ */

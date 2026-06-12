@@ -143,17 +143,17 @@ int main(void) {
             Log("  DF readable: %d\n", count); fflush(g);
         }
 
-        Log("Step 11: GRBM_STATUS attempt [0x2004]\n"); fflush(g);
+        Log("Step 11: CC_GC_SHADER_ARRAY_CONFIG [BC-250: 0x3264]\n"); fflush(g);
         {
-            UINT32 ra[2] = {0x2004, 0xDEADBEEF};
+            UINT32 ra[2] = {0x3264, 0xDEADBEEF};
             BOOL ok = DeviceIoControl(h, 0x80000B88, ra, sizeof(ra), ra, sizeof(ra), &br, NULL);
-            Log("  GRBM_STATUS[0x2004]: %s  Value=0x%08X\n",
+            Log("  CC_GC_SHADER_ARRAY_CONFIG[0x3264]: %s  Value=0x%08X\n",
                 ok ? "OK" : "FAIL", ra[1]); fflush(g);
         }
 
-        Log("Step 12: Scratch regs [0x2074,0x2078,0x207C]\n"); fflush(g);
+        Log("Step 12: Scratch regs [BC-250: 0x32D4,0x32D8,0x32DC]\n"); fflush(g);
         {
-            UINT32 scOffs[] = {0x2074,0x2078,0x207C};
+            UINT32 scOffs[] = {0x32D4,0x32D8,0x32DC};
             int i;
             for (i = 0; i < 3; i++) {
                 UINT32 ra[2] = {scOffs[i], 0xDEADBEEF};

@@ -50,59 +50,50 @@ static NTSTATUS DreamV3SetMemoryClockMhz(_In_ PDREAM_V3_DEVICE_EXTENSION DevExt,
 static NTSTATUS DreamV3SetFanSpeedPercent(_In_ PDREAM_V3_DEVICE_EXTENSION DevExt, _In_ ULONG Percent);
 
 /*===========================================================================
-  SMU Message IDs - GFX10 (RDNA2 / Navi family)
-  
-  Based on Linux amdgpu: drivers/gpu/drm/amd/pm/inc/smu_v11_0.h
-  These are PPSMC messages sent to SMU firmware via C2PMSG registers
-===========================================================================*/
+  SMU Message IDs - BC-250 (Cyan Skillfish / SMU v11.8)
+   
+  Based on Linux kernel: smu_v11_8_ppsmc.h
+  BC-250 SMU is a minimal APU-style implementation (similar to Renoir).
+  Only a subset of standard Navi10 SMU messages are supported.
+ ===========================================================================*/
 
 #define SMU_MSG_TestMessage             0x1
 #define SMU_MSG_GetSmuVersion           0x2
 #define SMU_MSG_GetDriverIfVersion      0x3
-#define SMU_MSG_EnableGfxOff            0x4
-#define SMU_MSG_DisableGfxOff           0x5
-#define SMU_MSG_PowerUpGfx              0x6
-#define SMU_MSG_PowerUpSdma             0x7
-#define SMU_MSG_SetHardMinSclk          0x8
-#define SMU_MSG_SetHardMinMclk          0x9
-#define SMU_MSG_SetSoftMinSclk          0xA
-#define SMU_MSG_SetSoftMinMclk          0xB
-#define SMU_MSG_SetSoftMaxSclk          0xC
-#define SMU_MSG_SetSoftMaxMclk          0xD
-#define SMU_MSG_SetFanSpeedPercent      0xE
-#define SMU_MSG_SetThermalThrottle      0xF
-#define SMU_MSG_GetTemperature          0x10
-#define SMU_MSG_GetGfxClockFreq         0x11
-#define SMU_MSG_GetMemClockFreq         0x12
-#define SMU_MSG_GetPowerUsage           0x13
-#define SMU_MSG_SetPowerLimit           0x14
-#define SMU_MSG_GetPowerLimit           0x15
-#define SMU_MSG_EnableDpmFeature        0x16
-#define SMU_MSG_DisableDpmFeature       0x17
-#define SMU_MSG_ForceGfxClk             0x18
-#define SMU_MSG_UnforceGfxClk           0x19
-#define SMU_MSG_PowerDownVcn            0x1A
-#define SMU_MSG_PowerUpVcn              0x1B
-#define SMU_MSG_PrepareMp1ForReset      0x1C
-#define SMU_MSG_GfxDeviceDriverReset    0x1D
-#define SMU_MSG_SetMinDeepSleepSclk     0x1E
+#define SMU_MSG_SetDriverDramAddrHigh   0x4
+#define SMU_MSG_SetDriverDramAddrLow    0x5
+#define SMU_MSG_TransferTableSmu2Dram   0x6
+#define SMU_MSG_TransferTableDram2Smu   0x7
+#define SMU_MSG_RequestGfxclk           0xE
+#define SMU_MSG_RequestActiveWgp        0x18
+#define SMU_MSG_QueryActiveWgp          0x1E
+#define SMU_MSG_SetCoreEnableMask       0x2C
+#define SMU_MSG_InitiateGcRsmuSoftReset 0x2E
+#define SMU_MSG_GetGfxFrequency         0x37
+#define SMU_MSG_ForceGfxVid             0x3B
+#define SMU_MSG_UnforceGfxVid           0x3C
+#define SMU_MSG_GetEnabledSmuFeatures   0x3D
 
-/* SMU response codes */
+/* SMU response codes (from smu_v11_8_ppsmc.h) */
 #define SMU_RESULT_OK                   0x1
-#define SMU_RESULT_Failed             0x0
-#define SMU_RESULT_UnknownCmd         0xFE
-#define SMU_RESULT_FailedBadKey       0xFF
+#define SMU_RESULT_Failed               0xFF
+#define SMU_RESULT_UnknownCmd           0xFE
+#define SMU_RESULT_CmdRejectedPrereq    0xFD
+#define SMU_RESULT_CmdRejectedBusy      0xFC
 
 /* SMU timeout in microseconds */
-#define SMU_RESPONSE_TIMEOUT_US       10000  /* 10ms */
+#define SMU_RESPONSE_TIMEOUT_US       100000  /* 100ms */
 
 /*===========================================================================
-  DreamV3SmuSendMessage - Send message to SMU firmware
+  DreamV3SmuSendMessage - Send message to SMU firmware via mailbox
 
-  CRITICAL FIX (2026-04-13): Bugcheck 0x9F DRIVER_POWER_STATE_FAILURE
-  BC-250 has NO SMU firmware - this is a STUB that returns immediately.
-  DO NOT block waiting for hardware response!
-===========================================================================*/
+  SMU v11/v11.8 mailbox protocol (from Linux smu_cmn.c / __smu_msg_v1_send):
+  1. Clear C2PMSG_90 (response register) to 0
+  2. Write parameter to C2PMSG_82 (argument register)
+  3. Write message ID to C2PMSG_66 (message register — triggers SMU)
+  4. Wait for C2PMSG_90 != 0 via DreamV3SmuWaitForResponse
+  5. Read result from C2PMSG_82
+ ===========================================================================*/
 
 static NTSTATUS
 DreamV3SmuSendMessage(
@@ -112,30 +103,53 @@ DreamV3SmuSendMessage(
     _Out_opt_ PULONG Response
     )
 {
-    UNREFERENCED_PARAMETER(DevExt);
-    UNREFERENCED_PARAMETER(MessageId);
-    UNREFERENCED_PARAMETER(Parameter);
+    NTSTATUS Status;
 
-    if (Response) {
-        *Response = 0;
+    if (DevExt == NULL || DevExt->MmioVirtualBase == NULL) {
+        return STATUS_DEVICE_NOT_READY;
     }
 
-    /* 
-     * BC-250 NOTE: No SMU firmware available on this GPU.
-     * Cannot send real power management commands.
-     * Return SUCCESS immediately to avoid blocking and Windows timeout.
-     */
+    /* Step 1: Clear response register */
+    DreamV3WriteRegister(DevExt, AMDBC250_REG_MP1_SMN_C2PMSG_90, 0);
+
+    /* Step 2: Write parameter to argument register */
+    DreamV3WriteRegister(DevExt, AMDBC250_REG_MP1_SMN_C2PMSG_82, Parameter);
+
+    /* Step 3: Write message ID to message register (triggers SMU) */
+    DreamV3WriteRegister(DevExt, AMDBC250_REG_MP1_SMN_C2PMSG_66, MessageId & 0xFFFF);
+
+    /* Step 4: Wait for SMU response */
+    Status = DreamV3SmuWaitForResponse(DevExt, SMU_RESPONSE_TIMEOUT_US);
+    if (!NT_SUCCESS(Status)) {
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+            "AMDBC250-DREAM-V4.3: SMU msg 0x%02X (param=0x%08X) failed: 0x%08X\n",
+            MessageId, Parameter, Status));
+        if (Response) *Response = 0;
+        return Status;
+    }
+
+    /* Step 5: Read result from argument register */
+    if (Response) {
+        *Response = DreamV3ReadRegister(DevExt, AMDBC250_REG_MP1_SMN_C2PMSG_82);
+    }
 
     return STATUS_SUCCESS;
 }
 
 /*===========================================================================
   DreamV3SmuWaitForResponse - Wait for SMU firmware response
-  
+   
   Polls C2PMSG_90 register until SMU signals completion or timeout.
-  
-  Linux equivalent: smu_v11_0_wait_for_response()
-===========================================================================*/
+   
+  Linux equivalent: smu_cmn_wait_for_response()
+  SMU response codes (from smu_v11_8_ppsmc.h):
+    0x00 = busy (SMU still processing)
+    0x01 = OK (success)
+    0xFF = Failed
+    0xFE = UnknownCmd
+    0xFD = CmdRejectedPrereq
+    0xFC = CmdRejectedBusy
+ ===========================================================================*/
 
 static NTSTATUS
 DreamV3SmuWaitForResponse(
@@ -151,18 +165,18 @@ DreamV3SmuWaitForResponse(
         SmuStatus = DreamV3ReadRegister(DevExt, AMDBC250_REG_MP1_SMN_C2PMSG_90);
 
         if (SmuStatus == SMU_RESULT_OK) {
+            /* SMU processed command successfully */
             return STATUS_SUCCESS;
-        } else if (SmuStatus == SMU_RESULT_Failed || 
-                   SmuStatus == SMU_RESULT_UnknownCmd ||
-                   SmuStatus == SMU_RESULT_FailedBadKey) {
+        } else if (SmuStatus == 0) {
+            /* SMU still processing */
+            KeStallExecutionProcessor(PollIntervalUs);
+            ElapsedUs += PollIntervalUs;
+        } else {
+            /* SMU returned an error code */
             KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
-                       "AMDBC250-DREAM-V4.3: SMU command failed, status=0x%02X\n", SmuStatus));
+                       "AMDBC250-DREAM-V4.3: SMU command failed, C2PMSG_90=0x%02X\n", SmuStatus));
             return STATUS_DEVICE_PROTOCOL_ERROR;
         }
-
-        /* SMU still processing, wait and retry */
-        KeStallExecutionProcessor(PollIntervalUs);
-        ElapsedUs += PollIntervalUs;
     }
 
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
@@ -172,12 +186,14 @@ DreamV3SmuWaitForResponse(
 
 /*===========================================================================
   DreamV3SmuInitialize - Initialize SMU communication
-  
+   
   Called during device start to establish communication with SMU firmware.
-  Verifies SMU version and enables DPM features.
-  
-  Linux equivalent: navi10_ppt_init_smc_tables()
-===========================================================================*/
+  Verifies SMU is alive and reports firmware version.
+   
+  BC-250 (Cyan Skillfish) SMU v11.8 is minimal — no DPM feature control,
+  no PowerUpGfx/Sdma messages. SMU is pre-loaded by BIOS.
+  Linux equivalent: cyan_skillfish_ppt.c (minimal, SMU pre-initialized)
+ ===========================================================================*/
 
 NTSTATUS
 DreamV3SmuInitialize(_In_ PDREAM_V3_DEVICE_EXTENSION DevExt)
@@ -193,8 +209,11 @@ DreamV3SmuInitialize(_In_ PDREAM_V3_DEVICE_EXTENSION DevExt)
     Status = DreamV3SmuSendMessage(DevExt, SMU_MSG_TestMessage, 0, &Response);
     if (!NT_SUCCESS(Status)) {
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
-                   "AMDBC250-DREAM-V4.3: SMU test message failed (non-fatal): 0x%08X\n", Status));
-        /* Continue anyway - SMU might be in reset state */
+                   "AMDBC250-DREAM-V4.3: SMU TestMessage failed: 0x%08X\n", Status));
+        /* Continue — SMU may not be running on this unit */
+    } else {
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                   "AMDBC250-DREAM-V4.3: SMU TestMessage OK\n"));
     }
 
     /* Step 2: Get SMU firmware version */
@@ -205,24 +224,18 @@ DreamV3SmuInitialize(_In_ PDREAM_V3_DEVICE_EXTENSION DevExt)
                    "AMDBC250-DREAM-V4.3: SMU firmware version: 0x%08X\n", SmuVersion));
     }
 
-    /* Step 3: Enable DPM features */
-    Status = DreamV3SmuSendMessage(DevExt, SMU_MSG_EnableDpmFeature, 0x3, NULL);
-    if (!NT_SUCCESS(Status)) {
-        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
-                   "AMDBC250-DREAM-V4.3: Failed to enable DPM (non-fatal): 0x%08X\n", Status));
-    } else {
-        DevExt->PowerState.DpmEnabled = TRUE;
-        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-                   "AMDBC250-DREAM-V4.3: DPM (Dynamic Power Management) enabled\n"));
-    }
+    /* BC-250 SMU v11.8 does NOT support:
+       - EnableDpmFeature / DisableDpmFeature
+       - PowerUpGfx / PowerUpSdma / PowerDownVcn
+       - SetFanSpeedPercent / SetThermalThrottle
+       - GetPowerUsage / SetPowerLimit
+       These are Navi10-only messages. DPM is controlled differently.
+       SMU is pre-initialized by BIOS. */
 
-    /* Step 4: Power up GFX and SDMA engines */
-    DreamV3SmuSendMessage(DevExt, SMU_MSG_PowerUpGfx, 0, NULL);
-    DreamV3SmuSendMessage(DevExt, SMU_MSG_PowerUpSdma, 0, NULL);
-
-    /* Step 5: Initialize thermal monitoring */
+    /* Step 3: Initialize thermal monitoring */
     DevExt->PowerState.ThermalThrottleActive = FALSE;
     DevExt->PowerState.ThrottleHysteresisCount = 0;
+    DevExt->PowerState.DpmEnabled = FALSE;  /* No DPM control on BC-250 */
 
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                "AMDBC250-DREAM-V4.3: SMU initialization complete\n"));
@@ -242,11 +255,8 @@ DreamV3SmuShutdown(_In_ PDREAM_V3_DEVICE_EXTENSION DevExt)
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                "AMDBC250-DREAM-V4.3: SMU shutdown\n"));
 
-    /* Power down engines */
-    DreamV3SmuSendMessage(DevExt, SMU_MSG_PowerDownVcn, 0, NULL);
-
-    /* Disable DPM */
-    DreamV3SmuSendMessage(DevExt, SMU_MSG_DisableDpmFeature, 0x3, NULL);
+    /* BC-250 SMU v11.8 does not support PowerDownVcn or DisableDpmFeature.
+       SMU is managed entirely by firmware; just reset our state. */
 
     DevExt->PowerState.DpmEnabled = FALSE;
     DevExt->PowerState.CurrentPowerState = PowerDeviceUnspecified;
@@ -611,11 +621,11 @@ DreamV3UpdateFanSpeed(_In_ PDREAM_V3_DEVICE_EXTENSION DevExt)
         DevExt->PowerState.CurrentFanSpeedPercent = TargetFanPercent;
         DevExt->PowerState.FanSpeedChangeCount++;
 
-        /* Send to SMU */
-        DreamV3SmuSendMessage(DevExt, SMU_MSG_SetFanSpeedPercent, TargetFanPercent, NULL);
+        /* BC-250 SMU v11.8 does not support SetFanSpeedPercent message.
+           Fan control is done via THM registers directly (not implemented yet). */
 
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_TRACE_LEVEL,
-                   "AMDBC250-DREAM-V4.3: Fan speed -> %u%% (Temp: %ld°C)\n",
+                   "AMDBC250-DREAM-V4.3: Fan speed -> %u%% (Temp: %ld°C) [tracked only]\n",
                    TargetFanPercent, TempC));
     }
 
@@ -671,11 +681,8 @@ DreamV3CheckThermalThrottle(_In_ PDREAM_V3_DEVICE_EXTENSION DevExt)
         DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_ME_CNTL,
                              CP_ME_CNTL__ME_HALT | CP_ME_CNTL__PFP_HALT | CP_ME_CNTL__CE_HALT);
 
-        /* Force max fan */
-        DreamV3SmuSendMessage(DevExt, SMU_MSG_SetFanSpeedPercent, 100, NULL);
-
-        /* Notify SMU of emergency */
-        DreamV3SmuSendMessage(DevExt, SMU_MSG_SetThermalThrottle, 1, NULL);
+        /* BC-250 SMU v11.8 does not support SetFanSpeedPercent or SetThermalThrottle.
+           Fan and thermal control would go through THM registers directly. */
 
         return STATUS_DEVICE_NOT_READY;
 
@@ -690,10 +697,8 @@ DreamV3CheckThermalThrottle(_In_ PDREAM_V3_DEVICE_EXTENSION DevExt)
                    "Edge: %ld°C, Junction: %ld°C\n",
                    Sensors.EdgeTempC, Sensors.JunctionTempC));
 
-        /* Notify SMU */
-        DreamV3SmuSendMessage(DevExt, SMU_MSG_SetThermalThrottle, 1, NULL);
-
-        /* Reduce clocks */
+        /* BC-250 SMU does not support SetThermalThrottle message.
+           Reduce clocks via software tracking. */
         DreamV3UpdateClocks(DevExt);
 
     } else if (MaxTemp <= THROTTLE_STOP && 
@@ -705,9 +710,6 @@ DreamV3CheckThermalThrottle(_In_ PDREAM_V3_DEVICE_EXTENSION DevExt)
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                    "AMDBC250-DREAM-V4.3: Thermal throttle DEACTIVATED - "
                    "Edge: %ld°C\n", Sensors.EdgeTempC));
-
-        /* Notify SMU */
-        DreamV3SmuSendMessage(DevExt, SMU_MSG_SetThermalThrottle, 0, NULL);
 
         /* Restore clocks */
         DreamV3UpdateClocks(DevExt);
@@ -739,21 +741,16 @@ DreamV3GetPowerUsage(
     _Out_ PULONG PowerMilliwatts
     )
 {
-    NTSTATUS Status;
-    ULONG Response = 0;
-
     if (PowerMilliwatts == NULL) {
         return STATUS_INVALID_PARAMETER;
     }
 
-    /* Query SMU for power usage */
-    Status = DreamV3SmuSendMessage(DevExt, SMU_MSG_GetPowerUsage, 0, &Response);
-    if (NT_SUCCESS(Status)) {
-        *PowerMilliwatts = Response;
-        DevExt->PowerState.Telemetry.CurrentPowerMilliwatts = Response;
-    }
+    /* BC-250 SMU v11.8 does not support GetPowerUsage message.
+       Return 0 for now — power telemetry not available. */
+    *PowerMilliwatts = 0;
 
-    return Status;
+    UNREFERENCED_PARAMETER(DevExt);
+    return STATUS_NOT_SUPPORTED;
 }
 
 NTSTATUS
@@ -762,8 +759,6 @@ DreamV3SetPowerLimit(
     _In_ ULONG PowerLimitWatts
     )
 {
-    NTSTATUS Status;
-
     if (PowerLimitWatts < 100 || PowerLimitWatts > 300) {
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
                    "AMDBC250-DREAM-V4.3: Invalid power limit %u W (range: 100-300)\n",
@@ -771,14 +766,14 @@ DreamV3SetPowerLimit(
         return STATUS_INVALID_PARAMETER;
     }
 
-    Status = DreamV3SmuSendMessage(DevExt, SMU_MSG_SetPowerLimit, PowerLimitWatts, NULL);
-    if (NT_SUCCESS(Status)) {
-        DevExt->PowerState.PowerLimitWatts = PowerLimitWatts;
-        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-                   "AMDBC250-DREAM-V4.3: Power limit set to %u W\n", PowerLimitWatts));
-    }
+    /* BC-250 SMU v11.8 does not support SetPowerLimit message.
+       Track limit in software only. */
+    DevExt->PowerState.PowerLimitWatts = PowerLimitWatts;
 
-    return Status;
+    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+               "AMDBC250-DREAM-V4.3: Power limit set to %u W (tracked only)\n", PowerLimitWatts));
+
+    return STATUS_SUCCESS;
 }
 
 NTSTATUS

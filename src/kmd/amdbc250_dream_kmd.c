@@ -645,8 +645,8 @@ DreamV3DdiStartDevice(
                 ULONG regValue = *(PULONG)regInfo->Data;
                 if (regValue == 1) {
                     /* Unlock 40 CUs! */
-                    DreamV3WriteRegister(DevExt, 0x2004, 0xFFE00000);
-                    DreamV3WriteRegister(DevExt, 0x229C, 0x0000001F);
+                    DreamV3WriteRegister(DevExt, AMDBC250_REG_CC_GC_SHADER_ARRAY_CONFIG, 0xFFE00000);
+                    DreamV3WriteRegister(DevExt, AMDBC250_REG_SPI_PG_ENABLE_STATIC_WGP_MASK, 0x0000001F);
                     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
                         "AMDBC250-DREAM-V4.3: *** 40 CU UNLOCKED via registry ***\n"));
                 }
@@ -3228,9 +3228,9 @@ DreamV3DeviceControl(
          * BC-250 40 CU Unlock (from duggasco/bc250-40cu-unlock)
          *
          * Two registers must be written:
-         * 1. CC_GC_SHADER_ARRAY_CONFIG (0x2004): CU enumeration mask
+         * 1. CC_GC_SHADER_ARRAY_CONFIG (BC-250: 0x3264): CU enumeration mask
          *    Stock: 0xFFF80000 (24 CUs) → Unlocked: 0xFFE00000 (40 CUs)
-         * 2. SPI_PG_ENABLE_STATIC_WGP_MASK (0x229C): WGP dispatch gate
+         * 2. SPI_PG_ENABLE_STATIC_WGP_MASK (BC-250: 0x34FC): WGP dispatch gate
          *    Stock: 0x7 (WGP 0-2) → Unlocked: 0x1F (WGP 0-4)
          *
          * Both registers must be written together.
@@ -3242,18 +3242,18 @@ DreamV3DeviceControl(
             ULONG enable = InData[0]; /* 0=disable (stock 24CU), 1=enable (40CU) */
 
             if (enable) {
-                /* Write CC_GC_SHADER_ARRAY_CONFIG: 0xFFF80000 → 0xFFE00000 */
-                DreamV3WriteRegister(DevExt, 0x2004, 0xFFE00000);
-                /* Write SPI_PG_ENABLE_STATIC_WGP_MASK: 0x7 → 0x1F */
-                DreamV3WriteRegister(DevExt, 0x229C, 0x0000001F);
+                /* Write CC_GC_SHADER_ARRAY_CONFIG (BC-250: 0x3264): 0xFFF80000 → 0xFFE00000 */
+                DreamV3WriteRegister(DevExt, AMDBC250_REG_CC_GC_SHADER_ARRAY_CONFIG, 0xFFE00000);
+                /* Write SPI_PG_ENABLE_STATIC_WGP_MASK (BC-250: 0x34FC): 0x7 → 0x1F */
+                DreamV3WriteRegister(DevExt, AMDBC250_REG_SPI_PG_ENABLE_STATIC_WGP_MASK, 0x0000001F);
 
                 KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
                     "AMDBC250-DREAM-V4.3: *** 40 CU UNLOCK ENABLED *** "
                     "CC=0xFFF80000->0xFFE00000 SPI=0x7->0x1F\n"));
             } else {
                 /* Restore stock 24 CUs */
-                DreamV3WriteRegister(DevExt, 0x2004, 0xFFF80000);
-                DreamV3WriteRegister(DevExt, 0x229C, 0x00000007);
+                DreamV3WriteRegister(DevExt, AMDBC250_REG_CC_GC_SHADER_ARRAY_CONFIG, 0xFFF80000);
+                DreamV3WriteRegister(DevExt, AMDBC250_REG_SPI_PG_ENABLE_STATIC_WGP_MASK, 0x00000007);
 
                 KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                     "AMDBC250-DREAM-V4.3: 40 CU unlock DISABLED (stock 24 CU)\n"));
@@ -3270,9 +3270,9 @@ DreamV3DeviceControl(
         if (outputLen >= sizeof(ULONG) * 4) {
             PULONG OutData = (PULONG)outputBuffer;
 
-            /* Read current register values */
-            ULONG ccConfig = DreamV3ReadRegister(DevExt, 0x2004);
-            ULONG spiMask = DreamV3ReadRegister(DevExt, 0x229C);
+            /* Read current register values (BC-250 corrected offsets) */
+            ULONG ccConfig = DreamV3ReadRegister(DevExt, AMDBC250_REG_CC_GC_SHADER_ARRAY_CONFIG);
+            ULONG spiMask = DreamV3ReadRegister(DevExt, AMDBC250_REG_SPI_PG_ENABLE_STATIC_WGP_MASK);
 
             /* Decode CU count from CC_GC_SHADER_ARRAY_CONFIG */
             /* Bits [31:19] = CU mask, count set bits */
@@ -4319,12 +4319,12 @@ DreamV3DeviceControl(
                 if (DevExt && DevExt->MmioVirtualBase) {
                     /* Try KIQ first - bypasses NBIO firewall */
                     if (Amdbc250PspKiqAvailable()) {
-                        grbm = Amdbc250PspKiqReadReg(0x2004);
-                        cp   = Amdbc250PspKiqReadReg(0x2000);
+                        grbm = Amdbc250PspKiqReadReg(AMDBC250_REG_CC_GC_SHADER_ARRAY_CONFIG);
+                        cp   = Amdbc250PspKiqReadReg(AMDBC250_REG_GRBM_STATUS);
                         clk  = Amdbc250PspKiqReadReg(0x0D00);
                     } else {
-                        grbm = READ_REGISTER_ULONG((PULONG)((PUCHAR)DevExt->MmioVirtualBase + 0x2004));
-                        cp = READ_REGISTER_ULONG((PULONG)((PUCHAR)DevExt->MmioVirtualBase + 0x2000));
+                        grbm = READ_REGISTER_ULONG((PULONG)((PUCHAR)DevExt->MmioVirtualBase + AMDBC250_REG_CC_GC_SHADER_ARRAY_CONFIG));
+                        cp = READ_REGISTER_ULONG((PULONG)((PUCHAR)DevExt->MmioVirtualBase + AMDBC250_REG_GRBM_STATUS));
                         clk = READ_REGISTER_ULONG((PULONG)((PUCHAR)DevExt->MmioVirtualBase + 0x0D00));
                     }
                 }

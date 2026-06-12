@@ -308,17 +308,30 @@ Environment:
 #define AMDBC250_REG_DMCUB_INBOX0_BASE_ADDR       0x00007018
 #define AMDBC250_REG_DMCUB_INBOX0_SIZE            0x0000701C
 
-/* --- SMU (System Management Unit) — GFX10 power management --- */
-#define AMDBC250_REG_MP1_SMN_C2PMSG_33            0x00016284  /* P2C msg 33  */
-#define AMDBC250_REG_MP1_SMN_C2PMSG_66            0x00016104  /* C2P msg 66  */
-#define AMDBC250_REG_MP1_SMN_C2PMSG_82            0x00016148  /* C2P msg 82  */
-#define AMDBC250_REG_MP1_SMN_C2PMSG_90            0x00016168  /* C2P msg 90  */
-#define AMDBC250_REG_MP1_SMN_P2CMSG_33            0x00016284  /* Response    */
+/* --- SMU (System Management Unit) — GFX10 power management ---
+ *
+ * CORRECTED offsets for BC-250 (Cyan Skillfish):
+ * MP1_BASE__INST0_SEG0 = 0x16000 (byte offset in BAR5)
+ * Each C2PMSG register: BAR5 = MP1_BASE + mmMP1_SMN_C2PMSG_n * 4
+ * mm register values from mp_11_0_8_offset.h
+ *
+ * Linux equivalent: SOC15_REG_OFFSET(MP1, 0, mmMP1_SMN_C2PMSG_n)
+ */
+#define AMDBC250_REG_MP1_SMN_C2PMSG_33            0x00016984  /* C2P msg 33  (0x16000 + 0x0261*4) */
+#define AMDBC250_REG_MP1_SMN_C2PMSG_66            0x00016A08  /* C2P msg 66  — message ID (0x16000 + 0x0282*4) */
+#define AMDBC250_REG_MP1_SMN_C2PMSG_82            0x00016A48  /* C2P msg 82  — argument (0x16000 + 0x0292*4) */
+#define AMDBC250_REG_MP1_SMN_C2PMSG_83            0x00016A4C  /* C2P msg 83 (0x16000 + 0x0293*4) */
+#define AMDBC250_REG_MP1_SMN_C2PMSG_90            0x00016A68  /* C2P msg 90  — response status (0x16000 + 0x029A*4) */
 
-/* --- Thermal Sensor — GFX10 --- */
-#define AMDBC250_REG_THM_THERMAL_CTRL             0x00008000  /* Thermal ctrl */
-#define AMDBC250_REG_THM_CURRENT_TEMP             0x00008004  /* Current temp  */
-#define AMDBC250_REG_THM_THERMAL_INT_ENA          0x00008008  /* Interrupts    */
+/* --- Thermal Sensor — GFX10 ---
+ *
+ * CORRECTED offsets for BC-250:
+ * THM_BASE__INST0_SEG0 = 0x16600 (byte offset in BAR5)
+ * mm register values from thm_11_0_2_offset.h
+ */
+#define AMDBC250_REG_THM_THERMAL_CTRL             0x0001662C  /* THM_THERMAL_INT_CTRL (0x16600 + 0x00B*4) */
+#define AMDBC250_REG_THM_CURRENT_TEMP             0x0001677C  /* CG_MULT_THERMAL_STATUS (0x16600 + 0x05F*4) */
+#define AMDBC250_REG_THM_THERMAL_INT_ENA          0x00016628  /* THM_THERMAL_INT_ENA (0x16600 + 0x00A*4) */
 
 /* --- GB (Graphics Backend) Address Config — GFX10 --- */
 #define AMDBC250_REG_GB_ADDR_CONFIG               0x00009800  /* Addr config   */

@@ -104,75 +104,75 @@ int main(void) {
     /* === PHASE 3: NBIO unlock test (the main event) === */
     Log("\n=== PHASE 3: NBIO Unlock Verification ===\n");
 
-    /* CC_GC_SHADER_ARRAY_CONFIG — the CU config register */
-    ReadReg(0x2004, &v);
+    /* CC_GC_SHADER_ARRAY_CONFIG — the CU config register (BC-250: 0x3264) */
+    ReadReg(0x3264, &v);
     if (v != 0xFFFFFFFF) {
         const char *detail = (v == 0xFFF80000) ? "Stock 24 CU" :
                              (v == 0xFFE00000) ? "40 CU UNLOCKED!" : "Other value";
-        Log("  PASS: CC_GC_SHADER_ARRAY_CONFIG (0x2004) not blocked — %s\n", detail);
+        Log("  PASS: CC_GC_SHADER_ARRAY_CONFIG (0x3264) not blocked — %s\n", detail);
         g_passed++;
     } else {
-        Log("  FAIL: CC_GC_SHADER_ARRAY_CONFIG (0x2004) not blocked — BLOCKED (0xFFFFFFFF)\n");
+        Log("  FAIL: CC_GC_SHADER_ARRAY_CONFIG (0x3264) not blocked — BLOCKED (0xFFFFFFFF)\n");
         g_failed++;
     }
     Log("         CC_GC_SHADER_ARRAY_CONFIG = 0x%08X\n", v);
     UINT32 ccBaseline = v;
 
-    /* SPI_PG_ENABLE_STATIC_WGP_MASK */
-    ReadReg(0x229C, &v);
+    /* SPI_PG_ENABLE_STATIC_WGP_MASK (BC-250: 0x34FC) */
+    ReadReg(0x34FC, &v);
     if (v != 0xFFFFFFFF) {
         const char *detail = (v == 0x00000007) ? "Stock 3 WGP" :
                              (v == 0x0000001F) ? "5 WGP (40 CU)!" : "Other value";
-        Log("  PASS: SPI_PG_ENABLE_STATIC_WGP_MASK (0x229C) not blocked — %s\n", detail);
+        Log("  PASS: SPI_PG_ENABLE_STATIC_WGP_MASK (0x34FC) not blocked — %s\n", detail);
         g_passed++;
     } else {
-        Log("  FAIL: SPI_PG_ENABLE_STATIC_WGP_MASK (0x229C) not blocked — BLOCKED (0xFFFFFFFF)\n");
+        Log("  FAIL: SPI_PG_ENABLE_STATIC_WGP_MASK (0x34FC) not blocked — BLOCKED (0xFFFFFFFF)\n");
         g_failed++;
     }
     Log("         SPI_PG_ENABLE_STATIC_WGP_MASK = 0x%08X\n", v);
 
-    /* GRBM_STATUS (0x2000) */
-    ReadReg(0x2000, &v);
-    Check("GRBM_STATUS (0x2000) not blocked",
+    /* GRBM_STATUS (BC-250: 0x3260) */
+    ReadReg(0x3260, &v);
+    Check("GRBM_STATUS (0x3260) not blocked",
         v != 0xFFFFFFFF, "OK — can read engine status", "BLOCKED (0xFFFFFFFF)");
     Log("         GRBM_STATUS = 0x%08X\n", v);
 
-    /* Scratch registers (typical indicator of CP being alive) */
-    ReadReg(0x2074, &v);
-    Check("CP scratch (0x2074) not blocked",
+    /* Scratch registers — CP scratch (BC-250: 0x32D4) */
+    ReadReg(0x32D4, &v);
+    Check("CP scratch (0x32D4) not blocked",
         v != 0xFFFFFFFF,
         v != 0x00000000 ? "CP alive, scratch readable" : "scratch=0 (possibly zero)",
         "BLOCKED (0xFFFFFFFF)");
 
-    /* RLCG test (0x2600 — SDMA) */
-    ReadReg(0x2600, &v);
-    Check("SDMA (0x2600) not blocked",
+    /* SDMA (BC-250: 0x3860) */
+    ReadReg(0x3860, &v);
+    Check("SDMA (0x3860) not blocked",
         v != 0xFFFFFFFF, "OK", "BLOCKED (0xFFFFFFFF)");
-    Log("         SDMA[0x2600] = 0x%08X\n", v);
+    Log("         SDMA[0x3860] = 0x%08X\n", v);
 
     /* === PHASE 4: Write + readback test === */
-    Log("\n=== PHASE 4: Write Then Read (0x2004) ===\n");
+    Log("\n=== PHASE 4: Write Then Read (0x3264) ===\n");
 
-    ReadReg(0x2004, &v);
+    ReadReg(0x3264, &v);
     Log("         Before write: 0x%08X\n", v);
 
     if (v != 0xFFFFFFFF) {
         UINT32 testVal = (v == 0xFFF80000) ? 0xFFE00000 : 0xFFF80000;
-        WriteReg(0x2004, testVal);
-        ReadReg(0x2004, &rb);
+        WriteReg(0x3264, testVal);
+        ReadReg(0x3264, &rb);
         if (rb == testVal) {
-            Log("  PASS: Write+readback on 0x2004 — WRITE WORKS (wrote 0x%08X, read 0x%08X)\n", testVal, rb);
+            Log("  PASS: Write+readback on 0x3264 — WRITE WORKS (wrote 0x%08X, read 0x%08X)\n", testVal, rb);
             g_passed++;
         } else {
-            Log("  FAIL: Write+readback on 0x2004 — wrote 0x%08X, read 0x%08X\n", testVal, rb);
+            Log("  FAIL: Write+readback on 0x3264 — wrote 0x%08X, read 0x%08X\n", testVal, rb);
             g_failed++;
         }
         /* Restore original */
-        WriteReg(0x2004, v);
+        WriteReg(0x3264, v);
     } else {
-        WriteReg(0x2004, 0xFFE00000);
-        ReadReg(0x2004, &rb);
-        Check("Write attempt on 0x2004", rb != 0xFFFFFFFF,
+        WriteReg(0x3264, 0xFFE00000);
+        ReadReg(0x3264, &rb);
+        Check("Write attempt on 0x3264", rb != 0xFFFFFFFF,
             "Unblocked by write!", "Still blocked after write attempt");
     }
 

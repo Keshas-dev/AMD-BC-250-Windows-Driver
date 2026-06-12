@@ -1,142 +1,61 @@
-# NBIO Firewall Analysis - Critical Discovery
+# NBIO Firewall Analysis — BC-250 (Cyan Skillfish)
 
-**Date:** 2026-06-03
-**Status:** Testing Required
-
----
-
-## Key Insight
-
-The NBIO firewall blocking PSP MMIO access on Windows but NOT on Linux suggests two possible scenarios:
-
-### Scenario A: Initialization Order (Timing Issue)
-- Linux initializes PSP BEFORE the NBIO firewall is locked down
-- The firewall lock happens during late BIOS/UEFI phases or early kernel boot
-- If Linux gets to PSP first, it succeeds
-- The firewall "lock bit" prevents further changes until next reset
-
-### Scenario B: OS-Specific Firewall Activation
-- Windows activates the firewall specifically (WHQL compliance, Device Guard, etc.)
-- Linux skips proprietary lockdown routines (open-source driver doesn't implement them)
-- Linux handles IOMMU/AMD-Vi security differently, leaving NBIO firewall unlocked
+**Status:** RESOLVED — NBIO does NOT block GC registers at corrected BC-250 offsets
 
 ---
 
-## Evidence from Linux dmesg
+## The Problem That Wasn't
+
+Early testing used **Navi10 register offsets** (BAR5+0x0000) to read GC registers like GRBM_STATUS (0x2004), CP scratch (0x2074), and SDMA (0x2600). All returned **0xFFFFFFFF**, leading us to believe the NBIO firewall was blocking GC register access on the PS5-derived BC-250.
+
+## Actual Cause
+
+BC-250 (Cyan Skillfish) uses a **non-standard BAR5 register layout** vs Navi10. GC registers are shifted by `GC_BASE__INST0_SEG0 = 0x1260`:
 
 ```
-[5.670678] amdgpu 0000:01:00.0: register mmio base: 0xFE800000
-[5.670679] amdgpu 0000:01:00.0: register mmio size: 524288
-[5.672927] amdgpu 0000:01:00.0: detected ip block number 3 <psp_v11_0_8> (psp)
-[5.716470] amdgpu 0000:01:00.0: reserve 0x400000 from 0xf41f800000 for PSP TMR
-[5.752954] amdgpu 0000:01:00.0: SMU is initialized successfully!
+BAR5_offset = 0x1260 + Navi10_register_offset
 ```
 
-**Key observation:** No "NBIO firewall" or "lock" mentions in Linux dmesg. This suggests Linux doesn't explicitly activate the firewall.
+All reads at the old Navi10 offsets (0x2000-0x2FFF) hit unmapped address space — hence 0xFFFFFFFF.
 
----
+## Confirmed: NBIO Does NOT Block
 
-## Verification Method: Warm Reboot Test
+### Linux CachyOS devmem (cold boot)
+| Address | Expected | Result |
+|---------|----------|--------|
+| `0xFE803264` (CC_GC_SHADER_ARRAY_CONFIG) | GC register | **0x0** — readable |
+| `0xFE8034FC` (SPI_PG_ENABLE_STATIC_WGP_MASK) | GC register | **0x2000** — readable |
+| `0xFE803260` (GRBM_STATUS) | GC register | **0x0** — readable |
+| `0xFE8032D4` (CP scratch) | GC register | **0x4D585042** — readable |
+| `0xFE803860` (SDMA) | GC register | **0x8E0** — readable |
 
-### Steps:
-1. **Boot into Windows** (let it potentially activate the firewall)
-2. **Warm reboot** (soft reset) into CachyOS WITHOUT dropping power
-3. **Run warm reboot test script:**
-   ```bash
-   wget https://raw.githubusercontent.com/Keshas-dev/AMD-BC-250-Windows-Driver/main/tools/warm-reboot-test.sh
-   bash warm-reboot-test.sh
-   ```
-4. **Compare results with cold boot**
+No freezing, no 0xFFFFFFFF, no hangs.
 
-### Interpretation:
-- **If PSP works on Linux after warm reboot:** Windows did NOT activate firewall (Scenario A - timing issue)
-- **If PSP fails on Linux after warm reboot:** Windows DID activate firewall (Scenario B - OS-specific)
+### Windows driver (same offsets)
+Identical values confirmed via `safe-test.exe` and `deep-test.exe`.
 
----
+## What's Actually Inaccessible
 
-## What This Means for Our Driver
+| Block | Offset | Reason |
+|-------|--------|--------|
+| CLK | 0x0D00-0x0DFF | Likely always blocked on PS5 derivatives |
+| UVD | 0x2300+ | Locked by Sony firmware |
+| RSMU | 0xA000+ | System Management Unit |
+| PSP C2PMSG | 0x3E880+ | PSP-private, need PSP driver |
+| HDP writes | 0x05A0+ | Reads work, writes silently ignored |
 
-### If Scenario A (Timing):
-- We need to initialize PSP EARLIER in the boot process
-- Possibly during BIOS/UEFI phase or very early kernel boot
-- May require UEFI driver or boot driver approach
+## Why We Still Can't Write to CC/SPI
 
-### If Scenario B (OS-Specific):
-- We need to find and disable the Windows-specific firewall activation
-- May be in ACPI tables, AMD driver, or Windows security policies
-- Could try disabling Device Guard, VBS, or other Windows security features
+Despite NBIO allowing reads, writes to `CC_GC_SHADER_ARRAY_CONFIG` (0x3264) and `SPI_PG_ENABLE_STATIC_WGP_MASK` (0x34FC) are silently ignored. This is **not** an NBIO issue — it's because:
+1. GC block is likely **power-gated** (needs SMU `PowerUpGfx` message ID 0x6)
+2. Harvest registers may be read-only fuses, not writable
+3. Linux reports 24 CUs via Virtual CRAT table, not register writes
 
----
+## Timeline
 
-## Next Steps
-
-1. **Run warm reboot test** to determine which scenario is correct
-2. **Compare NBIO register dumps** between Linux and Windows
-3. **If Scenario A:** Investigate early boot PSP initialization
-4. **If Scenario B:** Investigate Windows security features that activate firewall
-
----
-
-## Technical Details
-
-### PSP MMIO Addresses:
-- GPU MMIO base: 0xFE800000
-- PSP MMIO offset: 0x10000
-- PSP MMIO base: 0xFE810000
-- PSP MMIO size: 0x4000 (16KB)
-
-### Key PSP Registers:
-- C2PMSG_35 (0x0088): Bootloader command
-- C2PMSG_36 (0x008C): Firmware address
-- C2PMSG_64 (0x0100): Ring creation / TOS_READY
-- C2PMSG_67 (0x010C): Ring write pointer
-- C2PMSG_69-71 (0x0114-0x011C): Ring buffer
-- C2PMSG_81 (0x0144): SOS alive check
-
-### NBIO Firewall Status on Windows:
-- Allowed blocks: 6 (GPU_ID, HDP, GC, MMHUB, DF, NBIO)
-- Blocked reads: 7 (GRBM, CP, CLK, RSMU, UVD, SDMA, RLCG)
-- Blocked writes: 7 (same as reads)
-
----
-
-## References
-
-- Linux amdgpu driver: https://github.com/torvalds/linux/tree/master/drivers/gpu/drm/amd/amdgpu
-- PSP v11 implementation: psp_v11_0.c
-- NBIO firewall: Device Exclusion Vector (DEV) registers
-- AMD documentation: BIOS and Kernel Developer's Guide (BKDG)
-
----
-
-## PSP Device Discovery (2026-06-03)
-
-### Hardware Topology
-| Device | PCI ID | Bus Location | Description |
-|--------|--------|--------------|-------------|
-| BC-250 GPU | VEN_1002&DEV_13FE | Device 00, Function 0041 | GPU/Graphics |
-| BC-250 Audio | VEN_1002&DEV_13FF | Device 00, Function 0141 | Audio |
-| AMD PSP 3.0 | VEN_1022&DEV_143E | Device 02, Function 0241 | Crypto/Security |
-
-**Key Finding:** All three devices share the same internal bus (19caf403), confirming they are on the same APU die and connected through the same NBIO bridge.
-
-### PSP Behavior After Hypervisor Disable
-After disabling Windows hypervisor (bcdedit /set hypervisorlaunchtype off):
-- PSP (DEV_143E) enters Error state (CM_PROB_FAILED_INSTALL)
-- PSP expected VBS/Hyper-V security layer to be present
-- Without VBS, PSP refuses to initialize on Windows
-
-### Implications
-- **PSP may be re-activating NBIO firewall in background** even after our driver loads
-- Disabling PSP device in Device Manager may prevent this
-- This could explain why all our NBIO unlock attempts failed
-
-### Recommended Actions
-1. Disable PSP device in Device Manager (PCI Encryption/Decryption Controller)
-2. Reboot and test if BC-250 Degraded status changes
-3. Test PSP MMIO access after PSP device is disabled
-4. Test Vulkan rendering
-
----
-
-*This analysis is based on community input and Linux driver analysis. Further testing required to confirm which scenario is correct.*
+| Date | Event |
+|------|-------|
+| 2026-06-03 | First NBIO register scan at Navi10 offsets — 6 readable, 7 blocked |
+| 2026-06-10 | GC_BASE=0x1260 offset difference discovered in Linux source |
+| 2026-06-11 | Linux devmem confirms **all** GC registers readable at corrected offsets |
+| 2026-06-11 | Windows confirms same — NBIO not blocking, all previous 0xFFFFFFFF were wrong offsets |
