@@ -107,7 +107,7 @@ Despite reads working, writes to CC_GC_SHADER_ARRAY_CONFIG (0x3264) and SPI_PG_E
 **Previous driver (WRONG):** param→C2PMSG_66, msg→C2PMSG_82, result→C2PMSG_83
 **Corrected driver:** param→C2PMSG_82, msg→C2PMSG_66, result→C2PMSG_82
 
-**THM Base:** THM_BASE = 0x16600 (was incorrectly 0x8000)
+**THM Base:** Hardware test confirms **THM_BASE = 0x8000** (0x8000 returns 0x18 writable, 0x8008 returns temperature). Linux IP offset header (`cyan_skillfish_ip_offset.h`) suggests 0x16600 but this is **wrong on P4.00G BIOS** — that address is read-only zero.
 
 ### NBIO Signature Registers
 

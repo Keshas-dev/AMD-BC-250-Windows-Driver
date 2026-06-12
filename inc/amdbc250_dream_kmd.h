@@ -957,7 +957,7 @@ typedef struct {
 #define AMDBC250_MP1_BASE                       0x16000
 
 /* THM_BASE (Thermal) — from cyan_skillfish_ip_offset.h: THM_BASE__INST0_SEG0 = 0x00016600 */
-#define AMDBC250_THM_BASE                       0x16600
+#define AMDBC250_THM_BASE                       0x08000
 
 /* CC_GC_SHADER_ARRAY_CONFIG — CU enumeration (Navi10: 0x2004) */
 #define AMDBC250_REG_CC_GC_SHADER_ARRAY_CONFIG  (AMDBC250_GC_BASE + 0x2004)

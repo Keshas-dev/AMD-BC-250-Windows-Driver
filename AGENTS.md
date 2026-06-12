@@ -220,10 +220,15 @@ Corrected mailbox protocol (our driver had parameter/message regs SWAPPED):
 
 **BC-250 SMU does NOT support:** EnableDpmFeature, DisableDpmFeature, PowerUpGfx, PowerUpSdma, PowerDownVcn, SetFanSpeedPercent, SetThermalThrottle, GetPowerUsage, SetPowerLimit, ForceGfxClk, PrepareMp1ForReset
 
-### THM Base (Thermal sensor)
-THM_BASE__INST0_SEG0 = **0x16600** (byte offset in BAR5, from `cyan_skillfish_ip_offset.h` + `thm_11_0_2_offset.h`)
+### THM Base (Thermal sensor) — CORRECTION
+**Confirmed via write-back test: THM_BASE = 0x8000** (not 0x16600).
 
-Our driver previously had THM registers at 0x8000 — wrong.
+Linux `cyan_skillfish_ip_offset.h` + `thm_11_0_2_offset.h` suggest THM_BASE=0x16600, but **hardware test on P4.00G BIOS confirms 0x8000 is correct:**
+- `THM_CTRL [0x8000]` = 0x18, writable → 0x800000EF
+- `THM_CURR [0x8008]` = 0x08, read-only (temperature)
+- Corrected offset `0x1662C` = 0x00000000, not writable — **wrong address**
+
+**Conclusion:** Linux IP offset headers (`cyan_skillfish_ip_offset.h`) may apply to different BIOS/silicon revision. Our P4.00G BIOS uses legacy Navi10 THM layout at 0x8000.
 
 ### Next Steps
 1. ~~**Re-test register reads with corrected offsets**~~ ✅ DONE

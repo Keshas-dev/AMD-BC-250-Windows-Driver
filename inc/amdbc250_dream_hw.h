@@ -325,13 +325,14 @@ Environment:
 
 /* --- Thermal Sensor — GFX10 ---
  *
- * CORRECTED offsets for BC-250:
- * THM_BASE__INST0_SEG0 = 0x16600 (byte offset in BAR5)
- * mm register values from thm_11_0_2_offset.h
+ * BC-250 verified offsets:
+ * THM_BASE = 0x8000 (confirmed via write-back test — register at 0x8000 is writable)
+ * Linux thm_11_0_2_offset.h suggests 0x16600 but this is WRONG on BC-250 P4.00G BIOS.
+ * Hardware test: 0x8000 returns 0x18 (writable), 0x8008 returns temperature.
  */
-#define AMDBC250_REG_THM_THERMAL_CTRL             0x0001662C  /* THM_THERMAL_INT_CTRL (0x16600 + 0x00B*4) */
-#define AMDBC250_REG_THM_CURRENT_TEMP             0x0001677C  /* CG_MULT_THERMAL_STATUS (0x16600 + 0x05F*4) */
-#define AMDBC250_REG_THM_THERMAL_INT_ENA          0x00016628  /* THM_THERMAL_INT_ENA (0x16600 + 0x00A*4) */
+#define AMDBC250_REG_THM_THERMAL_CTRL             0x00008000  /* THM control (writable, verified) */
+#define AMDBC250_REG_THM_CURRENT_TEMP             0x00008008  /* THM current temp (read-only) */
+#define AMDBC250_REG_THM_THERMAL_INT_ENA          0x00008000  /* Same as THM_CTRL */
 
 /* --- GB (Graphics Backend) Address Config — GFX10 --- */
 #define AMDBC250_REG_GB_ADDR_CONFIG               0x00009800  /* Addr config   */
