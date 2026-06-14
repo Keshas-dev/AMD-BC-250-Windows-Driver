@@ -14,42 +14,14 @@
 
 #pragma comment(lib, "advapi32.lib")
 
-#define FILE_DEVICE_AMDBC250    0x8000
-#define IOCTL_INDEX             0x270
-#define CTL_CODE_AMDBC250(F, M, A) CTL_CODE(FILE_DEVICE_AMDBC250, IOCTL_INDEX + (F), M, A)
+#include "..\inc\amdbc250_ioctl.h"
 
-#define IOCTL_AMDBC250_INIT_HARDWARE   CTL_CODE_AMDBC250(0x70, METHOD_BUFFERED, FILE_ANY_ACCESS)
-#define IOCTL_AMDBC250_SEND_PM4        CTL_CODE_AMDBC250(0x71, METHOD_BUFFERED, FILE_ANY_ACCESS)
-#define IOCTL_AMDBC250_READ_REG        CTL_CODE_AMDBC250(0x72, METHOD_BUFFERED, FILE_ANY_ACCESS)
-#define IOCTL_AMDBC250_WRITE_REG       CTL_CODE_AMDBC250(0x73, METHOD_BUFFERED, FILE_ANY_ACCESS)
-#define IOCTL_AMDBC250_GET_HW_STATUS   CTL_CODE_AMDBC250(0x74, METHOD_BUFFERED, FILE_ANY_ACCESS)
-#define IOCTL_AMDBC250_READ_PCI_BAR    CTL_CODE_AMDBC250(0x75, METHOD_BUFFERED, FILE_ANY_ACCESS)
-
-typedef struct { UINT64 MmioPhysicalBase; UINT32 MmioSize; UINT32 Flags; } INIT_HW_IN;
 typedef struct {
     UINT32 MmioMapped, RingsInit, FenceInit;
     UINT64 RingPhys; UINT32 RingSize, WPtr, RPtr;
     UINT64 FencePhys, FenceVal, LastFence;
 } HW_STATUS;
-typedef struct { UINT32 Off, Val; } REG_OP;
 typedef struct { UINT32 Cmd[64], Count, Fence, Queue; } PM4_IN;
-
-/* PCI BAR info from READ_PCI_BAR */
-typedef struct {
-    UINT64 PhysicalAddress;
-    UINT32 Size;
-    UINT32 IsMemoryBar;
-    UINT32 Is64Bit;
-} PCI_BAR_INFO;
-
-typedef struct {
-    UINT16 VendorId, DeviceId;
-    UINT16 Command, Status;
-    UINT32 RevisionId, ClassCode;
-    PCI_BAR_INFO Bars[6];
-    UINT32 Bus;
-    UINT32 _pad;
-} PCI_CONFIG;
 
 #define PM4_NOP 0x10
 #define PM4_HDR(op, cnt) ((2u << 30) | (((cnt)-1u) << 16) | ((op) << 8))
@@ -113,7 +85,7 @@ static BOOL ParseCmResourceList(BYTE *data, DWORD size, UINT64 *barPhys, UINT32 
                  * VRAM BARs are typically 256MB+.
                  * We want the MMIO BAR (small one), not the VRAM BAR (big one).
                  */
-                if (length >= 0x10000 && length <= 0x1000000) { /* 64KB - 16MB = MMIO */
+                if (length >= 0x10000 && length <= 0x20000000) { /* 64KB - 512MB = MMIO */
                     *barPhys = (UINT64)start;
                     *barSize = length;
                     return TRUE;
@@ -280,13 +252,11 @@ int main(int argc, char *argv[])
         total++;
         printf("[TEST 1] READ_PCI_BAR (KMD PCI config scan)...\n");
         {
-            PCI_CONFIG pcfg = {0};
+            AMDBC250_IOCTL_PCI_CONFIG pcfg = {0};
             ok = SIO(hDev, IOCTL_AMDBC250_READ_PCI_BAR, NULL, 0, &pcfg, sizeof(pcfg), &br);
             if (ok && pcfg.VendorId != 0) {
                 printf("  PCI: %04X:%04X (Class=%06X, Bus=%lu)\n",
                     pcfg.VendorId, pcfg.DeviceId, pcfg.ClassCode, pcfg.Bus);
-                
-                /* Find the MMIO BAR: small memory BAR (64KB-4MB = GPU registers) */
                 printf("  BARs discovered:\n");
                 for (int i = 0; i < 6; i++) {
                     if (pcfg.Bars[i].PhysicalAddress == 0) continue;
@@ -296,14 +266,12 @@ int main(int argc, char *argv[])
                         pcfg.Bars[i].IsMemoryBar ? "Memory" : "I/O",
                         pcfg.Bars[i].Is64Bit ? "64-bit" : "32-bit");
                     
-                    /* MMIO register BAR: small memory (256KB typical for RDNA2) */
+                    /* MMIO register BAR: small memory (256KB typical for RDNA2) or BC-250 large BAR (256MB+) */
                     if (pcfg.Bars[i].IsMemoryBar && !barPhys) {
                         UINT64 pa = pcfg.Bars[i].PhysicalAddress;
-                        /* Skip VRAM BARs (>= 64MB) and pick small memory BARs */
                         if (pa >= 0x10000 && pa <= 0xFFFFFFFFULL) {
-                            /* Prefer small BARs that look like MMIO register space */
-                            if (pcfg.Bars[i].Size == 0 || 
-                                (pcfg.Bars[i].Size >= 0x10000 && pcfg.Bars[i].Size <= 0x1000000)) {
+                            /* BC-250: single large BAR (256MB). Accept all sizes. */
+                            if (pcfg.Bars[i].Size == 0 || pcfg.Bars[i].Size >= 0x10000) {
                                 barPhys = pa;
                                 barSize = pcfg.Bars[i].Size ? pcfg.Bars[i].Size : 0x100000;
                                 printf("  >> Selected BAR[%d] as MMIO register BAR\n", i);
@@ -355,7 +323,7 @@ int main(int argc, char *argv[])
     total++;
     printf("[TEST 2] INIT_HARDWARE (PA=0x%llX, Size=0x%X)...\n", (unsigned long long)barPhys, barSize);
     {
-        INIT_HW_IN ih = {0};
+        AMDBC250_IOCTL_INIT_HARDWARE ih = {0};
         ih.MmioPhysicalBase = barPhys;
         ih.MmioSize = barSize;
         ok = SIO(hDev, IOCTL_AMDBC250_INIT_HARDWARE, &ih, sizeof(ih), NULL, 0, &br);
@@ -368,16 +336,16 @@ int main(int argc, char *argv[])
     total++;
     printf("[TEST 3] GET_HW_STATUS...\n");
     {
-        HW_STATUS hs = {0};
+        AMDBC250_IOCTL_HW_STATUS hs = {0};
         ok = SIO(hDev, IOCTL_AMDBC250_GET_HW_STATUS, NULL, 0, &hs, sizeof(hs), &br);
         if (ok) {
             printf("  MMIO=%s, Rings=%s, Fence=%s\n",
-                hs.MmioMapped?"YES":"NO", hs.RingsInit?"YES":"NO", hs.FenceInit?"YES":"NO");
+                hs.MmioMapped?"YES":"NO", hs.RingsInitialized?"YES":"NO", hs.FenceInitialized?"YES":"NO");
             printf("  RingPA=0x%llX (%uKB), WPtr=%u, RPtr=%u\n",
-                (unsigned long long)hs.RingPhys, hs.RingSize/1024, hs.WPtr, hs.RPtr);
+                (unsigned long long)hs.GfxRingPhysAddr, hs.GfxRingSize/1024, hs.GfxRingWptr, hs.GfxRingRptr);
             printf("  Fence=%llu, LastFence=%llu\n",
-                (unsigned long long)hs.FenceVal, (unsigned long long)hs.LastFence);
-            if (hs.MmioMapped && hs.RingsInit) { printf("[PASS]\n\n"); pass++; }
+                (unsigned long long)hs.FenceValue, (unsigned long long)hs.LastSubmittedFence);
+            if (hs.MmioMapped && hs.RingsInitialized) { printf("[PASS]\n\n"); pass++; }
             else { printf("[FAIL] HW not fully init\n\n"); fail++; }
         } else { printf("[FAIL] err=%lu\n\n", GetLastError()); fail++; }
     }
@@ -386,18 +354,18 @@ int main(int argc, char *argv[])
     total++;
     printf("[TEST 4] READ_REG (MMIO)...\n");
     {
-        REG_OP r = {0x000C, 0};
+        AMDBC250_IOCTL_REG_ACCESS r = {0x000C, 0};
         ok = SIO(hDev, IOCTL_AMDBC250_READ_REG, &r, sizeof(r), &r, sizeof(r), &br);
         if (ok) {
-            printf("  reg[0x000C] = 0x%08X (scratch)\n", r.Val);
-            r.Off = 0x0000; SIO(hDev, IOCTL_AMDBC250_READ_REG, &r, sizeof(r), &r, sizeof(r), &br);
-            printf("  reg[0x0000] = 0x%08X\n", r.Val);
-            r.Off = 0x0080; SIO(hDev, IOCTL_AMDBC250_READ_REG, &r, sizeof(r), &r, sizeof(r), &br);
-            printf("  reg[0x0080] = 0x%08X (GB_ADDR_CONFIG)\n", r.Val);
-            r.Off = 0x86D0; SIO(hDev, IOCTL_AMDBC250_READ_REG, &r, sizeof(r), &r, sizeof(r), &br);
-            printf("  reg[0x86D0] = 0x%08X (CP_ME_CNTL)\n", r.Val);
-            r.Off = 0x01A4; SIO(hDev, IOCTL_AMDBC250_READ_REG, &r, sizeof(r), &r, sizeof(r), &br);
-            printf("  reg[0x01A4] = 0x%08X (TMPMCR)\n", r.Val);
+            printf("  reg[0x000C] = 0x%08X (scratch)\n", r.Value);
+            r.RegisterOffset = 0x0000; SIO(hDev, IOCTL_AMDBC250_READ_REG, &r, sizeof(r), &r, sizeof(r), &br);
+            printf("  reg[0x0000] = 0x%08X\n", r.Value);
+            r.RegisterOffset = 0x0080; SIO(hDev, IOCTL_AMDBC250_READ_REG, &r, sizeof(r), &r, sizeof(r), &br);
+            printf("  reg[0x0080] = 0x%08X (GB_ADDR_CONFIG)\n", r.Value);
+            r.RegisterOffset = 0x86D0; SIO(hDev, IOCTL_AMDBC250_READ_REG, &r, sizeof(r), &r, sizeof(r), &br);
+            printf("  reg[0x86D0] = 0x%08X (CP_ME_CNTL)\n", r.Value);
+            r.RegisterOffset = 0x01A4; SIO(hDev, IOCTL_AMDBC250_READ_REG, &r, sizeof(r), &r, sizeof(r), &br);
+            printf("  reg[0x01A4] = 0x%08X (TMPMCR)\n", r.Value);
             printf("[PASS]\n\n"); pass++;
         } else { printf("[FAIL]\n\n"); fail++; }
     }
@@ -406,10 +374,10 @@ int main(int argc, char *argv[])
     total++;
     printf("[TEST 5] SEND_PM4 (NOP + fence=100)...\n");
     {
-        PM4_IN p = {0};
-        p.Cmd[0] = PM4_HDR(PM4_NOP, 1);
-        p.Cmd[1] = 0xDEADBEEF;
-        p.Count = 2; p.Fence = 100; p.Queue = 0;
+        AMDBC250_IOCTL_SEND_PM4 p = {0};
+        p.Commands[0] = PM4_HDR(PM4_NOP, 1);
+        p.Commands[1] = 0xDEADBEEF;
+        p.CommandCount = 2; p.FenceValue = 100; p.QueueType = 0;
         ok = SIO(hDev, IOCTL_AMDBC250_SEND_PM4, &p, sizeof(p), NULL, 0, &br);
         if (ok) { printf("[PASS]\n\n"); pass++; }
         else { printf("[FAIL] err=%lu\n\n", GetLastError()); fail++; }
@@ -420,11 +388,11 @@ int main(int argc, char *argv[])
     total++;
     printf("[TEST 6] Verify ring write...\n");
     {
-        HW_STATUS hs = {0};
+        AMDBC250_IOCTL_HW_STATUS hs = {0};
         ok = SIO(hDev, IOCTL_AMDBC250_GET_HW_STATUS, NULL, 0, &hs, sizeof(hs), &br);
         if (ok) {
-            printf("  WPtr=%u, Fence=%llu\n", hs.WPtr, (unsigned long long)hs.FenceVal);
-            if (hs.WPtr > 0) { printf("[PASS]\n\n"); pass++; }
+            printf("  WPtr=%u, Fence=%llu\n", hs.GfxRingWptr, (unsigned long long)hs.FenceValue);
+            if (hs.GfxRingWptr > 0) { printf("[PASS]\n\n"); pass++; }
             else { printf("[FAIL] WPtr still 0\n\n"); fail++; }
         } else { printf("[FAIL]\n\n"); fail++; }
     }
@@ -433,15 +401,15 @@ int main(int argc, char *argv[])
     total++;
     printf("[TEST 7] Write/Read register...\n");
     {
-        REG_OP r = {0x000C, 0};
+        AMDBC250_IOCTL_REG_ACCESS r = {0x000C, 0};
         SIO(hDev, IOCTL_AMDBC250_READ_REG, &r, sizeof(r), &r, sizeof(r), &br);
-        UINT32 orig = r.Val;
-        r.Val = orig ^ 0x00FF00FF;
+        UINT32 orig = r.Value;
+        r.Value = orig ^ 0x00FF00FF;
         ok = SIO(hDev, IOCTL_AMDBC250_WRITE_REG, &r, sizeof(r), NULL, 0, &br);
         if (ok) {
-            r.Val = 0;
+            r.Value = 0;
             SIO(hDev, IOCTL_AMDBC250_READ_REG, &r, sizeof(r), &r, sizeof(r), &br);
-            printf("  orig=0x%08X, after=0x%08X\n", orig, r.Val);
+            printf("  orig=0x%08X, after=0x%08X\n", orig, r.Value);
             printf("[PASS]\n\n"); pass++;
         } else { printf("[FAIL]\n\n"); fail++; }
     }
