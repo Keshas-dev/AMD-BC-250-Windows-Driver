@@ -51,8 +51,10 @@ ULONG Amdbc250PspProxyReadReg(ULONG GpuRegOffset);
 VOID Amdbc250PspProxyWriteReg(ULONG GpuRegOffset, ULONG Value);
 BOOLEAN Amdbc250PspProxyAvailable(VOID);
 BOOLEAN Amdbc250PspKiqAvailable(VOID);
+NTSTATUS Amdbc250PspKiqInit(VOID);
 NTSTATUS Amdbc250PspKiqSubmit(ULONG* Pm4Commands, ULONG DwordCount);
 ULONG Amdbc250PspKiqReadReg(ULONG GpuRegOffset);
+VOID Amdbc250PspKiqCleanup(VOID);
 VOID Amdbc250PspProxyCleanup(VOID);
 
 #endif

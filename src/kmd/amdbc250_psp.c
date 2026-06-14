@@ -236,17 +236,17 @@ NTSTATUS Amdbc250PspKiqInit(VOID)
     Amdbc250PspWriteRegister(0x34D0, 0x00010000);
     
     /* Write KIQ_BASE_LO/HI with ring buffer address */
-    WRITE_REGISTER_ULONG((PULONG)((PUCHAR)g_KiqRingVa + 0x60), g_KiqRingPa.LowPart);
-    WRITE_REGISTER_ULONG((PULONG)((PUCHAR)g_KiqRingVa + 0x64), g_KiqRingPa.HighPart);
+    Amdbc250PspWriteRegister(0xE060, g_KiqRingPa.LowPart);
+    Amdbc250PspWriteRegister(0xE064, g_KiqRingPa.HighPart);
     
     /* Enable KIQ ring */
-    WRITE_REGISTER_ULONG((PULONG)((PUCHAR)g_KiqRingVa + 0x68), 1);
+    Amdbc250PspWriteRegister(0xE068, 1);
     
     /* Initialize KIQ_RPTR to 0 */
-    WRITE_REGISTER_ULONG((PULONG)((PUCHAR)g_KiqRingVa + 0x6C), 0);
+    Amdbc250PspWriteRegister(0xE06C, 0);
     
     /* Initialize KIQ_WPTR to 0 */
-    WRITE_REGISTER_ULONG((PULONG)((PUCHAR)g_KiqRingVa + 0x78), 0);
+    Amdbc250PspWriteRegister(0xE078, 0);
     
     g_KiqRingInitialized = TRUE;
     g_KiqRingWptr = 0;
@@ -260,14 +260,12 @@ NTSTATUS Amdbc250PspKiqInit(VOID)
 /* Cleanup KIQ ring resources */
 VOID Amdbc250PspKiqCleanup(VOID)
 {
-    KIRQL irql;
-    
     if (!g_KiqRingInitialized) {
         return;
     }
     
     /* Disable KIQ ring */
-    WRITE_REGISTER_ULONG((PULONG)((PUCHAR)g_KiqRingVa + 0x68), 0);
+    Amdbc250PspWriteRegister(0xE068, 0);
     
     /* Free KIQ ring buffer */
     MmFreeContiguousMemory(g_KiqRingVa);
