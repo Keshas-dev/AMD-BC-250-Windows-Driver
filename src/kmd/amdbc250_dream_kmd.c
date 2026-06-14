@@ -3479,6 +3479,52 @@ DreamV3DeviceControl(
                 break;
             }
 
+            /* PATH 1: PSP KIQ ring (preferred — KIQ_WPTR works via PSP driver) */
+            if (Amdbc250PspKiqIsInitialized()) {
+                /* Build PM4 buffer: user commands + EOP fence (if requested) */
+                ULONG Pm4Buffer[128];  /* Max 64 user + 6 EOP = 70, with margin */
+                ULONG Pm4Count = SendPm4->CommandCount;
+
+                RtlCopyMemory(Pm4Buffer, SendPm4->Commands, SendPm4->CommandCount * sizeof(ULONG));
+
+                if (SendPm4->FenceValue > 0) {
+                    /* Append EOP fence packet (6 DWORDs) */
+                    ULONG idx = Pm4Count;
+                    /* EOP header: type=3, count=4, opcode=IT_EVENT_WRITE_EOP (0x3B) */
+                    Pm4Buffer[idx++] = (3u << 30) | (4u << 16) | 0x3B;
+                    /* EOP control: event=0x47, index=5, data_sel=2, int_sel=2 */
+                    Pm4Buffer[idx++] = (0x47 << 0) | (5 << 8) | (2 << 14) | (2 << 20);
+                    /* Fence address low/high */
+                    Pm4Buffer[idx++] = (ULONG)DevExt->GlobalFence.PhysicalAddress.QuadPart;
+                    Pm4Buffer[idx++] = (ULONG)(DevExt->GlobalFence.PhysicalAddress.QuadPart >> 32);
+                    /* Fence value low/high */
+                    Pm4Buffer[idx++] = (ULONG)SendPm4->FenceValue;
+                    Pm4Buffer[idx++] = (ULONG)(SendPm4->FenceValue >> 32);
+                    Pm4Count = idx;
+
+                    DevExt->GlobalFence.LastSubmittedValue = (ULONG64)SendPm4->FenceValue;
+                }
+
+                status = Amdbc250PspKiqSubmit(Pm4Buffer, Pm4Count);
+                if (NT_SUCCESS(status)) {
+                    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_TRACE_LEVEL,
+                        "AMDBC250-DREAM-V4.3: SEND_PM4 via PSP KIQ: %lu DWORDs, fence=%u\n",
+                        Pm4Count, SendPm4->FenceValue));
+                } else {
+                    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
+                        "AMDBC250-DREAM-V4.3: PSP KIQ submit failed: 0x%08X\n", status));
+                }
+                break;
+            }
+
+            /* PATH 2: Legacy GfxRing (HQD/KIQ/GFX doorbell) */
+            if (!DevExt->HardwareInitialized || DevExt->GfxRing.VirtualAddress == NULL) {
+                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+                    "AMDBC250-DREAM-V4.3: SEND_PM4 but hardware not initialized\n"));
+                status = STATUS_DEVICE_NOT_READY;
+                break;
+            }
+
             KIRQL OldIrql;
             KeAcquireSpinLock(&DevExt->GfxRing.Lock, &OldIrql);
 
@@ -3502,6 +3548,11 @@ DreamV3DeviceControl(
             ULONG idx = WPtr / sizeof(ULONG);
             RtlCopyMemory((PVOID)&Ring[idx], SendPm4->Commands, BytesNeeded);
             WPtr += BytesNeeded;
+
+            /* CRITICAL: Update WritePointer BEFORE EOP fence so DreamV3WriteEopFence
+             * uses the correct ring offset (after commands, not at old WritePointer).
+             * Without this, EOP overwrites the first 24 bytes of commands. */
+            DevExt->GfxRing.WritePointer = WPtr;
 
             /* Write EOP fence BEFORE doorbell (fence must be in ring before CP reads it) */
             if (SendPm4->FenceValue > 0) {

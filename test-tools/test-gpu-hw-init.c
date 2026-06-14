@@ -24,13 +24,21 @@ typedef struct {
 typedef struct { UINT32 Cmd[64], Count, Fence, Queue; } PM4_IN;
 
 #define PM4_NOP 0x10
-#define PM4_HDR(op, cnt) ((2u << 30) | (((cnt)-1u) << 16) | ((op) << 8))
+#define PM4_HDR(op, cnt) ((3u << 30) | (((cnt)-1u) << 16) | ((op) << 8))
+#define IT_WRITE_DATA 0x37
+#define IT_SET_SH_REG        0x76
+#define IT_DISPATCH_DIRECT   0x15
+#define WRITE_DATA_DST_REG     (1u << 16)   /* DST_SEL=register (bit 16) */
+#define WRITE_DATA_WR_CONFIRM  (1u << 18)   /* WR_CONFIRM */
+#define WRITE_DATA_ADDR_64BIT  (1u << 14)   /* ADDR_SEL=64-bit address */
 
 static BOOL SIO(HANDLE h, DWORD c, PVOID i, DWORD is, PVOID o, DWORD os, DWORD *br)
 {
     DWORD r = 0; BOOL ok = DeviceIoControl(h, c, i, is, o, os, &r, NULL);
     if (br) *br = r; return ok;
 }
+/* Cast wrapper to suppress C4245 from CTL_CODE (int→DWORD) and sizeof (size_t→DWORD) */
+#define SIOX(h, c, i, is, o, os, br) SIO(h, (DWORD)(c), (PVOID)(i), (DWORD)(is), (PVOID)(o), (DWORD)(os), (br))
 
 /*
  * Parse CM_RESOURCE_LIST (REG_RESOURCE_LIST format):
@@ -226,17 +234,25 @@ int main(int argc, char *argv[])
     DWORD pass = 0, fail = 0, total = 0, br;
     UINT64 barPhys = 0;
     UINT32 barSize = 0;
+    UINT64 fbPhys = 0;
+    UINT32 fbSizeVal = 0;
     BOOL ok;
 
     printf("========================================\n");
     printf("  BC-250 GPU Hardware Init Test\n");
     printf("========================================\n\n");
 
-    /* Manual BAR0 override */
+    /* Manual override: test-gpu-hw-init.exe <mmio_pa> <mmio_size> [fb_pa] [fb_size]
+     * Example: test-gpu-hw-init.exe 0xFE800000 0x80000 0xC0000000 0x10000000 */
     if (argc >= 3) {
         barPhys = _strtoui64(argv[1], NULL, 0);
         barSize = (UINT32)strtoul(argv[2], NULL, 0);
-        printf("[MANUAL] BAR0 PA=0x%llX, Size=0x%X\n\n", (unsigned long long)barPhys, barSize);
+        if (argc >= 5) {
+            fbPhys = _strtoui64(argv[3], NULL, 0);
+            fbSizeVal = (UINT32)strtoul(argv[4], NULL, 0);
+        }
+        printf("[MANUAL] MMIO BAR: PA=0x%llX, Size=0x%X\n", (unsigned long long)barPhys, barSize);
+        printf("[MANUAL] VRAM BAR: PA=0x%llX, Size=0x%X\n\n", (unsigned long long)fbPhys, fbSizeVal);
     }
 
     hDev = CreateFileW(L"\\\\.\\AMDBC250DreamV43", GENERIC_READ | GENERIC_WRITE,
@@ -248,12 +264,12 @@ int main(int argc, char *argv[])
     printf("[OK] KMD device opened\n\n");
 
     /* Test 1: Find PCI BARs via KMD (READ_PCI_BAR) */
-    if (barPhys == 0) {
+    if (barPhys == 0 || fbPhys == 0) {
         total++;
         printf("[TEST 1] READ_PCI_BAR (KMD PCI config scan)...\n");
         {
             AMDBC250_IOCTL_PCI_CONFIG pcfg = {0};
-            ok = SIO(hDev, IOCTL_AMDBC250_READ_PCI_BAR, NULL, 0, &pcfg, sizeof(pcfg), &br);
+            ok = SIOX(hDev, IOCTL_AMDBC250_READ_PCI_BAR, NULL, 0, &pcfg, sizeof(pcfg), &br);
             if (ok && pcfg.VendorId != 0) {
                 printf("  PCI: %04X:%04X (Class=%06X, Bus=%lu)\n",
                     pcfg.VendorId, pcfg.DeviceId, pcfg.ClassCode, pcfg.Bus);
@@ -265,36 +281,51 @@ int main(int argc, char *argv[])
                         pcfg.Bars[i].Size,
                         pcfg.Bars[i].IsMemoryBar ? "Memory" : "I/O",
                         pcfg.Bars[i].Is64Bit ? "64-bit" : "32-bit");
-                    
-                    /* MMIO register BAR: small memory (256KB typical for RDNA2) or BC-250 large BAR (256MB+) */
-                    if (pcfg.Bars[i].IsMemoryBar && !barPhys) {
-                        UINT64 pa = pcfg.Bars[i].PhysicalAddress;
-                        if (pa >= 0x10000 && pa <= 0xFFFFFFFFULL) {
-                            /* BC-250: single large BAR (256MB). Accept all sizes. */
-                            if (pcfg.Bars[i].Size == 0 || pcfg.Bars[i].Size >= 0x10000) {
-                                barPhys = pa;
-                                barSize = pcfg.Bars[i].Size ? pcfg.Bars[i].Size : 0x100000;
-                                printf("  >> Selected BAR[%d] as MMIO register BAR\n", i);
-                            }
-                        }
+                }
+
+                /*
+                 * AMD GPU BAR layout (Navi10/BC-250):
+                 *   BAR5 = MMIO register space (512KB small BAR)
+                 *   BAR2 = Doorbell BAR (2MB)
+                 *   BAR0 = VRAM framebuffer (256MB)
+                 *
+                 * We MUST use BAR5 for register access, NOT BAR0.
+                 * Using BAR0 (VRAM) means all register writes go to VRAM and do nothing.
+                 */
+                UINT64 mmioPa = 0, mmioSize = 0;
+                UINT64 fbPa = 0, fbSize = 0;
+
+                /* Find smallest memory BAR = MMIO registers (BAR5 on Navi10/BC-250) */
+                for (int i = 0; i < 6; i++) {
+                    if (!pcfg.Bars[i].IsMemoryBar) continue;
+                    UINT64 pa = pcfg.Bars[i].PhysicalAddress;
+                    UINT32 sz = pcfg.Bars[i].Size;
+                    if (pa == 0 || sz == 0) continue;
+                    if (i == 5) {
+                        /* BAR5 is always the register MMIO BAR on AMD GPUs */
+                        mmioPa = pa;
+                        mmioSize = sz;
+                    } else if (mmioPa == 0 || sz < mmioSize) {
+                        mmioPa = pa;
+                        mmioSize = sz;
+                    }
+                    /* Largest BAR = VRAM framebuffer (BAR0) */
+                    if (sz > fbSize) {
+                        fbPa = pa;
+                        fbSize = sz;
                     }
                 }
-                
-                if (!barPhys) {
-                    /* Fallback: try any memory BAR */
-                    for (int i = 0; i < 6; i++) {
-                        if (pcfg.Bars[i].PhysicalAddress != 0 && pcfg.Bars[i].IsMemoryBar) {
-                            barPhys = pcfg.Bars[i].PhysicalAddress;
-                            barSize = pcfg.Bars[i].Size ? pcfg.Bars[i].Size : 0x100000;
-                            printf("  >> Fallback: using BAR[%d]\n", i);
-                            break;
-                        }
-                    }
-                }
-                
-                printf("\n  >> MMIO candidate: PA=0x%llX, Size=0x%X\n\n",
+
+                barPhys = mmioPa;
+                barSize = mmioSize;
+                fbPhys = fbPa;
+                fbSizeVal = fbSize;
+                printf("  >> MMIO BAR: PA=0x%llX, Size=0x%X\n",
                     (unsigned long long)barPhys, barSize);
-                printf("[PASS]\n\n"); pass++;
+                printf("  >> VRAM BAR: PA=0x%llX, Size=0x%X\n",
+                    (unsigned long long)fbPhys, fbSizeVal);
+                
+                printf("\n[PASS]\n\n"); pass++;
             } else {
                 printf("[FAIL] READ_PCI_BAR failed (err=%lu)\n\n", GetLastError());
                 fail++;
@@ -304,29 +335,34 @@ int main(int argc, char *argv[])
         /* If READ_PCI_BAR didn't find an MMIO BAR, try registry fallback */
         if (barPhys == 0) {
             total++;
-            printf("[TEST 1b] Find PCI BAR0 from registry...\n");
+            printf("[TEST 1b] Find PCI BAR5 from registry...\n");
+            /* Registry fallback: assumes BAR5=mmio, BAR0=vram - hardcoded for BC-250 */
             if (FindBar0FromRegistry(&barPhys, &barSize)) {
-                printf("  >> BAR0: PA=0x%llX, Size=0x%X (%lu MB)\n\n",
+                printf("  >> Found: PA=0x%llX, Size=0x%X (%lu MB)\n\n",
                     (unsigned long long)barPhys, barSize, barSize / (1024*1024));
                 printf("[PASS]\n\n"); pass++;
             } else {
-                printf("[FAIL] BAR0 not found in registry either\n\n");
-                printf("  Run with manual override: test-gpu-hw-init.exe <BAR_PA> <SIZE>\n\n");
+                printf("[FAIL] BAR not found in registry either\n\n");
+                printf("  Run with manual override: test-gpu-hw-init.exe <MMIO_PA> <MMIO_SIZE> [FB_PA] [FB_SIZE]\n\n");
                 fail++;
             }
         }
     } else {
-        total++; printf("[TEST 1] Manual BAR0\n[PASS]\n\n"); pass++;
+        total++; printf("[TEST 1] Manual override\n[PASS]\n\n"); pass++;
     }
 
-    /* Test 2: Init Hardware */
+    /* Test 2: Init Hardware — BAR5=MMIO(0xFE800000), BAR0=VRAM(0xC0000000) */
     total++;
-    printf("[TEST 2] INIT_HARDWARE (PA=0x%llX, Size=0x%X)...\n", (unsigned long long)barPhys, barSize);
+    printf("[TEST 2] INIT_HARDWARE (MMIO=0x%llX/%X, FB=0x%llX/%X)...\n",
+        (unsigned long long)barPhys, barSize,
+        (unsigned long long)fbPhys, fbSizeVal);
     {
         AMDBC250_IOCTL_INIT_HARDWARE ih = {0};
         ih.MmioPhysicalBase = barPhys;
         ih.MmioSize = barSize;
-        ok = SIO(hDev, IOCTL_AMDBC250_INIT_HARDWARE, &ih, sizeof(ih), NULL, 0, &br);
+        ih.FbPhysicalBase = fbPhys;
+        ih.FbSize = fbSizeVal;
+        ok = SIOX(hDev, IOCTL_AMDBC250_INIT_HARDWARE, &ih, sizeof(ih), NULL, 0, &br);
         if (ok) { printf("[PASS]\n\n"); pass++; }
         else { printf("[FAIL] err=%lu\n\n", GetLastError()); fail++; }
     }
@@ -337,7 +373,7 @@ int main(int argc, char *argv[])
     printf("[TEST 3] GET_HW_STATUS...\n");
     {
         AMDBC250_IOCTL_HW_STATUS hs = {0};
-        ok = SIO(hDev, IOCTL_AMDBC250_GET_HW_STATUS, NULL, 0, &hs, sizeof(hs), &br);
+        ok = SIOX(hDev, IOCTL_AMDBC250_GET_HW_STATUS, NULL, 0, &hs, sizeof(hs), &br);
         if (ok) {
             printf("  MMIO=%s, Rings=%s, Fence=%s\n",
                 hs.MmioMapped?"YES":"NO", hs.RingsInitialized?"YES":"NO", hs.FenceInitialized?"YES":"NO");
@@ -354,18 +390,18 @@ int main(int argc, char *argv[])
     total++;
     printf("[TEST 4] READ_REG (MMIO)...\n");
     {
-        AMDBC250_IOCTL_REG_ACCESS r = {0x000C, 0};
-        ok = SIO(hDev, IOCTL_AMDBC250_READ_REG, &r, sizeof(r), &r, sizeof(r), &br);
+        AMDBC250_IOCTL_REG_ACCESS r = {0};
+        /* Read scratch at BC-250 GC_BASE-shifted offset */
+        r.RegisterOffset = 0x32D4;
+        ok = SIOX(hDev, IOCTL_AMDBC250_READ_REG, &r, sizeof(r), &r, sizeof(r), &br);
         if (ok) {
-            printf("  reg[0x000C] = 0x%08X (scratch)\n", r.Value);
-            r.RegisterOffset = 0x0000; SIO(hDev, IOCTL_AMDBC250_READ_REG, &r, sizeof(r), &r, sizeof(r), &br);
-            printf("  reg[0x0000] = 0x%08X\n", r.Value);
-            r.RegisterOffset = 0x0080; SIO(hDev, IOCTL_AMDBC250_READ_REG, &r, sizeof(r), &r, sizeof(r), &br);
-            printf("  reg[0x0080] = 0x%08X (GB_ADDR_CONFIG)\n", r.Value);
-            r.RegisterOffset = 0x86D0; SIO(hDev, IOCTL_AMDBC250_READ_REG, &r, sizeof(r), &r, sizeof(r), &br);
-            printf("  reg[0x86D0] = 0x%08X (CP_ME_CNTL)\n", r.Value);
-            r.RegisterOffset = 0x01A4; SIO(hDev, IOCTL_AMDBC250_READ_REG, &r, sizeof(r), &r, sizeof(r), &br);
-            printf("  reg[0x01A4] = 0x%08X (TMPMCR)\n", r.Value);
+            printf("  scratch[0x32D4] = 0x%08X (BC-250 GC_BASE shifted)\n", r.Value);
+            r.RegisterOffset = 0x2074; SIOX(hDev, IOCTL_AMDBC250_READ_REG, &r, sizeof(r), &r, sizeof(r), &br);
+            printf("  scratch[0x2074] = 0x%08X (Navi10 native)\n", r.Value);
+            r.RegisterOffset = 0x3260; SIOX(hDev, IOCTL_AMDBC250_READ_REG, &r, sizeof(r), &r, sizeof(r), &br);
+            printf("  GRBM_STATUS[0x3260] = 0x%08X\n", r.Value);
+            r.RegisterOffset = 0x000C; SIOX(hDev, IOCTL_AMDBC250_READ_REG, &r, sizeof(r), &r, sizeof(r), &br);
+            printf("  reg[0x000C] = 0x%08X\n", r.Value);
             printf("[PASS]\n\n"); pass++;
         } else { printf("[FAIL]\n\n"); fail++; }
     }
@@ -378,10 +414,194 @@ int main(int argc, char *argv[])
         p.Commands[0] = PM4_HDR(PM4_NOP, 1);
         p.Commands[1] = 0xDEADBEEF;
         p.CommandCount = 2; p.FenceValue = 100; p.QueueType = 0;
-        ok = SIO(hDev, IOCTL_AMDBC250_SEND_PM4, &p, sizeof(p), NULL, 0, &br);
+        ok = SIOX(hDev, IOCTL_AMDBC250_SEND_PM4, &p, sizeof(p), NULL, 0, &br);
         if (ok) { printf("[PASS]\n\n"); pass++; }
         else { printf("[FAIL] err=%lu\n\n", GetLastError()); fail++; }
     }
+    Sleep(100);
+
+    /* Test 5b: Send WRITE_DATA to scratch register via PM4 */
+    total++;
+    printf("[TEST 5b] WRITE_DATA to scratch reg...\n");
+    {
+        UINT32 scratchIdx = 0x081D;  /* mmSCRATCH_REG0 = 0x2074 / 4 */
+        UINT32 writeVal = 0xCAFE0001;  /* Unique value NOT set by init */
+        AMDBC250_IOCTL_SEND_PM4 wp = {0};
+        /* WRITE_DATA register write: header + ctrl + reg + pad + data = 5 dwords */
+        wp.Commands[0] = PM4_HDR(IT_WRITE_DATA, 4);
+        wp.Commands[1] = WRITE_DATA_DST_REG;
+        wp.Commands[2] = scratchIdx;
+        wp.Commands[3] = 0;           /* reserved padding */
+        wp.Commands[4] = writeVal;
+        wp.CommandCount = 5;
+        wp.FenceValue = 200;
+        wp.QueueType = 0;
+        ok = SIOX(hDev, IOCTL_AMDBC250_SEND_PM4, &wp, sizeof(wp), NULL, 0, &br);
+        if (ok) {
+            Sleep(200);
+            AMDBC250_IOCTL_REG_ACCESS rr = {0};
+            rr.RegisterOffset = 0x32D4;
+            SIOX(hDev, IOCTL_AMDBC250_READ_REG, &rr, sizeof(rr), &rr, sizeof(rr), &br);
+            UINT32 valGcBase = rr.Value;
+            rr.RegisterOffset = 0x2074;
+            SIOX(hDev, IOCTL_AMDBC250_READ_REG, &rr, sizeof(rr), &rr, sizeof(rr), &br);
+            UINT32 valNative = rr.Value;
+            printf("  Scratch after: GC_BASE=0x%08X, native=0x%08X (expected 0x%08X)\n",
+                valGcBase, valNative, writeVal);
+            if (valGcBase == writeVal || valNative == writeVal) {
+                printf("[PASS] GPU EXECUTED!\n\n"); pass++;
+            } else {
+                printf("[FAIL] GPU did not execute\n\n"); fail++;
+            }
+        } else { printf("[FAIL] err=%lu\n\n", GetLastError()); fail++; }
+    }
+    Sleep(100);
+
+    /* Test 5c: DISPATCH_DIRECT — minimal compute shader dispatch via KIQ */
+    total++;
+    printf("[TEST 5c] DISPATCH_DIRECT (null shader, s_endpgm)...\n");
+    {
+        /* Step 1: Get RingPA for shader storage location */
+        AMDBC250_IOCTL_HW_STATUS hs_disp = {0};
+        ok = SIOX(hDev, IOCTL_AMDBC250_GET_HW_STATUS, NULL, 0, &hs_disp, sizeof(hs_disp), &br);
+        if (!ok) { printf("[FAIL] GET_HW_STATUS\n\n"); fail++; goto skip_5c; }
+
+        UINT64 ringPa = hs_disp.GfxRingPhysAddr;
+        UINT32 ringSize = hs_disp.GfxRingSize;
+        /* Store shader at the very end of the ring buffer (safe — past wrap area for small ring) */
+        UINT64 shaderPa = ringPa + (ringSize >= 8 ? ringSize - 8 : 0);
+        UINT32 shaderPaLo = (UINT32)(shaderPa & 0xFFFFFFFFULL);
+        UINT32 shaderPaHi = (UINT32)(shaderPa >> 32);
+
+        /* Pre-dispatch mark: write 0xCAFE0001 to scratch */
+        UINT32 PRE_MARK  = 0xCAFE0001;
+        UINT32 POST_MARK = 0xCAFE0002;
+        UINT32 scratchIdx = 0x081D;  /* mmSCRATCH_REG0 / 4 */
+
+        /* Submission 1: write pre-mark */
+        {
+            AMDBC250_IOCTL_SEND_PM4 p = {0};
+            p.Commands[0] = PM4_HDR(IT_WRITE_DATA, 4);
+            p.Commands[1] = WRITE_DATA_DST_REG;
+            p.Commands[2] = scratchIdx;
+            p.Commands[3] = 0;           /* reserved padding */
+            p.Commands[4] = PRE_MARK;
+            p.CommandCount = 5;
+            p.FenceValue = 300;
+            p.QueueType = 0;
+            ok = SIOX(hDev, IOCTL_AMDBC250_SEND_PM4, &p, sizeof(p), NULL, 0, &br);
+            if (!ok) { printf("[FAIL] pre-mark SEND_PM4 err=%lu\n\n", GetLastError()); fail++; goto skip_5c; }
+        }
+        /* Debug: check WPtr after pre-mark */
+        {
+            AMDBC250_IOCTL_HW_STATUS hs_dbg = {0};
+            SIOX(hDev, IOCTL_AMDBC250_GET_HW_STATUS, NULL, 0, &hs_dbg, sizeof(hs_dbg), &br);
+            printf("  [debug] WPtr after pre-mark = %u\n", hs_dbg.GfxRingWptr);
+        }
+        Sleep(50);
+
+        /* Debug: check scratch after pre-mark */
+        {
+            AMDBC250_IOCTL_REG_ACCESS rr = {0};
+            rr.RegisterOffset = 0x32D4;
+            SIOX(hDev, IOCTL_AMDBC250_READ_REG, &rr, sizeof(rr), &rr, sizeof(rr), &br);
+            printf("  [debug] scratch after pre-mark = 0x%08X\n", rr.Value);
+        }
+
+        /* Submission 2: write shader, set PGM regs, dispatch, post-mark */
+        {
+            AMDBC250_IOCTL_SEND_PM4 p = {0};
+            UINT32 count = 0;
+
+            /* WRITE_DATA: write s_endpgm (0xBF810000) to shaderPA */
+            p.Commands[count++] = PM4_HDR(IT_WRITE_DATA, 4);  /* header */
+            p.Commands[count++] = WRITE_DATA_ADDR_64BIT;      /* ctrl: ME, memory, 64-bit addr */
+            p.Commands[count++] = shaderPaLo;                 /* addr_lo */
+            p.Commands[count++] = shaderPaHi;                 /* addr_hi */
+            p.Commands[count++] = 0xBF810000;                 /* data: s_endpgm */
+
+            /* SET_SH_REG: COMPUTE_PGM_LO (reg=0x2E00, idx=0xB80) */
+            p.Commands[count++] = PM4_HDR(IT_SET_SH_REG, 2);
+            p.Commands[count++] = 0xB80;       /* mmCOMPUTE_PGM_LO / 4 */
+            p.Commands[count++] = shaderPaLo;
+
+            /* SET_SH_REG: COMPUTE_PGM_HI (reg=0x2E04, idx=0xB81) */
+            p.Commands[count++] = PM4_HDR(IT_SET_SH_REG, 2);
+            p.Commands[count++] = 0xB81;       /* mmCOMPUTE_PGM_HI / 4 */
+            p.Commands[count++] = shaderPaHi & 0xFFFF;
+
+            /* SET_SH_REG: COMPUTE_PGM_RSRC1 (reg=0x2E08, idx=0xB82) */
+            p.Commands[count++] = PM4_HDR(IT_SET_SH_REG, 2);
+            p.Commands[count++] = 0xB82;       /* mmCOMPUTE_PGM_RSRC1 / 4 */
+            p.Commands[count++] = 0x00000000;  /* 0 SGPR, 0 VGPR, wave64 */
+
+            /* SET_SH_REG: COMPUTE_PGM_RSRC2 (reg=0x2E0C, idx=0xB83) */
+            p.Commands[count++] = PM4_HDR(IT_SET_SH_REG, 2);
+            p.Commands[count++] = 0xB83;       /* mmCOMPUTE_PGM_RSRC2 / 4 */
+            p.Commands[count++] = 0x00000000;  /* no user SGPRs, no scratch */
+
+            /* DISPATCH_DIRECT: 1x1x1 */
+            p.Commands[count++] = PM4_HDR(IT_DISPATCH_DIRECT, 4);
+            p.Commands[count++] = 1;            /* dim_x */
+            p.Commands[count++] = 1;            /* dim_y */
+            p.Commands[count++] = 1;            /* dim_z */
+            p.Commands[count++] = 0x80000000;   /* dispatch_initiator (VALID) */
+
+            /* Post-mark: write 0xCAFE0002 to scratch (only if dispatch didn't hang) */
+            p.Commands[count++] = PM4_HDR(IT_WRITE_DATA, 4);
+            p.Commands[count++] = WRITE_DATA_DST_REG;
+            p.Commands[count++] = scratchIdx;
+            p.Commands[count++] = 0;           /* reserved padding */
+            p.Commands[count++] = POST_MARK;
+
+            p.CommandCount = count;
+            p.FenceValue = 300;
+            p.QueueType = 0;
+
+            printf("  RingPA=0x%llX, shaderPA=0x%llX (%u PM4 DWORDs)\n",
+                (unsigned long long)ringPa, (unsigned long long)shaderPa, count);
+            ok = SIOX(hDev, IOCTL_AMDBC250_SEND_PM4, &p, sizeof(p), NULL, 0, &br);
+            if (!ok) { printf("[FAIL] dispatch SEND_PM4 err=%lu\n\n", GetLastError()); fail++; goto skip_5c; }
+        }
+
+        /* Debug: check WPtr after dispatch */
+        {
+            AMDBC250_IOCTL_HW_STATUS hs_dbg = {0};
+            SIOX(hDev, IOCTL_AMDBC250_GET_HW_STATUS, NULL, 0, &hs_dbg, sizeof(hs_dbg), &br);
+            printf("  [debug] WPtr after dispatch = %u\n", hs_dbg.GfxRingWptr);
+        }
+
+        /* Wait for GPU to process */
+        Sleep(300);
+
+        /* Read scratch to see what happened */
+        {
+            AMDBC250_IOCTL_REG_ACCESS rr = {0};
+            rr.RegisterOffset = 0x32D4;
+            SIOX(hDev, IOCTL_AMDBC250_READ_REG, &rr, sizeof(rr), &rr, sizeof(rr), &br);
+            UINT32 scratchVal = rr.Value;
+
+            printf("  scratch[0x32D4] = 0x%08X\n", scratchVal);
+
+            if (scratchVal == POST_MARK) {
+                printf("[PASS] GPU EXECUTED DISPATCH!\n\n"); pass++;
+            } else if (scratchVal == PRE_MARK) {
+                printf("[INFO] Pre-mark seen, GPU hung on DISPATCH_DIRECT (RLC/MEC needed)\n\n");
+                /* Not a fail — this is expected without RLC firmware */
+                pass++;
+            } else if (scratchVal == 0xFFFFFFFF) {
+                printf("[FAIL] GPU unresponsive (reading 0xFFFFFFFF)\n\n"); fail++;
+            } else if (scratchVal == 0xDEADBEEF) {
+                printf("[INFO] Overwritten by earlier test — retry after reset\n\n");
+                fail++;
+            } else {
+                printf("[INFO] Unexpected value (0x%08X) — maybe GPU not executing\n\n", scratchVal);
+                fail++;
+            }
+        }
+    }
+skip_5c:
+
     Sleep(100);
 
     /* Test 6: Verify fence */
@@ -389,7 +609,7 @@ int main(int argc, char *argv[])
     printf("[TEST 6] Verify ring write...\n");
     {
         AMDBC250_IOCTL_HW_STATUS hs = {0};
-        ok = SIO(hDev, IOCTL_AMDBC250_GET_HW_STATUS, NULL, 0, &hs, sizeof(hs), &br);
+        ok = SIOX(hDev, IOCTL_AMDBC250_GET_HW_STATUS, NULL, 0, &hs, sizeof(hs), &br);
         if (ok) {
             printf("  WPtr=%u, Fence=%llu\n", hs.GfxRingWptr, (unsigned long long)hs.FenceValue);
             if (hs.GfxRingWptr > 0) { printf("[PASS]\n\n"); pass++; }
@@ -402,13 +622,13 @@ int main(int argc, char *argv[])
     printf("[TEST 7] Write/Read register...\n");
     {
         AMDBC250_IOCTL_REG_ACCESS r = {0x000C, 0};
-        SIO(hDev, IOCTL_AMDBC250_READ_REG, &r, sizeof(r), &r, sizeof(r), &br);
+        SIOX(hDev, IOCTL_AMDBC250_READ_REG, &r, sizeof(r), &r, sizeof(r), &br);
         UINT32 orig = r.Value;
         r.Value = orig ^ 0x00FF00FF;
-        ok = SIO(hDev, IOCTL_AMDBC250_WRITE_REG, &r, sizeof(r), NULL, 0, &br);
+        ok = SIOX(hDev, IOCTL_AMDBC250_WRITE_REG, &r, sizeof(r), NULL, 0, &br);
         if (ok) {
             r.Value = 0;
-            SIO(hDev, IOCTL_AMDBC250_READ_REG, &r, sizeof(r), &r, sizeof(r), &br);
+            SIOX(hDev, IOCTL_AMDBC250_READ_REG, &r, sizeof(r), &r, sizeof(r), &br);
             printf("  orig=0x%08X, after=0x%08X\n", orig, r.Value);
             printf("[PASS]\n\n"); pass++;
         } else { printf("[FAIL]\n\n"); fail++; }

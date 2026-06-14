@@ -162,11 +162,19 @@ BOOLEAN Amdbc250PspKiqAvailable(VOID)
     return g_KiqRingInitialized;
 }
 
+/* Check if KIQ ring is initialized (for external callers) */
+BOOLEAN Amdbc250PspKiqIsInitialized(VOID)
+{
+    return g_KiqRingInitialized;
+}
+
 /* Submit PM4 packets to KIQ ring for execution */
 NTSTATUS Amdbc250PspKiqSubmit(ULONG* Pm4Commands, ULONG DwordCount)
 {
     KIRQL irql;
     ULONG i, wptr;
+    IO_STATUS_BLOCK iosb;
+    ULONG inBuf[3];
     
     if (!g_KiqRingInitialized) {
         KdPrint(("KIQ: Ring not initialized\n"));
@@ -189,11 +197,15 @@ NTSTATUS Amdbc250PspKiqSubmit(ULONG* Pm4Commands, ULONG DwordCount)
     /* Update KIQ ring write pointer */
     g_KiqRingWptr = wptr;
     
-    /* Write KIQ_WPTR to signal doorbell (triggers GPU execution) */
-    WRITE_REGISTER_ULONG((PULONG)((PUCHAR)g_KiqRingVa + 0x28), g_KiqRingWptr);
-    
-    /* Release spinlock */
+    /* Release spinlock before IOCTL */
     KeReleaseSpinLock(&g_KiqRingLock, irql);
+    
+    /* Write KIQ_WPTR via PSP_IOCTL_WRITE_REG to signal doorbell (triggers GPU execution) */
+    inBuf[0] = 0xE078;  /* KIQ_WPTR */
+    inBuf[1] = g_KiqRingWptr;
+    inBuf[2] = 0;
+    ZwDeviceIoControlFile(g_PspProxyHandle, NULL, NULL, NULL,
+        &iosb, PSP_IOCTL_WRITE_REG, inBuf, 3*sizeof(ULONG), NULL, 0);
     
     return STATUS_SUCCESS;
 }
@@ -213,6 +225,31 @@ NTSTATUS Amdbc250PspKiqInit(VOID)
         return STATUS_SUCCESS;
     }
     
+    /*
+     * KIQ register writes MUST go through PSP_IOCTL_WRITE_REG.
+     * GPU BAR5 (0xFE800000) cannot write KIQ registers (hardware
+     * read-only from GPU). Only PSP driver has privileged BAR5
+     * at 0xFD600000 via PSP_IOCTL_WRITE_REG.
+     *
+     * Do NOT use Amdbc250PspWriteRegister (corrupts via PspReg MP0 offset).
+     * Do NOT use Amdbc250PspProxyWriteReg (diverts to REG_PROG no-op).
+     */
+    
+    /* Ensure PSP proxy handle is open */
+    if (!g_PspProxyHandle) {
+        KdPrint(("KIQ: PSP proxy handle not open, calling PspProxyInit\n"));
+        if (!PspProxyInit()) {
+            KdPrint(("KIQ: PspProxyInit FAILED\n"));
+            return STATUS_DEVICE_NOT_READY;
+        }
+        KdPrint(("KIQ: PspProxyInit SUCCESS, handle=0x%p\n", g_PspProxyHandle));
+    }
+    
+    /* Re-check after PspProxyInit (which may have initialized KIQ) */
+    if (g_KiqRingInitialized) {
+        return STATUS_SUCCESS;
+    }
+    
     /* Allocate KIQ ring (8KB buffer, page-aligned) */
     highAddr.QuadPart = 0x10000000000ULL;  /* Above 4GB */
     g_KiqRingVa = MmAllocateContiguousMemory(0x2000, highAddr);
@@ -228,25 +265,40 @@ NTSTATUS Amdbc250PspKiqInit(VOID)
     
     g_KiqRingPa = MmGetPhysicalAddress(g_KiqRingVa);
     g_KiqRingSize = 0x2000;
-    
-    /* Initialize spinlock for KIQ ring */
     KeInitializeSpinLock(&g_KiqRingLock);
     
-    /* Set GRBM_GFX_INDEX to select KIQ (ME=1, PIPE=0, QUEUE=0) */
-    Amdbc250PspWriteRegister(0x34D0, 0x00010000);
-    
-    /* Write KIQ_BASE_LO/HI with ring buffer address */
-    Amdbc250PspWriteRegister(0xE060, g_KiqRingPa.LowPart);
-    Amdbc250PspWriteRegister(0xE064, g_KiqRingPa.HighPart);
-    
-    /* Enable KIQ ring */
-    Amdbc250PspWriteRegister(0xE068, 1);
-    
-    /* Initialize KIQ_RPTR to 0 */
-    Amdbc250PspWriteRegister(0xE06C, 0);
-    
-    /* Initialize KIQ_WPTR to 0 */
-    Amdbc250PspWriteRegister(0xE078, 0);
+    /* Write KIQ registers via PSP_IOCTL_WRITE_REG (privileged PSP path) */
+    {
+        IO_STATUS_BLOCK iosb;
+        ULONG inBuf[3];
+        
+        inBuf[0] = 0x34D0; inBuf[1] = 0x00010000; inBuf[2] = 0;
+        ZwDeviceIoControlFile(g_PspProxyHandle, NULL, NULL, NULL,
+            &iosb, PSP_IOCTL_WRITE_REG, inBuf, 3*sizeof(ULONG), NULL, 0);
+        
+        inBuf[0] = 0xE060; inBuf[1] = g_KiqRingPa.LowPart;
+        ZwDeviceIoControlFile(g_PspProxyHandle, NULL, NULL, NULL,
+            &iosb, PSP_IOCTL_WRITE_REG, inBuf, 3*sizeof(ULONG), NULL, 0);
+        
+        inBuf[0] = 0xE064; inBuf[1] = g_KiqRingPa.HighPart;
+        ZwDeviceIoControlFile(g_PspProxyHandle, NULL, NULL, NULL,
+            &iosb, PSP_IOCTL_WRITE_REG, inBuf, 3*sizeof(ULONG), NULL, 0);
+        
+        inBuf[0] = 0xE068; inBuf[1] = 1;  /* Enable KIQ */
+        ZwDeviceIoControlFile(g_PspProxyHandle, NULL, NULL, NULL,
+            &iosb, PSP_IOCTL_WRITE_REG, inBuf, 3*sizeof(ULONG), NULL, 0);
+        
+        inBuf[0] = 0xE06C; inBuf[1] = 0;  /* RPTR = 0 */
+        ZwDeviceIoControlFile(g_PspProxyHandle, NULL, NULL, NULL,
+            &iosb, PSP_IOCTL_WRITE_REG, inBuf, 3*sizeof(ULONG), NULL, 0);
+        
+        inBuf[0] = 0xE078; inBuf[1] = 0;  /* WPTR = 0 */
+        ZwDeviceIoControlFile(g_PspProxyHandle, NULL, NULL, NULL,
+            &iosb, PSP_IOCTL_WRITE_REG, inBuf, 3*sizeof(ULONG), NULL, 0);
+        
+        KdPrint(("KIQ: Wrote KIQ registers via PSP_IOCTL_WRITE_REG (handle=0x%p, RingPA=0x%llX)\n", 
+            g_PspProxyHandle, g_KiqRingPa.QuadPart));
+    }
     
     g_KiqRingInitialized = TRUE;
     g_KiqRingWptr = 0;
@@ -260,13 +312,20 @@ NTSTATUS Amdbc250PspKiqInit(VOID)
 /* Cleanup KIQ ring resources */
 VOID Amdbc250PspKiqCleanup(VOID)
 {
+    IO_STATUS_BLOCK iosb;
+    ULONG inBuf[3];
+
     if (!g_KiqRingInitialized) {
         return;
     }
-    
-    /* Disable KIQ ring */
-    Amdbc250PspWriteRegister(0xE068, 0);
-    
+
+    /* Disable KIQ ring via PSP proxy (KIQ_CNTL at 0xE068) */
+    if (g_PspProxyHandle) {
+        inBuf[0] = 0xE068; inBuf[1] = 0; inBuf[2] = 0;
+        ZwDeviceIoControlFile(g_PspProxyHandle, NULL, NULL, NULL,
+            &iosb, PSP_IOCTL_WRITE_REG, inBuf, 3*sizeof(ULONG), NULL, 0);
+    }
+
     /* Free KIQ ring buffer */
     MmFreeContiguousMemory(g_KiqRingVa);
     g_KiqRingVa = NULL;
@@ -274,7 +333,7 @@ VOID Amdbc250PspKiqCleanup(VOID)
     g_KiqRingSize = 0;
     g_KiqRingInitialized = FALSE;
     g_KiqRingWptr = 0;
-    
+
     KdPrint(("KIQ: KIQ ring cleaned up\n"));
 }
 

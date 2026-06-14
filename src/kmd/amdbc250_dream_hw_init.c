@@ -471,7 +471,13 @@ DreamV3HwInitGfxRing(
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
                    "AMDBC250-DREAM-V4.3: Falling back to KIQ ring (BASE_LO at 0xE060 is writable)\n"));
 
-        /* Try KIQ ring instead — KIQ_BASE_LO at 0xE060 is writable! */
+        /* Try KIQ ring instead — KIQ_BASE_LO at 0xE060 is writable!
+         * IMPORTANT: KIQ_BASE_LO (native 0xCE00) is per-ME register — must
+         * target ME=1 via GRBM_GFX_INDEX for the write to take effect. */
+        DreamV3WriteRegister(DevExt, AMDBC250_REG_GRBM_GFX_INDEX,
+            AMDBC250_GRBM_GFX_INDEX_KIQ_VAL);
+        KeStallExecutionProcessor(1);
+
         DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_KIQ_BASE_LO, BaseLoVal);
         DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_KIQ_BASE_HI, BaseHiVal);
         KeStallExecutionProcessor(1);
@@ -558,6 +564,9 @@ DreamV3HwInitGfxRing(
             KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
                        "AMDBC250-DREAM-V4.3: KIQ BASE_LO also read-only (0x%08X) — ring unusable\n",
                        KiqBaseCheck));
+            /* Restore GRBM_GFX_INDEX to broadcast */
+            DreamV3WriteRegister(DevExt, AMDBC250_REG_GRBM_GFX_INDEX,
+                AMDBC250_GRBM_GFX_INDEX_BROADCAST_VAL);
         }
     } else {
         /* GFX ring base IS writable (unusual for BC-250) — use it */
