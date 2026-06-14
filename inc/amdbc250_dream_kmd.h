@@ -27,8 +27,12 @@ Environment:
 /* ===== BC-250 (Cyan Skillfish) Base Offsets =====
  * MUST be defined BEFORE hw.h include since hw.h uses these constants.
  * See: cyan_skillfish_ip_offset.h
+ * GC has TWO segments (from cyan_skillfish_ip_offset.h):
+ *   SEG0 = 0x1260 — most GC registers (GRBM, ring, HQD, etc.)
+ *   SEG1 = 0xA000 — Sienna_Cichlid-specific registers (RLC, GRBM_SR, clock gating)
  */
 #define AMDBC250_GC_BASE                        0x1260
+#define AMDBC250_GC_BASE_SEG1                   0xA000
 #define AMDBC250_MP1_BASE                       0x16000
 #define AMDBC250_THM_BASE                       0x08000
 
@@ -384,8 +388,13 @@ typedef struct _DREAM_V3_DEVICE_EXTENSION {
     BOOLEAN             PspAlive;            /* SOS detected alive */
     BOOLEAN             NbioUnlocked;        /* NBIO firewall bypassed */
 
+    /* KIQ ring support (primary path on BC-250) */
+    BOOLEAN             KiqAvailable;        /* TRUE = KIQ ring initialized and usable */
+
     /* Ring mode: GFX (BASE_LO read-only on BC-250) vs KIQ */
     BOOLEAN             UseKiqRing;          /* TRUE = use KIQ regs (0xE060+), not GFX regs */
+    BOOLEAN             UseHqdKiq;           /* TRUE = KIQ uses full HQD init (SRBM + HQD regs) */
+    ULONG               GrbmGfxIndexOffset;  /* Probed working GRBM_GFX_INDEX offset */
 
     /* Diagnostics */
     ULONG               InterruptCount;
@@ -954,17 +963,5 @@ typedef struct {
     ULONG PixelFormat;          // HUBPREQ_FORMAT_*
     ULONG VidPnSourceId;        // Display output ID
 } DISPLAY_FLIP_REQUEST, *PDISPLAY_FLIP_REQUEST;
-
-/* CC_GC_SHADER_ARRAY_CONFIG — CU enumeration (Navi10: 0x2004) */
-#define AMDBC250_REG_CC_GC_SHADER_ARRAY_CONFIG  (AMDBC250_GC_BASE + 0x2004)
-
-/* SPI_PG_ENABLE_STATIC_WGP_MASK — WGP dispatch gate (Navi10: 0x229C) */
-#define AMDBC250_REG_SPI_PG_ENABLE_STATIC_WGP_MASK (AMDBC250_GC_BASE + 0x229C)
-
-/* GRBM_STATUS — Graphics Backend status (Navi10: 0x2000) */
-#define AMDBC250_REG_GRBM_STATUS                (AMDBC250_GC_BASE + 0x2000)
-
-/* RLC_PG_ALWAYS_ON_WGP_MASK — RLC power gating (Navi10: 0x2B04) */
-#define AMDBC250_REG_RLC_PG_ALWAYS_ON_WGP_MASK  (AMDBC250_GC_BASE + 0x2B04)
 
 #endif /* _AMDBC250_DREAM_V3_KMD_H_ */

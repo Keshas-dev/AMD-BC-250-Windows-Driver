@@ -2,7 +2,7 @@
 
 ## Who We Are
 
-AMD BC-250 Windows 11 driver project by Keshass. Goal: fully working GPU driver for AMD BC-250 (Cyan Skillfish) on Windows 11.
+AMD BC-250 Windows 11 driver project by Keshas. Goal: fully working GPU driver for AMD BC-250 (Cyan Skillfish) on Windows 11.
 
 **Everyone welcome!** GPU drivers, WDDM, Vulkan experience — or just want to help.
 
@@ -383,6 +383,16 @@ NBIO on BC-250 does **NOT** block GRBM, CP, Scratch, or SDMA at corrected BC-250
 14. Ray tracing — RT core support
 
 ---
+
+## GitHub Repository
+
+This project is part of the AMD BC-250 driver collection:
+
+**Main Repository**: https://github.com/Keshas-dev/AMD-BC-250-Windows-Driver
+
+**Companion PSP Driver**: https://github.com/Keshas-dev/AMD-BC-250-PSP-Windows-Driver
+
+Both repositories work together to provide a complete driver stack for the AMD BC-250 (Cyan Skillfish) mining card.
 
 ## License
 

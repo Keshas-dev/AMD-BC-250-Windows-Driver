@@ -457,14 +457,17 @@ DreamV3HwInitGfxRing(
     DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_GFX_RING0_BASE_LO, BaseLoVal);
     DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_GFX_RING0_BASE_HI, BaseHiVal);
 
-    /* Check if GFX BASE_LO was actually written (read-only on BC-250) */
-    ULONG GfxBaseCheck = DreamV3ReadRegister(DevExt, AMDBC250_REG_CP_GFX_RING0_BASE_LO);
+    /* Check if GFX BASE was actually written (read-only on BC-250) */
     DevExt->UseKiqRing = FALSE;
 
-    if (GfxBaseCheck != BaseLoVal) {
+    ULONG GfxBaseCheckLo = DreamV3ReadRegister(DevExt, AMDBC250_REG_CP_GFX_RING0_BASE_LO);
+    ULONG GfxBaseCheckHi = DreamV3ReadRegister(DevExt, AMDBC250_REG_CP_GFX_RING0_BASE_HI);
+    BOOLEAN GfxWritable = (GfxBaseCheckLo == BaseLoVal && GfxBaseCheckHi == BaseHiVal);
+
+    if (!GfxWritable) {
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
-                   "AMDBC250-DREAM-V4.3: GFX ring BASE_LO read-only (got 0x%08X, expected 0x%08X)\n",
-                   GfxBaseCheck, BaseLoVal));
+                   "AMDBC250-DREAM-V4.3: GFX ring BASE read-only (got LO=0x%08X HI=0x%08X, expected LO=0x%08X HI=0x%08X)\n",
+                   GfxBaseCheckLo, GfxBaseCheckHi, BaseLoVal, BaseHiVal));
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
                    "AMDBC250-DREAM-V4.3: Falling back to KIQ ring (BASE_LO at 0xE060 is writable)\n"));
 
@@ -479,15 +482,82 @@ DreamV3HwInitGfxRing(
                        "AMDBC250-DREAM-V4.3: KIQ BASE_LO write VERIFIED (0x%08X)\n", KiqBaseCheck));
             DevExt->UseKiqRing = TRUE;
 
-            /* Program KIQ ring control (may be read-only — try anyway) */
-            RbCntl = (RbBufSz & CP_RING0_CNTL__RB_BUFSZ_MASK) |
-                     ((1 << CP_RING0_CNTL__RB_BLKSZ_SHIFT) & CP_RING0_CNTL__RB_BLKSZ_MASK) |
-                     CP_RING0_CNTL__RPTR_WRITEBACK_ENABLE;
-            DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_KIQ_CNTL, RbCntl);
+            /* === SRBM+HQD KIQ Init (Linux gfx_v10_0.c method) === */
+            DevExt->UseHqdKiq = FALSE;
 
-            /* Initialize KIQ pointers */
-            DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_KIQ_RPTR, 0);
-            DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_KIQ_WPTR, 0);
+            /* GRBM_GFX_INDEX confirmed at AMDBC250_REG_GRBM_GFX_INDEX (0x34D0).
+             * No probe needed — offset verified empirically on BC-250 P5.00 BIOS. */
+            DevExt->GrbmGfxIndexOffset = AMDBC250_REG_GRBM_GFX_INDEX;
+
+            if (TRUE) {
+                /* Full HQD init sequence (Linux gfx_v10_0_kiq_init_register) */
+                /* 0. Select KIQ queue: ME=1, PIPE=0, QUEUE=0 */
+                DreamV3WriteRegister(DevExt, DevExt->GrbmGfxIndexOffset,
+                    AMDBC250_GRBM_GFX_INDEX_KIQ_VAL);
+                KeStallExecutionProcessor(1);
+
+                /* 1. Deactivate queue */
+                DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_HQD_ACTIVE, 0);
+                KeStallExecutionProcessor(1);
+
+                /* 2. Disable wptr polling */
+                DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_HQD_PQ_WPTR_POLL_CNTL, 0);
+
+                /* 3. Disable doorbell */
+                DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_HQD_PQ_DOORBELL_CONTROL, 0);
+
+                /* 4. Set EOP base/control */
+                DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_HQD_EOP_BASE_ADDR, 0);
+                DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_HQD_EOP_BASE_ADDR_HI, 0);
+                DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_HQD_EOP_CONTROL, 0x08000000);
+
+                /* 5. Set MQD base (zero — not using MQD) */
+                DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_MQD_BASE_ADDR, 0);
+                DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_MQD_BASE_ADDR_HI, 0);
+
+                /* 6. Set PQ base (ring buffer address) */
+                DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_HQD_PQ_BASE, BaseLoVal);
+                DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_HQD_PQ_BASE_HI, BaseHiVal);
+
+                /* 7. Set PQ control (ring size in log2 DWORDs) */
+                DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_HQD_PQ_CONTROL, RbBufSz);
+
+                /* 8. Clear RPTR report addr and WPTR poll addr */
+                DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_HQD_PQ_RPTR_REPORT_ADDR, 0);
+                DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_HQD_PQ_RPTR_REPORT_ADDR_HI, 0);
+                DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_HQD_PQ_WPTR_POLL_ADDR, 0);
+                DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_HQD_PQ_WPTR_POLL_ADDR_HI, 0);
+
+                /* 9. Set WPTR = 0 */
+                DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_HQD_PQ_WPTR_LO, 0);
+                DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_HQD_PQ_WPTR_HI, 0);
+
+                /* 10. Set VMID = 0 */
+                DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_HQD_VMID, 0);
+
+                /* 11. Set persistent state (process quantum flag + WPTR loop filter) */
+                DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_HQD_PERSISTENT_STATE, 0xE001);
+
+                /* 12. Activate queue */
+                DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_HQD_ACTIVE, 1);
+                KeStallExecutionProcessor(1);
+
+                /* 13. Restore GRBM_GFX_INDEX to broadcast */
+                DreamV3WriteRegister(DevExt, DevExt->GrbmGfxIndexOffset,
+                    AMDBC250_GRBM_GFX_INDEX_SE_BROADCAST);
+
+                /* 14. Notify RLC scheduler */
+                DreamV3WriteRegister(DevExt, AMDBC250_REG_RLC_CP_SCHEDULERS,
+                    AMDBC250_RLC_CP_SCHEDULERS_KIQ_VAL);
+
+                DevExt->UseHqdKiq = TRUE;
+                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                    "AMDBC250-DREAM-V4.3: KIQ HQD init complete (GRBM_GFX_INDEX at 0x%04X)\n",
+                    DevExt->GrbmGfxIndexOffset));
+            } else {
+                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+                    "AMDBC250-DREAM-V4.3: GRBM_GFX_INDEX not found — KIQ unusable, skipping HQD init\n"));
+            }
         } else {
             KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
                        "AMDBC250-DREAM-V4.3: KIQ BASE_LO also read-only (0x%08X) — ring unusable\n",
@@ -672,6 +742,17 @@ DreamV3PspHardwareInit(
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                "AMDBC250-DREAM-V4.3: PSP init OK — SOS alive=%u\n",
                DevExt->PspAlive));
+
+    /* Step 9c: Initialize KIQ ring for command submission */
+    if (NT_SUCCESS(Amdbc250PspKiqInit())) {
+        DevExt->KiqAvailable = TRUE;
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                   "AMDBC250-DREAM-V4.3: KIQ ring initialized\n"));
+    } else {
+        DevExt->KiqAvailable = FALSE;
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+                   "AMDBC250-DREAM-V4.3: KIQ init FAILED: fallback to PSP proxy\n"));
+    }
 
     /* Step 9b: If SOS is alive, try NBIO unlock */
     if (DevExt->PspAlive) {

@@ -1438,8 +1438,16 @@ DreamV3SubmitGfxRing(
     
     /* Only write to hardware if MMIO is mapped */
     if (DevExt->MmioVirtualBase != NULL && DevExt->HardwareInitialized) {
-        /* Write WPTR to hardware */
-        DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_GFX_RING0_WPTR, WPtr);
+        /* Write WPTR — use HQD/SRBM path if available */
+        if (DevExt->UseHqdKiq) {
+            DreamV3WriteRegister(DevExt, DevExt->GrbmGfxIndexOffset,
+                AMDBC250_GRBM_GFX_INDEX_KIQ_VAL);
+            DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_HQD_PQ_WPTR_LO, WPtr);
+            DreamV3WriteRegister(DevExt, DevExt->GrbmGfxIndexOffset,
+                AMDBC250_GRBM_GFX_INDEX_SE_BROADCAST);
+        } else {
+            DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_GFX_RING0_WPTR, WPtr);
+        }
         KeStallExecutionProcessor(10);
     }
     
@@ -3496,7 +3504,19 @@ DreamV3DeviceControl(
             KeMemoryBarrier();
 
             /* Kick doorbell — write WPTR to MMIO */
-            DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_GFX_RING0_WPTR, WPtr);
+            if (DevExt->UseHqdKiq) {
+                /* HQD KIQ path: select queue via SRBM, write WPTR to CP_HQD_PQ_WPTR_LO */
+                DreamV3WriteRegister(DevExt, DevExt->GrbmGfxIndexOffset,
+                    AMDBC250_GRBM_GFX_INDEX_KIQ_VAL);
+                DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_HQD_PQ_WPTR_LO, WPtr);
+                DreamV3WriteRegister(DevExt, DevExt->GrbmGfxIndexOffset,
+                    AMDBC250_GRBM_GFX_INDEX_SE_BROADCAST);
+            } else if (DevExt->UseKiqRing) {
+                /* Old KIQ path: direct KIQ_WPTR write (no SRBM selection) */
+                DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_KIQ_WPTR, WPtr);
+            } else {
+                DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_GFX_RING0_WPTR, WPtr);
+            }
 
             /* Handle fence */
             if (SendPm4->FenceValue > 0) {

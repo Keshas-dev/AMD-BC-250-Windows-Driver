@@ -231,10 +231,127 @@ Environment:
 #define AMDBC250_REG_CP_COMPUTE_RING0_WPTR      (AMDBC250_GC_BASE + 0x0000C918)  /* 0xDB78 */
 
 /* --- GFX10 HQD (Hardware Queue Dispatcher, BC-250: shift by GC_BASE=0x1260) --- */
+#define AMDBC250_REG_CP_MQD_BASE_ADDR       (AMDBC250_GC_BASE + 0x0000C858)  /* 0xDAB8 */
+#define AMDBC250_REG_CP_MQD_BASE_ADDR_HI    (AMDBC250_GC_BASE + 0x0000C85C)  /* 0xDABC */
 #define AMDBC250_REG_CP_HQD_ACTIVE          (AMDBC250_GC_BASE + 0x0000C860)  /* 0xDAC0 */
 #define AMDBC250_REG_CP_HQD_VMID            (AMDBC250_GC_BASE + 0x0000C864)  /* 0xDAC4 */
 #define AMDBC250_REG_CP_HQD_PERSISTENT_STATE (AMDBC250_GC_BASE + 0x0000C868) /* 0xDAC8 */
-#define AMDBC250_REG_CP_HQD_SEMA_CMD        (AMDBC250_GC_BASE + 0x0000C870)  /* 0xDAD0 */
+#define AMDBC250_REG_CP_HQD_PIPE_PRIORITY   (AMDBC250_GC_BASE + 0x0000C86C)  /* 0xDACC */
+#define AMDBC250_REG_CP_HQD_QUEUE_PRIORITY  (AMDBC250_GC_BASE + 0x0000C870)  /* 0xDAD0 */
+#define AMDBC250_REG_CP_HQD_QUANTUM         (AMDBC250_GC_BASE + 0x0000C874)  /* 0xDAD4 */
+#define AMDBC250_REG_CP_HQD_PQ_BASE         (AMDBC250_GC_BASE + 0x0000C878)  /* 0xDAD8 */
+#define AMDBC250_REG_CP_HQD_PQ_BASE_HI      (AMDBC250_GC_BASE + 0x0000C87C)  /* 0xDADC */
+#define AMDBC250_REG_CP_HQD_PQ_RPTR         (AMDBC250_GC_BASE + 0x0000C880)  /* 0xDAE0 */
+#define AMDBC250_REG_CP_HQD_PQ_RPTR_REPORT_ADDR   (AMDBC250_GC_BASE + 0x0000C884)  /* 0xDAE4 */
+#define AMDBC250_REG_CP_HQD_PQ_RPTR_REPORT_ADDR_HI (AMDBC250_GC_BASE + 0x0000C888) /* 0xDAE8 */
+#define AMDBC250_REG_CP_HQD_PQ_WPTR_POLL_ADDR     (AMDBC250_GC_BASE + 0x0000C88C)  /* 0xDAEC */
+#define AMDBC250_REG_CP_HQD_PQ_WPTR_POLL_ADDR_HI  (AMDBC250_GC_BASE + 0x0000C890)  /* 0xDAF0 */
+#define AMDBC250_REG_CP_HQD_PQ_DOORBELL_CONTROL   (AMDBC250_GC_BASE + 0x0000C894)  /* 0xDAF4 */
+
+/* CP_HQD_PQ_WPTR_POLL_CNTL: mm value from gc_10_1_0_offset.h 0x1E56 */
+#define AMDBC250_REG_CP_HQD_PQ_WPTR_POLL_CNTL (AMDBC250_GC_BASE + 0x0000C8A0)  /* 0xDB00 */
+#define AMDBC250_REG_CP_HQD_PQ_CONTROL      (AMDBC250_GC_BASE + 0x0000C89C)  /* 0xDAFC */
+#define AMDBC250_REG_CP_HQD_DEQUEUE_REQUEST (AMDBC250_GC_BASE + 0x0000C8B8)  /* 0xDB18 */
+#define AMDBC250_REG_CP_HQD_EOP_BASE_ADDR   (AMDBC250_GC_BASE + 0x0000C8EC)  /* 0xDB4C */
+#define AMDBC250_REG_CP_HQD_EOP_BASE_ADDR_HI (AMDBC250_GC_BASE + 0x0000C8F0) /* 0xDB50 */
+#define AMDBC250_REG_CP_HQD_EOP_CONTROL     (AMDBC250_GC_BASE + 0x0000C8F4)  /* 0xDB54 */
+#define AMDBC250_REG_CP_HQD_EOP_RPTR        (AMDBC250_GC_BASE + 0x0000C8F8)  /* 0xDB58 */
+#define AMDBC250_REG_CP_HQD_EOP_WPTR        (AMDBC250_GC_BASE + 0x0000C8FC)  /* 0xDB5C */
+#define AMDBC250_REG_CP_HQD_PQ_WPTR_LO      (AMDBC250_GC_BASE + 0x0000C930)  /* 0xDB90 */
+#define AMDBC250_REG_CP_HQD_PQ_WPTR_HI      (AMDBC250_GC_BASE + 0x0000C934)  /* 0xDB94 */
+
+/* --- GRBM / SRBM Selection (BC-250) --- */
+/* GRBM_GFX_INDEX confirmed at GC_BASE(0x1260) + 0x2270 = 0x34D0 (Navi10 byte offset).
+ * Probe result: returns 0xBA062100 (QUEUE_BROADCAST=1, PIPE_BROADCAST=1, WRITABLE).
+ * Sienna_Cichlid Seg1 alias (0xA000+0x2200*4=0x12800) NOT used — BC-250 uses Navi10 layout. */
+#define AMDBC250_REG_GRBM_GFX_INDEX        (AMDBC250_GC_BASE + 0x00002270)  /* 0x34D0 */
+
+/* GRBM_GFX_INDEX bit fields (Linux soc15 layout from soc15.h):
+ *   bit 31:   SE_BROADCAST
+ *   bit 30:   QUEUE_BROADCAST
+ *   bit 29:   PIPE_BROADCAST
+ *   bits 28-24: SE_INDEX + reserved
+ *   bit 26:   INSTANCE_BROADCAST
+ *   bits 25-24: INSTANCE_INDEX
+ *   bits 23-20: reserved
+ *   bits 19-16: MEID (ME index, 4 bits)
+ *   bits 15-12: SAID (Shader Array ID)
+ *   bits 11-8:  PIPEID (pipe index, 4 bits)
+ *   bits 7-4:   reserved
+ *   bits 3-0:   QUEUEID (queue index, 4 bits)
+ */
+#define AMDBC250_GRBM_GFX_INDEX_MEID_SHIFT        16
+#define AMDBC250_GRBM_GFX_INDEX_PIPEID_SHIFT       8
+#define AMDBC250_GRBM_GFX_INDEX_QUEUEID_SHIFT      0
+#define AMDBC250_GRBM_GFX_INDEX_INSTANCE_SHIFT     24
+#define AMDBC250_GRBM_GFX_INDEX_SAID_SHIFT        12
+#define AMDBC250_GRBM_GFX_INDEX_SEID_SHIFT         24
+#define AMDBC250_GRBM_GFX_INDEX_INSTANCE_BROADCAST (1 << 26)
+#define AMDBC250_GRBM_GFX_INDEX_PIPE_BROADCAST     (1 << 29)
+#define AMDBC250_GRBM_GFX_INDEX_QUEUE_BROADCAST    (1 << 30)
+#define AMDBC250_GRBM_GFX_INDEX_SE_BROADCAST       (1 << 31)
+
+/* GRBM_GFX_INDEX broadcast reset value (Linux DEFAULT_GRBM_GFX_INDEX = 0xE0000000) */
+#define AMDBC250_GRBM_GFX_INDEX_BROADCAST_VAL \
+    (AMDBC250_GRBM_GFX_INDEX_SE_BROADCAST | \
+     AMDBC250_GRBM_GFX_INDEX_QUEUE_BROADCAST | \
+     AMDBC250_GRBM_GFX_INDEX_PIPE_BROADCAST | \
+     AMDBC250_GRBM_GFX_INDEX_INSTANCE_BROADCAST)
+
+/* KIQ select: ME=1, PIPE=0, QUEUE=0, with SE_BROADCAST + INSTANCE_BROADCAST */
+#define AMDBC250_GRBM_GFX_INDEX_KIQ_VAL \
+    (AMDBC250_GRBM_GFX_INDEX_SE_BROADCAST | \
+     AMDBC250_GRBM_GFX_INDEX_INSTANCE_BROADCAST | \
+     (1 << AMDBC250_GRBM_GFX_INDEX_MEID_SHIFT))
+
+/* GFX queue select: ME=0, PIPE=0, QUEUE=0 */
+#define AMDBC250_GRBM_GFX_INDEX_GFX_VAL  0
+
+/* --- RLC / Scheduler (Sienna_Cichlid override: mm=0x4CA1, BASE_IDX=1) --- */
+/* From Linux gfx_v10_0.c: #define mmRLC_CP_SCHEDULERS_Sienna_Cichlid 0x4ca1 BASE_IDX=1
+ * BAR5 = GC_BASE_SEG1(0xA000) + 0x4CA1 = 0xECA1 (theoretical Sienna_Cichlid offset)
+ * NOTE: Probe empirically found this register at 0xECAA (returns 0x002000E4).
+ *       0xECAA = 0xA000 + 0x4CAA = +9 bytes from Sienna_Cichlid offset.
+ *       Both aliases may work; 0xECA1 is the canonical Linux definition.
+ * Value format: bit7=enable, bits5:6=ME, bits3:4=pipe, bits0:2=queue */
+#define AMDBC250_REG_RLC_CP_SCHEDULERS      (AMDBC250_GC_BASE_SEG1 + 0x00004CA1)  /* 0xECA1 */
+#define AMDBC250_RLC_CP_SCHEDULERS_ENABLE   0x80
+#define AMDBC250_RLC_CP_SCHEDULERS_ME_SHIFT 5
+#define AMDBC250_RLC_CP_SCHEDULERS_PIPE_SHIFT 3
+#define AMDBC250_RLC_CP_SCHEDULERS_KIQ_VAL  (AMDBC250_RLC_CP_SCHEDULERS_ENABLE | (1 << 5))
+
+/* --- CP_MEC_CNTL (Sienna_Cichlid override: mm=0x0F55, BASE_IDX=0) --- */
+/* From Linux gfx_v10_0.c: #define mmCP_MEC_CNTL_Sienna_Cichlid 0x0f55 BASE_IDX=0
+ * BC-250 moves this from NBIO 0xC0E0 (blocked) to GC_BASE + 0x0F55 = 0x21B5 */
+#define AMDBC250_REG_CP_MEC_CNTL_GC         (AMDBC250_GC_BASE + 0x00000F55)  /* 0x21B5 */
+
+/* --- GRBM Status (GC_BASE + 0x2000 = 0x3260, confirmed) --- */
+#define AMDBC250_REG_GRBM_STATUS            (AMDBC250_GC_BASE + 0x00002000)  /* 0x3260 */
+#define AMDBC250_REG_GRBM_STATUS2           (AMDBC250_GC_BASE + 0x0000200C)  /* 0x326C */
+#define AMDBC250_REG_GRBM_SOFT_RESET        (AMDBC250_GC_BASE + 0x00002018)  /* 0x3278 */
+
+/* GRBM_STATUS bit fields */
+#define GRBM_STATUS__GUI_ACTIVE             (1 << 31)
+#define GRBM_STATUS__ME_BUSY                (1 << 16)
+#define GRBM_STATUS__PFP_BUSY               (1 << 15)
+#define GRBM_STATUS__CE_BUSY                (1 << 17)
+#define GRBM_STATUS__CP_COHERENCY_BUSY      (1 << 28)
+#define GRBM_STATUS__CB_BUSY                (1 << 14)
+#define GRBM_STATUS__DB_BUSY                (1 << 13)
+#define GRBM_STATUS__TA_BUSY                (1 << 12)
+#define GRBM_STATUS__GDS_BUSY               (1 << 11)
+#define GRBM_STATUS__BCI_BUSY               (1 << 10)
+#define GRBM_STATUS__IA_BUSY                (1 << 9)
+#define GRBM_STATUS__WD_BUSY                (1 << 8)
+#define GRBM_STATUS__RLC_BUSY               (1 << 27)
+
+/* --- CC (Compute Cores) Registers --- */
+#define AMDBC250_REG_CC_GC_SHADER_ARRAY_CONFIG  (AMDBC250_GC_BASE + 0x00002004)  /* 0x3264 */
+#define AMDBC250_REG_CC_GC_SHADER_RATE_CONFIG   (AMDBC250_GC_BASE + 0x00002010)  /* 0x3270 */
+
+/* --- SPI (Shader Processor Input) Registers --- */
+#define AMDBC250_REG_SPI_PG_ENABLE_STATIC_WGP_MASK (AMDBC250_GC_BASE + 0x0000229C)  /* 0x34FC */
+#define AMDBC250_REG_RLC_PG_ALWAYS_ON_WGP_MASK  (AMDBC250_GC_BASE + 0x00002B04)     /* 0x3D64 */
 
 /* --- KIQ (Kernel Interface Queue, BC-250: shift by GC_BASE=0x1260) --- */
 /* KIQ_BASE_LO at 0xE060 is WRITABLE — only writable BASE register found on BC-250.

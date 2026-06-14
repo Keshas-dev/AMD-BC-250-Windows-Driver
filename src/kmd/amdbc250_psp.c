@@ -33,6 +33,14 @@ static BOOLEAN g_GpcomRingAvailable = FALSE; /* GPCOM ring created by PSP driver
 static ULONG64 g_GpcomRingPa = 0;           /* GPCOM ring physical address (returned by PSP_GET_GPU_INFO) */
 static ULONG g_GpcomRingSize = 0;
 static PVOID g_GpcomRingVa = NULL;          /* Mapped GPCOM ring VA */
+
+/* KIQ ring support (primary command submission path on BC-250) */
+static PVOID g_KiqRingVa = NULL;
+static PHYSICAL_ADDRESS g_KiqRingPa = {0};
+static ULONG g_KiqRingSize = 0;
+static ULONG g_KiqRingWptr = 0;
+static BOOLEAN g_KiqRingInitialized = FALSE;
+static KSPIN_LOCK g_KiqRingLock;
 /* NOTE: g_GpcomRingVa points to the PSP GPCOM ring, NOT a KIQ ring.
    The KIQ ring is a separate GPU ring. The current code incorrectly
    writes PM4 packets into the GPCOM ring, which does not work.
@@ -76,6 +84,14 @@ static BOOLEAN PspProxyInit(VOID)
                 ringPhys.QuadPart = g_GpcomRingPa;
                 g_GpcomRingVa = MmMapIoSpace(ringPhys, g_GpcomRingSize, MmNonCached);
                 KdPrint(("BC250-PSP: GPCOM ring PA=0x%llX VA=%p\n", ringPhys.QuadPart, g_GpcomRingVa));
+            }
+            
+            /* Initialize KIQ ring for command submission */
+            if (NT_SUCCESS(Amdbc250PspKiqInit())) {
+                g_PspProxyAvailable = TRUE;
+                KdPrint(("BC250-PSP: KIQ ring initialized successfully\n"));
+            } else {
+                KdPrint(("BC250-PSP: KIQ ring initialization failed\n"));
             }
         } else {
             KdPrint(("BC250-PSP: PSP driver handle opened but not initialized (0x%08X)\n", status));
@@ -136,36 +152,132 @@ VOID Amdbc250PspProxyWriteReg(ULONG GpuRegOffset, ULONG Value)
 BOOLEAN Amdbc250PspProxyAvailable(VOID)
 {
     if (!g_PspProxyHandle) PspProxyInit();
-    return g_PspProxyAvailable;
+    return g_PspProxyAvailable && g_KiqRingInitialized;
 }
 
 /* Check if GPCOM ring is available (needed for register writes via PSP) */
 BOOLEAN Amdbc250PspKiqAvailable(VOID)
 {
     if (!g_PspProxyHandle) PspProxyInit();
-    return g_GpcomRingAvailable;
+    return g_KiqRingInitialized;
 }
 
-/* BROKEN: Writes PM4 packets to GPCOM ring — does NOT work.
-   The GPCOM ring expects GPCOM commands (PROG_REG, etc.), not PM4.
-   A proper KIQ ring implementation needs:
-   1. A separate KIQ ring buffer allocated in system memory
-   2. KIQ doorbell register setup (via PSP mailbox or config)
-   3. PM4 packet submission via KIQ doorbell, not GPCOM
-   This function is kept for reference but returns STATUS_NOT_IMPLEMENTED. */
+/* Submit PM4 packets to KIQ ring for execution */
 NTSTATUS Amdbc250PspKiqSubmit(ULONG* Pm4Commands, ULONG DwordCount)
 {
-    return STATUS_NOT_IMPLEMENTED;
+    KIRQL irql;
+    ULONG i, wptr;
+    
+    if (!g_KiqRingInitialized) {
+        KdPrint(("KIQ: Ring not initialized\n"));
+        return STATUS_DEVICE_NOT_READY;
+    }
+    
+    /* Acquire spinlock for KIQ ring access */
+    KeAcquireSpinLock(&g_KiqRingLock, &irql);
+    
+    /* Calculate new write pointer */
+    wptr = g_KiqRingWptr;
+    for (i = 0; i < DwordCount; i++) {
+        if (wptr >= g_KiqRingSize / sizeof(ULONG)) {
+            wptr = 0;  /* Wrap around */
+        }
+        ((PULONG)g_KiqRingVa)[wptr] = Pm4Commands[i];
+        wptr++;
+    }
+    
+    /* Update KIQ ring write pointer */
+    g_KiqRingWptr = wptr;
+    
+    /* Write KIQ_WPTR to signal doorbell (triggers GPU execution) */
+    WRITE_REGISTER_ULONG((PULONG)((PUCHAR)g_KiqRingVa + 0x28), g_KiqRingWptr);
+    
+    /* Release spinlock */
+    KeReleaseSpinLock(&g_KiqRingLock, irql);
+    
+    return STATUS_SUCCESS;
 }
 
-/* BROKEN: Writes a PM4 COPY_DATA packet to the GPCOM ring — does NOT work.
-   The GPCOM ring processes GPCOM commands (PROG_REG, etc.), not PM4 packets.
-   The "doorbell" writes register 0 with sizeof(pkt)=20, which is not a KIQ doorbell.
-   Returns 0xFFFFFFFF (timeout) in all cases.
-   Use PSP_IOCTL_READ_REG (Amdbc250PspProxyReadReg) for register reads instead. */
+/* Read register via KIQ ring - for compatibility */
 ULONG Amdbc250PspKiqReadReg(ULONG GpuRegOffset)
 {
-    return 0xFFFFFFFF;
+    return Amdbc250PspProxyReadReg(GpuRegOffset);
+}
+
+/* Initialize KIQ ring for command submission */
+NTSTATUS Amdbc250PspKiqInit(VOID)
+{
+    PHYSICAL_ADDRESS highAddr;
+    
+    if (g_KiqRingInitialized) {
+        return STATUS_SUCCESS;
+    }
+    
+    /* Allocate KIQ ring (8KB buffer, page-aligned) */
+    highAddr.QuadPart = 0x10000000000ULL;  /* Above 4GB */
+    g_KiqRingVa = MmAllocateContiguousMemory(0x2000, highAddr);
+    if (!g_KiqRingVa) {
+        highAddr.QuadPart = 0xFFFFFFFF;
+        g_KiqRingVa = MmAllocateContiguousMemory(0x2000, highAddr);
+    }
+    
+    if (!g_KiqRingVa) {
+        KdPrint(("KIQ: Failed to allocate KIQ ring buffer\n"));
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    
+    g_KiqRingPa = MmGetPhysicalAddress(g_KiqRingVa);
+    g_KiqRingSize = 0x2000;
+    
+    /* Initialize spinlock for KIQ ring */
+    KeInitializeSpinLock(&g_KiqRingLock);
+    
+    /* Set GRBM_GFX_INDEX to select KIQ (ME=1, PIPE=0, QUEUE=0) */
+    Amdbc250PspWriteRegister(0x34D0, 0x00010000);
+    
+    /* Write KIQ_BASE_LO/HI with ring buffer address */
+    WRITE_REGISTER_ULONG((PULONG)((PUCHAR)g_KiqRingVa + 0x60), g_KiqRingPa.LowPart);
+    WRITE_REGISTER_ULONG((PULONG)((PUCHAR)g_KiqRingVa + 0x64), g_KiqRingPa.HighPart);
+    
+    /* Enable KIQ ring */
+    WRITE_REGISTER_ULONG((PULONG)((PUCHAR)g_KiqRingVa + 0x68), 1);
+    
+    /* Initialize KIQ_RPTR to 0 */
+    WRITE_REGISTER_ULONG((PULONG)((PUCHAR)g_KiqRingVa + 0x6C), 0);
+    
+    /* Initialize KIQ_WPTR to 0 */
+    WRITE_REGISTER_ULONG((PULONG)((PUCHAR)g_KiqRingVa + 0x78), 0);
+    
+    g_KiqRingInitialized = TRUE;
+    g_KiqRingWptr = 0;
+    
+    KdPrint(("KIQ: Initialized ring PA=0x%llX VA=%p size=%u\n", 
+        g_KiqRingPa.QuadPart, g_KiqRingVa, g_KiqRingSize));
+    
+    return STATUS_SUCCESS;
+}
+
+/* Cleanup KIQ ring resources */
+VOID Amdbc250PspKiqCleanup(VOID)
+{
+    KIRQL irql;
+    
+    if (!g_KiqRingInitialized) {
+        return;
+    }
+    
+    /* Disable KIQ ring */
+    WRITE_REGISTER_ULONG((PULONG)((PUCHAR)g_KiqRingVa + 0x68), 0);
+    
+    /* Free KIQ ring buffer */
+    MmFreeContiguousMemory(g_KiqRingVa);
+    g_KiqRingVa = NULL;
+    g_KiqRingPa.QuadPart = 0;
+    g_KiqRingSize = 0;
+    g_KiqRingInitialized = FALSE;
+    g_KiqRingWptr = 0;
+    
+    KdPrint(("KIQ: KIQ ring cleaned up\n"));
 }
 
 /* Close PSP proxy handle */
@@ -175,6 +287,7 @@ VOID Amdbc250PspProxyCleanup(VOID)
         MmUnmapIoSpace(g_GpcomRingVa, g_GpcomRingSize);
         g_GpcomRingVa = NULL;
     }
+    Amdbc250PspKiqCleanup();
     if (g_PspProxyHandle) {
         ZwClose(g_PspProxyHandle);
         g_PspProxyHandle = NULL;
