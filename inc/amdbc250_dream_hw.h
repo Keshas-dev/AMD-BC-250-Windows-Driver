@@ -201,10 +201,10 @@ Environment:
 /* --- Graphics Command Processor (GFX10 CP) --- */
 /* NOTE: CP_ME_CNTL/MEC_CNTL at 0xC060-C0FF are NBIO addresses, NOT shifted by GC_BASE.
  *       NBIO firewall BLOCKS writes to 0xC000-0xCFFF from ALL paths.
- *       BC-250 (Cyan Skillfish) has these registers at native Navi10 offsets.
- *       GC_BASE-shifted aliases (0xD2C0, 0xD2E0) return 0xFFFFFFFF (unmapped).
- *       Writes are silently ignored; CP halt/resume via registers does not work. */
-#define AMDBC250_REG_CP_ME_CNTL         0x0000C060  /* CP ME control (NBIO, readonly)  */
+ *       On BC-250, the GC_BASE-shifted alias for CP_ME_CNTL is at 0x4A74
+ *       (mmCP_ME_CNTL = 0x0E05, byte offset = 0x3814, GC_BASE + 0x3814 = 0x4A74).
+ *       Writes to 0xC060 are silently ignored. */
+#define AMDBC250_REG_CP_ME_CNTL         (AMDBC250_GC_BASE + 0x00003814)  /* 0x4A74, GC_BASE-shifted */
 #define AMDBC250_REG_CP_ME_STATUS       0x0000C064  /* CP ME status (NBIO)             */
 #define AMDBC250_REG_CP_PFP_UCODE_ADDR  0x0000C0A0  /* PFP firmware addr (NBIO)        */
 #define AMDBC250_REG_CP_PFP_UCODE_DATA  0x0000C0A4  /* PFP firmware data (NBIO)        */

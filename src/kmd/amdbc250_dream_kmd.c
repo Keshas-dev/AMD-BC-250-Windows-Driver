@@ -1303,7 +1303,7 @@ DreamV3WritePm4Type0(
         
         /* Fill remaining space with NOPs */
         for (ULONG i = 0; i < NopCount; i++) {
-            Ring[WPtr / sizeof(ULONG)] = PM4_TYPE3_HDR(IT_NOP, 0);
+            Ring[WPtr / sizeof(ULONG)] = PM4_TYPE2_NOP;
             WPtr += sizeof(ULONG);
         }
         WPtr = 0;  /* Wrap to beginning */
@@ -1347,7 +1347,7 @@ DreamV3WritePm4Type3(
         ULONG NopCount = SpaceLeft / sizeof(ULONG);
         
         for (ULONG i = 0; i < NopCount; i++) {
-            Ring[WPtr / sizeof(ULONG)] = PM4_TYPE3_HDR(IT_NOP, 0);
+            Ring[WPtr / sizeof(ULONG)] = PM4_TYPE2_NOP;
             WPtr += sizeof(ULONG);
         }
         WPtr = 0;  /* Wrap to beginning */
@@ -1388,7 +1388,7 @@ DreamV3WriteEopFence(
         ULONG NopCount = SpaceLeft / sizeof(ULONG);
         
         for (ULONG i = 0; i < NopCount; i++) {
-            Ring[WPtr / sizeof(ULONG)] = PM4_TYPE3_HDR(IT_NOP, 0);
+            Ring[WPtr / sizeof(ULONG)] = PM4_TYPE2_NOP;
             WPtr += sizeof(ULONG);
         }
         WPtr = 0;
@@ -1407,14 +1407,14 @@ DreamV3WriteEopFence(
     Ring[WPtr / sizeof(ULONG)] = Header;
     WPtr += sizeof(ULONG);
     
-    /* Control: EVENT_TYPE=0x46(EOP) | EVENT_INDEX=5 | DATA_SEL=1(write fence) | INT_SEL=1(interrupt) */
-    Ring[WPtr / sizeof(ULONG)] = 0xA0000246;
+    /* Control: EVENT_TYPE=0x47(EOP) | EVENT_INDEX=5 | DATA_SEL=2(write 64-bit fence) | INT_SEL=2(interrupt) */
+    Ring[WPtr / sizeof(ULONG)] = (0x47 << 0) | (5 << 8) | (2 << 24) | (2 << 28);
     WPtr += sizeof(ULONG);
     
     /* Address (64-bit physical, DWORD aligned) */
     Ring[WPtr / sizeof(ULONG)] = (ULONG)(FencePA.QuadPart & 0xFFFFFFFC);
     WPtr += sizeof(ULONG);
-    Ring[WPtr / sizeof(ULONG)] = (ULONG)(FencePA.QuadPart >> 32);
+    Ring[WPtr / sizeof(ULONG)] = (ULONG)((FencePA.QuadPart >> 32) & 0xFFFF);
     WPtr += sizeof(ULONG);
     
     /* Data (64-bit fence value) */
@@ -1444,7 +1444,7 @@ DreamV3SubmitGfxRing(
                 AMDBC250_GRBM_GFX_INDEX_KIQ_VAL);
             DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_HQD_PQ_WPTR_LO, WPtr);
             DreamV3WriteRegister(DevExt, DevExt->GrbmGfxIndexOffset,
-                AMDBC250_GRBM_GFX_INDEX_SE_BROADCAST);
+                AMDBC250_GRBM_GFX_INDEX_BROADCAST_VAL);
         } else {
             DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_GFX_RING0_WPTR, WPtr);
         }
@@ -1502,7 +1502,7 @@ DreamV3DdiSubmitCommand(
             ULONG NopCount = SpaceLeft / sizeof(ULONG);
             
             for (ULONG i = 0; i < NopCount; i++) {
-                Ring[WPtr / sizeof(ULONG)] = PM4_TYPE3_HDR(IT_NOP, 0);
+                Ring[WPtr / sizeof(ULONG)] = PM4_TYPE2_NOP;
                 WPtr += sizeof(ULONG);
             }
             WPtr = 0;
@@ -3479,17 +3479,21 @@ DreamV3DeviceControl(
                 break;
             }
 
+            KIRQL OldIrql;
+            KeAcquireSpinLock(&DevExt->GfxRing.Lock, &OldIrql);
+
             volatile PULONG Ring = (volatile PULONG)DevExt->GfxRing.VirtualAddress;
             ULONG WPtr = DevExt->GfxRing.WritePointer;
             ULONG RingSize = (ULONG)DevExt->GfxRing.SizeInBytes;
             ULONG BytesNeeded = SendPm4->CommandCount * sizeof(ULONG);
+            ULONG EopSize = 6 * sizeof(ULONG); /* EOP packet is 6 DWORDs */
+            ULONG TotalBytes = BytesNeeded + (SendPm4->FenceValue > 0 ? EopSize : 0);
 
-            /* Ring wrap if needed */
-            if (WPtr + BytesNeeded > RingSize) {
-                /* Fill remaining with NOP, wrap to start */
+            /* Ring wrap if needed (including space for EOP) */
+            if (WPtr + TotalBytes > RingSize) {
                 ULONG NopCount = (RingSize - WPtr) / sizeof(ULONG);
                 for (ULONG i = 0; i < NopCount; i++) {
-                    Ring[WPtr / sizeof(ULONG) + i] = 0xB8000000; /* PM4_TYPE3_NOP */
+                    Ring[WPtr / sizeof(ULONG) + i] = PM4_TYPE2_NOP;
                 }
                 WPtr = 0;
             }
@@ -3499,30 +3503,30 @@ DreamV3DeviceControl(
             RtlCopyMemory((PVOID)&Ring[idx], SendPm4->Commands, BytesNeeded);
             WPtr += BytesNeeded;
 
-            /* Update write pointer */
+            /* Write EOP fence BEFORE doorbell (fence must be in ring before CP reads it) */
+            if (SendPm4->FenceValue > 0) {
+                DreamV3WriteEopFence(DevExt, (ULONG64)SendPm4->FenceValue);
+                WPtr = DevExt->GfxRing.WritePointer;
+                DevExt->GlobalFence.LastSubmittedValue = (ULONG64)SendPm4->FenceValue;
+            }
+
             DevExt->GfxRing.WritePointer = WPtr;
             KeMemoryBarrier();
 
             /* Kick doorbell — write WPTR to MMIO */
             if (DevExt->UseHqdKiq) {
-                /* HQD KIQ path: select queue via SRBM, write WPTR to CP_HQD_PQ_WPTR_LO */
                 DreamV3WriteRegister(DevExt, DevExt->GrbmGfxIndexOffset,
                     AMDBC250_GRBM_GFX_INDEX_KIQ_VAL);
                 DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_HQD_PQ_WPTR_LO, WPtr);
                 DreamV3WriteRegister(DevExt, DevExt->GrbmGfxIndexOffset,
-                    AMDBC250_GRBM_GFX_INDEX_SE_BROADCAST);
+                    AMDBC250_GRBM_GFX_INDEX_BROADCAST_VAL);
             } else if (DevExt->UseKiqRing) {
-                /* Old KIQ path: direct KIQ_WPTR write (no SRBM selection) */
                 DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_KIQ_WPTR, WPtr);
             } else {
                 DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_GFX_RING0_WPTR, WPtr);
             }
 
-            /* Handle fence */
-            if (SendPm4->FenceValue > 0) {
-                DreamV3WriteEopFence(DevExt, (ULONG64)SendPm4->FenceValue);
-                DevExt->GlobalFence.LastSubmittedValue = (ULONG64)SendPm4->FenceValue;
-            }
+            KeReleaseSpinLock(&DevExt->GfxRing.Lock, OldIrql);
 
             KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_TRACE_LEVEL,
                 "AMDBC250-DREAM-V4.3: SEND_PM4: %lu DWORDs, WPtr=%u, fence=%u\n",

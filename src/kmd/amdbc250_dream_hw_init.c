@@ -452,7 +452,7 @@ DreamV3HwInitGfxRing(
 
     /* Try GFX ring first (BASE_LO is typically read-only on BC-250) */
     ULONG BaseLoVal = (ULONG)(RingPhys.QuadPart & 0xFFFFFF00);
-    ULONG BaseHiVal = (ULONG)(RingPhys.QuadPart >> 40);
+    ULONG BaseHiVal = (ULONG)(RingPhys.QuadPart >> 32);
 
     DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_GFX_RING0_BASE_LO, BaseLoVal);
     DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_GFX_RING0_BASE_HI, BaseHiVal);
@@ -489,7 +489,7 @@ DreamV3HwInitGfxRing(
              * No probe needed — offset verified empirically on BC-250 P5.00 BIOS. */
             DevExt->GrbmGfxIndexOffset = AMDBC250_REG_GRBM_GFX_INDEX;
 
-            if (TRUE) {
+            /* Full HQD init sequence (Linux gfx_v10_0_kiq_init_register) */
                 /* Full HQD init sequence (Linux gfx_v10_0_kiq_init_register) */
                 /* 0. Select KIQ queue: ME=1, PIPE=0, QUEUE=0 */
                 DreamV3WriteRegister(DevExt, DevExt->GrbmGfxIndexOffset,
@@ -542,9 +542,9 @@ DreamV3HwInitGfxRing(
                 DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_HQD_ACTIVE, 1);
                 KeStallExecutionProcessor(1);
 
-                /* 13. Restore GRBM_GFX_INDEX to broadcast */
+                /* 13. Restore GRBM_GFX_INDEX to full broadcast */
                 DreamV3WriteRegister(DevExt, DevExt->GrbmGfxIndexOffset,
-                    AMDBC250_GRBM_GFX_INDEX_SE_BROADCAST);
+                    AMDBC250_GRBM_GFX_INDEX_BROADCAST_VAL);
 
                 /* 14. Notify RLC scheduler */
                 DreamV3WriteRegister(DevExt, AMDBC250_REG_RLC_CP_SCHEDULERS,
@@ -554,10 +554,6 @@ DreamV3HwInitGfxRing(
                 KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                     "AMDBC250-DREAM-V4.3: KIQ HQD init complete (GRBM_GFX_INDEX at 0x%04X)\n",
                     DevExt->GrbmGfxIndexOffset));
-            } else {
-                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
-                    "AMDBC250-DREAM-V4.3: GRBM_GFX_INDEX not found — KIQ unusable, skipping HQD init\n"));
-            }
         } else {
             KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
                        "AMDBC250-DREAM-V4.3: KIQ BASE_LO also read-only (0x%08X) — ring unusable\n",
