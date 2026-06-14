@@ -1,0 +1,8 @@
+# Normalize line endings for text files
+*.c text eol=lf
+*.h text eol=lf
+*.bat text eol=crlf
+*.inf text eol=crlf
+*.sys binary
+*.dll binary
+*.exe binary
