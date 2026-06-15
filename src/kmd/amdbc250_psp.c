@@ -5,6 +5,13 @@
 #define GPU_BAR5_PHYSICAL             0xFE800000ULL
 #define GPU_BAR5_SIZE                 0x80000
 
+// PSP driver IOCTL struct definitions
+typedef struct _PSP_KIQ_SUBMIT_REQUEST {
+    ULONG CommandCount;
+    ULONG Reserved[3];
+    ULONG Commands[64];
+} PSP_KIQ_SUBMIT_REQUEST;
+
 /* PSP driver IOCTL codes (must match PspDriver.sys from AGENTS.md) */
 #define PSP_IOCTL_READ_REG      CTL_CODE(FILE_DEVICE_UNKNOWN, 0x800, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #define PSP_IOCTL_WRITE_REG     CTL_CODE(FILE_DEVICE_UNKNOWN, 0x801, METHOD_BUFFERED, FILE_ANY_ACCESS)
@@ -173,23 +180,29 @@ BOOLEAN Amdbc250PspKiqIsInitialized(VOID)
 NTSTATUS Amdbc250PspKiqSubmit(ULONG* Pm4Commands, ULONG DwordCount)
 {
     IO_STATUS_BLOCK iosb;
-    ULONG inBuf[65];  /* [0] = count, [1..64] = PM4 dwords */
+    PSP_KIQ_SUBMIT_REQUEST req;
     
     if (!g_KiqRingInitialized) {
         KdPrint(("KIQ: Ring not initialized\n"));
         return STATUS_DEVICE_NOT_READY;
     }
     
-    /* Build input buffer: {cmdCount, pm4_dword_0, pm4_dword_1, ...} */
-    inBuf[0] = DwordCount;
-    for (ULONG i = 0; i < DwordCount && i < 64; i++) {
-        inBuf[1 + i] = Pm4Commands[i];
+    if (DwordCount == 0 || DwordCount > 64) {
+        return STATUS_INVALID_PARAMETER;
     }
     
-    /* Send PM4 commands to PSP driver via KIQ_SUBMIT IOCTL (0x818)
-       PSP driver handles ring buffer write + doorbell via KIQ_WPTR */
+    /* Build input buffer using proper struct layout */
+    req.CommandCount = DwordCount;
+    req.Reserved[0] = 0;
+    req.Reserved[1] = 0;
+    req.Reserved[2] = 0;
+    for (ULONG i = 0; i < DwordCount; i++) {
+        req.Commands[i] = Pm4Commands[i];
+    }
+    
+    /* Send PM4 commands to PSP driver via KIQ_SUBMIT IOCTL (0x818) */
     NTSTATUS status = ZwDeviceIoControlFile(g_PspProxyHandle, NULL, NULL, NULL,
-        &iosb, PSP_IOCTL_KIQ_SUBMIT, inBuf, (1 + DwordCount) * sizeof(ULONG), NULL, 0);
+        &iosb, PSP_IOCTL_KIQ_SUBMIT, &req, sizeof(req), NULL, 0);
     
     if (NT_SUCCESS(status)) {
         g_KiqRingWptr += DwordCount;
