@@ -21,6 +21,11 @@ typedef struct _PSP_KIQ_SUBMIT_REQUEST {
 #define PSP_IOCTL_LOAD_TOC      CTL_CODE(FILE_DEVICE_UNKNOWN, 0x820, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #define PSP_IOCTL_REG_PROG      CTL_CODE(FILE_DEVICE_UNKNOWN, 0x816, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #define PSP_IOCTL_KIQ_SUBMIT    CTL_CODE(FILE_DEVICE_UNKNOWN, 0x818, METHOD_BUFFERED, FILE_ANY_ACCESS) /* KIQ ring submit */
+#define PSP_IOCTL_KIQ_LOAD_FW   CTL_CODE(FILE_DEVICE_UNKNOWN, 0x822, METHOD_BUFFERED, FILE_ANY_ACCESS) /* KIQ LOAD_IP_FW via PM4 */
+#define PSP_CMD_BUF_SIZE        1024  /* Command buffer size for PSP firmware commands */
+
+/* PSP ring frame command IDs (from Linux psp_gfx_if.h) */
+#define GFX_CMD_ID_LOAD_IP_FW   0x00000006
 
 /* PSP_GPU_INFO struct (must match PspIoctl.h from PSP driver repo) */
 typedef struct _PSP_GPU_INFO_REMOTE {
@@ -49,6 +54,13 @@ static ULONG g_KiqRingSize = 0;
 static ULONG g_KiqRingWptr = 0;
 static BOOLEAN g_KiqRingInitialized = FALSE;
 static KSPIN_LOCK g_KiqRingLock;
+
+/* Firmware allocation for KIQ LOAD_IP_FW */
+static PVOID g_FwBuffer = NULL;
+static PHYSICAL_ADDRESS g_FwBufferPa = {0};
+static ULONG g_FwBufferSize = 0;
+static ULONG g_FwCount = 0;
+static KSPIN_LOCK g_FwLock;
 /* NOTE: g_GpcomRingVa points to the PSP GPCOM ring, NOT a KIQ ring.
    The KIQ ring is a separate GPU ring. The current code incorrectly
    writes PM4 packets into the GPCOM ring, which does not work.
@@ -217,9 +229,119 @@ ULONG Amdbc250PspKiqReadReg(ULONG GpuRegOffset)
     return Amdbc250PspProxyReadReg(GpuRegOffset);
 }
 
+/*
+ * Load GPU firmware via KIQ ring using PM4 LOAD_IP_FW command.
+ * This bypasses the GPCOM ring path which is broken on BC-250 BIOS 5.00.
+ * 
+ * Uses PSP driver's KIQ_SUBMIT (0x818) with a command buffer that has
+ * the LOAD_IP_FW data at specific offsets (matching PSP driver's format).
+ */
+NTSTATUS Amdbc250PspKiqLoadFirmware(ULONG FwType, ULONG FwSize, PHYSICAL_ADDRESS FwPa)
+{
+    if (!g_KiqRingInitialized) {
+        NTSTATUS status = Amdbc250PspKiqInit();
+        if (!NT_SUCCESS(status)) {
+            return status;
+        }
+    }
+
+    if (!g_PspProxyHandle) {
+        return STATUS_DEVICE_NOT_READY;
+    }
+
+    /* Build command buffer matching PSP driver's expected format */
+    ULONG cmd[64] = {0};
+    
+    /* Header format expected by PSP firmware:
+     * cmd[0] = buffer_size (1024)
+     * cmd[1] = 1 (unknown flag)
+     * cmd[2] = GFX_CMD_ID_LOAD_IP_FW (0x06)
+     * cmd[7-10] = firmware PA, size, type
+     */
+    cmd[0] = PSP_CMD_BUF_SIZE;
+    cmd[1] = 1;
+    cmd[2] = GFX_CMD_ID_LOAD_IP_FW;
+    cmd[7] = (ULONG)(FwPa.QuadPart & 0xFFFFFFFF);
+    cmd[8] = (ULONG)(FwPa.QuadPart >> 32);
+    cmd[9] = FwSize;
+    cmd[10] = FwType;
+
+    KdPrint(("KIQ_LOAD_FW: type=%u size=%u PA=0x%llX\n", FwType, FwSize, FwPa.QuadPart));
+
+    /* Submit via KIQ_SUBMIT - PSP driver will ring the KIQ doorbell */
+    IO_STATUS_BLOCK iosb;
+    NTSTATUS status = ZwDeviceIoControlFile(g_PspProxyHandle, NULL, NULL, NULL,
+        &iosb, PSP_IOCTL_KIQ_SUBMIT, cmd, sizeof(cmd), NULL, 0);
+
+    return status;
+}
+
+/* Allocate shared memory for firmware loading via KIQ */
+NTSTATUS Amdbc250PspAllocateFirmwareBuffer(ULONG Size)
+{
+    KeAcquireSpinLock(&g_FwLock, NULL);
+    
+    if (g_FwBuffer) {
+        if (g_FwBufferSize >= Size) {
+            KeReleaseSpinLock(&g_FwLock, NULL);
+            return STATUS_SUCCESS;
+        }
+        /* Free existing buffer */
+        MmFreeContiguousMemory(g_FwBuffer);
+        g_FwBuffer = NULL;
+        g_FwBufferPa.QuadPart = 0;
+        g_FwBufferSize = 0;
+    }
+    
+    PHYSICAL_ADDRESS low = {0};
+    PHYSICAL_ADDRESS high = {0};
+    high.QuadPart = 0xFFFFFFFFULL;
+    
+    g_FwBuffer = MmAllocateContiguousMemory(Size, low);
+    if (!g_FwBuffer) {
+        KeReleaseSpinLock(&g_FwLock, NULL);
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    
+    g_FwBufferPa = MmGetPhysicalAddress(g_FwBuffer);
+    g_FwBufferSize = Size;
+    g_FwCount = 0;
+    
+    KeReleaseSpinLock(&g_FwLock, NULL);
+    KdPrint(("FW_BUF: allocated %u bytes at PA=0x%llX\n", Size, g_FwBufferPa.QuadPart));
+    return STATUS_SUCCESS;
+}
+
+/* Copy firmware data to the shared buffer and return its PA */
+NTSTATUS Amdbc250PspCopyFirmwareData(PUCHAR FirmwareData, ULONG Size)
+{
+    if (!g_FwBuffer || !FirmwareData || Size == 0) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    
+    KeAcquireSpinLock(&g_FwLock, NULL);
+    if (Size > g_FwBufferSize) {
+        KeReleaseSpinLock(&g_FwLock, NULL);
+        return STATUS_BUFFER_OVERFLOW;
+    }
+    
+    RtlCopyMemory(g_FwBuffer, FirmwareData, Size);
+    g_FwCount++;
+    KeReleaseSpinLock(&g_FwLock, NULL);
+    return STATUS_SUCCESS;
+}
+
 /* Initialize KIQ ring for command submission */
 NTSTATUS Amdbc250PspKiqInit(VOID)
 {
+    /* Initialize spin locks if not already done */
+    static BOOLEAN locksInitialized = FALSE;
+    if (!locksInitialized) {
+        KeInitializeSpinLock(&g_KiqRingLock);
+        KeInitializeSpinLock(&g_FwLock);
+        locksInitialized = TRUE;
+    }
+    
     /* Ensure PSP proxy handle is open */
     if (!g_PspProxyHandle) {
         KdPrint(("KIQ: PSP proxy handle not open, calling PspProxyInit\n"));
@@ -260,6 +382,14 @@ VOID Amdbc250PspKiqCleanup(VOID)
     g_KiqRingInitialized = FALSE;
     g_KiqRingWptr = 0;
     g_KiqRingSize = 0;
+    
+    /* Free firmware buffer */
+    if (g_FwBuffer) {
+        MmFreeContiguousMemory(g_FwBuffer);
+        g_FwBuffer = NULL;
+        g_FwBufferPa.QuadPart = 0;
+        g_FwBufferSize = 0;
+    }
     
     KdPrint(("KIQ: KIQ cleanup (PSP driver manages ring)\n"));
 }
