@@ -88,21 +88,21 @@
 
 ---
 
-## Current Blocker: MMIO Access
+## Windows 11 26100 Compatibility (2026-06-15)
 
-**Problem:** MmMapIoSpace returns NULL or reads all zeros for BAR4=0xFE800000 (512KB MMIO regs).
+### Problem
+`MmMapIoSpace` fails for GPU BAR5 (`0xFE800000`) on Windows 11 26100, blocking direct MMIO access.
 
-**Root cause:** PS5 SMU (System Management Unit) blocks GPU MMIO access without PSP firmware authentication. Linux amdgpu driver loads firmware to unlock compute.
+### Solution
+Implemented GPU driver proxy support:
+- GPU driver maps BAR5 and exposes proxy IOCTLs (0x900/0x901)
+- PSP driver falls back to proxy when direct mapping fails
+- Required install sequence: GPU driver first, then PSP driver
 
-**BootConfig from registry:**
-- Descriptor 0: PA=0xC0000000, 256MB (VRAM)
-- Descriptor 1: PA=0xD0000000, 2MB
-- Descriptor 2: PA=0xFE800000, 512KB (MMIO registers)
-
-**Next steps:**
-1. Try MmMapIoSpace on VRAM BAR (0xC0000000, 256MB) — may not be blocked
-2. Investigate PSP firmware auth (Linux amdgpu has firmware loading)
-3. Consider SDMA-based command submission instead of GFX ring
+### Test Results
+- `safe-test.exe -m`: ✅ GPU_ID=0x9FFF9700, BAR5 accessible
+- `test-psp-driver.exe -m`: ✅ C2PMSG_81=0xF0000010 (PSP alive)
+- `test-psp-driver.exe -i`: ✅ INIT_HW uses GPU proxy fallback
 
 ---
 
