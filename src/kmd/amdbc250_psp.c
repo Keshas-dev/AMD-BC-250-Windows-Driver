@@ -13,6 +13,7 @@
 #define PSP_IOCTL_GET_GPU_INFO  CTL_CODE(FILE_DEVICE_UNKNOWN, 0x815, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #define PSP_IOCTL_LOAD_TOC      CTL_CODE(FILE_DEVICE_UNKNOWN, 0x820, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #define PSP_IOCTL_REG_PROG      CTL_CODE(FILE_DEVICE_UNKNOWN, 0x816, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define PSP_IOCTL_KIQ_SUBMIT    CTL_CODE(FILE_DEVICE_UNKNOWN, 0x818, METHOD_BUFFERED, FILE_ANY_ACCESS) /* KIQ ring submit */
 
 /* PSP_GPU_INFO struct (must match PspIoctl.h from PSP driver repo) */
 typedef struct _PSP_GPU_INFO_REMOTE {
@@ -171,43 +172,30 @@ BOOLEAN Amdbc250PspKiqIsInitialized(VOID)
 /* Submit PM4 packets to KIQ ring for execution */
 NTSTATUS Amdbc250PspKiqSubmit(ULONG* Pm4Commands, ULONG DwordCount)
 {
-    KIRQL irql;
-    ULONG i, wptr;
     IO_STATUS_BLOCK iosb;
-    ULONG inBuf[3];
+    ULONG inBuf[65];  /* [0] = count, [1..64] = PM4 dwords */
     
     if (!g_KiqRingInitialized) {
         KdPrint(("KIQ: Ring not initialized\n"));
         return STATUS_DEVICE_NOT_READY;
     }
     
-    /* Acquire spinlock for KIQ ring access */
-    KeAcquireSpinLock(&g_KiqRingLock, &irql);
-    
-    /* Calculate new write pointer */
-    wptr = g_KiqRingWptr;
-    for (i = 0; i < DwordCount; i++) {
-        if (wptr >= g_KiqRingSize / sizeof(ULONG)) {
-            wptr = 0;  /* Wrap around */
-        }
-        ((PULONG)g_KiqRingVa)[wptr] = Pm4Commands[i];
-        wptr++;
+    /* Build input buffer: {cmdCount, pm4_dword_0, pm4_dword_1, ...} */
+    inBuf[0] = DwordCount;
+    for (ULONG i = 0; i < DwordCount && i < 64; i++) {
+        inBuf[1 + i] = Pm4Commands[i];
     }
     
-    /* Update KIQ ring write pointer */
-    g_KiqRingWptr = wptr;
+    /* Send PM4 commands to PSP driver via KIQ_SUBMIT IOCTL (0x818)
+       PSP driver handles ring buffer write + doorbell via KIQ_WPTR */
+    NTSTATUS status = ZwDeviceIoControlFile(g_PspProxyHandle, NULL, NULL, NULL,
+        &iosb, PSP_IOCTL_KIQ_SUBMIT, inBuf, (1 + DwordCount) * sizeof(ULONG), NULL, 0);
     
-    /* Release spinlock before IOCTL */
-    KeReleaseSpinLock(&g_KiqRingLock, irql);
+    if (NT_SUCCESS(status)) {
+        g_KiqRingWptr += DwordCount;
+    }
     
-    /* Write KIQ_WPTR via PSP_IOCTL_WRITE_REG to signal doorbell (triggers GPU execution) */
-    inBuf[0] = 0xE078;  /* KIQ_WPTR */
-    inBuf[1] = g_KiqRingWptr;
-    inBuf[2] = 0;
-    ZwDeviceIoControlFile(g_PspProxyHandle, NULL, NULL, NULL,
-        &iosb, PSP_IOCTL_WRITE_REG, inBuf, 3*sizeof(ULONG), NULL, 0);
-    
-    return STATUS_SUCCESS;
+    return status;
 }
 
 /* Read register via KIQ ring - for compatibility */
@@ -219,22 +207,6 @@ ULONG Amdbc250PspKiqReadReg(ULONG GpuRegOffset)
 /* Initialize KIQ ring for command submission */
 NTSTATUS Amdbc250PspKiqInit(VOID)
 {
-    PHYSICAL_ADDRESS highAddr;
-    
-    if (g_KiqRingInitialized) {
-        return STATUS_SUCCESS;
-    }
-    
-    /*
-     * KIQ register writes MUST go through PSP_IOCTL_WRITE_REG.
-     * GPU BAR5 (0xFE800000) cannot write KIQ registers (hardware
-     * read-only from GPU). Only PSP driver has privileged BAR5
-     * at 0xFD600000 via PSP_IOCTL_WRITE_REG.
-     *
-     * Do NOT use Amdbc250PspWriteRegister (corrupts via PspReg MP0 offset).
-     * Do NOT use Amdbc250PspProxyWriteReg (diverts to REG_PROG no-op).
-     */
-    
     /* Ensure PSP proxy handle is open */
     if (!g_PspProxyHandle) {
         KdPrint(("KIQ: PSP proxy handle not open, calling PspProxyInit\n"));
@@ -250,61 +222,14 @@ NTSTATUS Amdbc250PspKiqInit(VOID)
         return STATUS_SUCCESS;
     }
     
-    /* Allocate KIQ ring (8KB buffer, page-aligned) */
-    highAddr.QuadPart = 0x10000000000ULL;  /* Above 4GB */
-    g_KiqRingVa = MmAllocateContiguousMemory(0x2000, highAddr);
-    if (!g_KiqRingVa) {
-        highAddr.QuadPart = 0xFFFFFFFF;
-        g_KiqRingVa = MmAllocateContiguousMemory(0x2000, highAddr);
-    }
-    
-    if (!g_KiqRingVa) {
-        KdPrint(("KIQ: Failed to allocate KIQ ring buffer\n"));
-        return STATUS_INSUFFICIENT_RESOURCES;
-    }
-    
-    g_KiqRingPa = MmGetPhysicalAddress(g_KiqRingVa);
-    g_KiqRingSize = 0x2000;
-    KeInitializeSpinLock(&g_KiqRingLock);
-    
-    /* Write KIQ registers via PSP_IOCTL_WRITE_REG (privileged PSP path) */
-    {
-        IO_STATUS_BLOCK iosb;
-        ULONG inBuf[3];
-        
-        inBuf[0] = 0x34D0; inBuf[1] = 0x00010000; inBuf[2] = 0;
-        ZwDeviceIoControlFile(g_PspProxyHandle, NULL, NULL, NULL,
-            &iosb, PSP_IOCTL_WRITE_REG, inBuf, 3*sizeof(ULONG), NULL, 0);
-        
-        inBuf[0] = 0xE060; inBuf[1] = g_KiqRingPa.LowPart;
-        ZwDeviceIoControlFile(g_PspProxyHandle, NULL, NULL, NULL,
-            &iosb, PSP_IOCTL_WRITE_REG, inBuf, 3*sizeof(ULONG), NULL, 0);
-        
-        inBuf[0] = 0xE064; inBuf[1] = g_KiqRingPa.HighPart;
-        ZwDeviceIoControlFile(g_PspProxyHandle, NULL, NULL, NULL,
-            &iosb, PSP_IOCTL_WRITE_REG, inBuf, 3*sizeof(ULONG), NULL, 0);
-        
-        inBuf[0] = 0xE068; inBuf[1] = 1;  /* Enable KIQ */
-        ZwDeviceIoControlFile(g_PspProxyHandle, NULL, NULL, NULL,
-            &iosb, PSP_IOCTL_WRITE_REG, inBuf, 3*sizeof(ULONG), NULL, 0);
-        
-        inBuf[0] = 0xE06C; inBuf[1] = 0;  /* RPTR = 0 */
-        ZwDeviceIoControlFile(g_PspProxyHandle, NULL, NULL, NULL,
-            &iosb, PSP_IOCTL_WRITE_REG, inBuf, 3*sizeof(ULONG), NULL, 0);
-        
-        inBuf[0] = 0xE078; inBuf[1] = 0;  /* WPTR = 0 */
-        ZwDeviceIoControlFile(g_PspProxyHandle, NULL, NULL, NULL,
-            &iosb, PSP_IOCTL_WRITE_REG, inBuf, 3*sizeof(ULONG), NULL, 0);
-        
-        KdPrint(("KIQ: Wrote KIQ registers via PSP_IOCTL_WRITE_REG (handle=0x%p, RingPA=0x%llX)\n", 
-            g_PspProxyHandle, g_KiqRingPa.QuadPart));
-    }
-    
+    /* PSP driver handles KIQ ring initialization internally via PspKiqInit().
+       We just need a dummy buffer for PM4 commands in Amdbc250PspKiqSubmit.
+       The actual ring buffer is in PSP driver's g_RingBuffer. */
     g_KiqRingInitialized = TRUE;
     g_KiqRingWptr = 0;
+    g_KiqRingSize = 0x1000;  /* PSP driver uses 4KB ring */
     
-    KdPrint(("KIQ: Initialized ring PA=0x%llX VA=%p size=%u\n", 
-        g_KiqRingPa.QuadPart, g_KiqRingVa, g_KiqRingSize));
+    KdPrint(("KIQ: Using PSP driver's KIQ ring implementation\n"));
     
     return STATUS_SUCCESS;
 }
@@ -312,29 +237,18 @@ NTSTATUS Amdbc250PspKiqInit(VOID)
 /* Cleanup KIQ ring resources */
 VOID Amdbc250PspKiqCleanup(VOID)
 {
-    IO_STATUS_BLOCK iosb;
-    ULONG inBuf[3];
-
+    /* PSP driver handles KIQ ring cleanup internally via PspKiqCleanup().
+       We don't allocate our own ring buffer anymore. */
     if (!g_KiqRingInitialized) {
         return;
     }
-
-    /* Disable KIQ ring via PSP proxy (KIQ_CNTL at 0xE068) */
-    if (g_PspProxyHandle) {
-        inBuf[0] = 0xE068; inBuf[1] = 0; inBuf[2] = 0;
-        ZwDeviceIoControlFile(g_PspProxyHandle, NULL, NULL, NULL,
-            &iosb, PSP_IOCTL_WRITE_REG, inBuf, 3*sizeof(ULONG), NULL, 0);
-    }
-
-    /* Free KIQ ring buffer */
-    MmFreeContiguousMemory(g_KiqRingVa);
-    g_KiqRingVa = NULL;
-    g_KiqRingPa.QuadPart = 0;
-    g_KiqRingSize = 0;
+    
+    /* No need to disable KIQ_CNTL - PSP driver handles this */
     g_KiqRingInitialized = FALSE;
     g_KiqRingWptr = 0;
-
-    KdPrint(("KIQ: KIQ ring cleaned up\n"));
+    g_KiqRingSize = 0;
+    
+    KdPrint(("KIQ: KIQ cleanup (PSP driver manages ring)\n"));
 }
 
 /* Close PSP proxy handle */

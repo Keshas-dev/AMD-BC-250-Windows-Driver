@@ -202,6 +202,12 @@ Direct GPU BAR5 (0xFE800000) MMIO works correctly for all accessible registers.
 - KIQ_CNTL (0xE068) write accepted but reads back as 0 (self-clearing)
 - **KIQ doorbell mechanism**: Write KIQ_WPTR via PSP_WRITE_REG to trigger GPU execution
 
+### CRITICAL BUG FOUND: GPU driver `amdbc250_psp.c:207-208` naudoja neteisingą IOCTL!
+- GPU driver `Amdbc250PspKiqSubmit()` calls `PSP_IOCTL_WRITE_REG` (0x801) vietoje `IOCTL_PSP_KIQ_SUBMIT` (0x818)
+- `PSP_IOCTL_WRITE_REG` writes to MMIO register, o ne į KIQ ring buffer
+- PSP driveris `PspKiqSubmit()` teisingai įgyvendina KIQ submit (writes PM4 to ring, doorbell via KIQ_WPTR)
+- Reikia pakeisti `amdbc250_psp.c:207-208` naudoti `IOCTL_PSP_KIQ_SUBMIT` (0x818)
+
 ### Critical Finding: BC-250 Has Different Register Map Than Navi10
 
 **BC-250 (Cyan Skillfish) uses a non-standard BAR5 register layout.** Standard Navi10 has GC registers starting at BAR5+0x0000. BC-250 has GC registers at shifted offsets:
@@ -263,7 +269,7 @@ MP1_BASE__INST0_SEG0 = **0x16000** (byte offset in BAR5, same as MP0_BASE on BC-
 8. ~~**Find KIQ doorbell mechanism**~~ ✅ — KIQ_WPTR (0xE078) IS WRITABLE via PSP_WRITE_REG!
 9. ~~**Test PSP_REG_PROG with real GPU register**~~ ✅ — no-op, use PSP_WRITE_REG instead
 10. ~~**Implement KIQ_SUBMIT IOCTL in PSP driver**~~ ✅ — PspKiqInit/Submit/Cleanup + IOCTL handler
-11. **SMU wake** — try SMN access or PSP commands to power-gate SMU on
+11. ~~**SMU wake**~~ ✅ — Added IOCTL_PSP_SMU_WAKE (C2PMSG_66/82/90 via MP1_BASE)
 12. **Test KIQ_SUBMIT** — submit PM4 NOPs, verify execution via CP scratch
 
 ## Hardware
@@ -347,6 +353,8 @@ GC_BASE aliases (0xDA60+) bypass NBIO for registers where native offset is 0xC80
 | PSP_AUTOLOAD_RLC | 0x817 | Trigger RLC autoload |
 | PSP_KIQ_SUBMIT | 0x818 | KIQ ring submit |
 | PSP_INIT_TMR | 0x819 | Init Trusted Memory Region |
+| PSP_SMU_WAKE | 0x821 | Send SMU message via MP1 mailbox |
+| PSP_LOAD_TOC | 0x820 | Load TOC (TODO) |
 
 ## Test Tools
 - `output\safe-test.exe` — read-only GPU driver test
@@ -378,6 +386,7 @@ GC_BASE aliases (0xDA60+) bypass NBIO for registers where native offset is 0xC80
 | `-pb` | bus devfn offset | PCI config read |
 | `-pw` | bus devfn offset val | PCI config write |
 | `-k` | dwords... | Submit PM4 commands via KIQ ring (up to 64 hex dwords) |
+| `-W` | msg arg | SMU wake (send MP1 mailbox message) |
 | `-l` | logfile | Log to file |
 
 ## Source Layout
@@ -426,3 +435,4 @@ PSP Driver (AMD-BC-250-PSP-Windows-Driver/)
 - **Do NOT write 0xDEADBEEF to KIQ_BASE_LO** — GPU hangs, requires reboot. Use page-aligned addresses only.
 - **KIQ_WPTR is only writable through PSP driver's BAR5 MMIO** (PSP_WRITE_REG), NOT through GPU driver's direct MMIO
 - **KIQ_CNTL may be self-clearing** — write accepted, reads back 0, but may still enable the ring
+- **2026-06-15: GPU driver `amdbc250_psp.c` had wrong IOCTL in `Amdbc250PspKiqSubmit()` (used 0x801 WRITE_REG instead of 0x818 KIQ_SUBMIT)** — FIXED, rebuild required
