@@ -26,6 +26,42 @@ static UINT32 MmioRead(HANDLE h, UINT64 pa) {
     return m.MapResult ? m.ValueRead : 0xDEAD0000;
 }
 
+static void MmioWrite(HANDLE h, UINT64 pa, UINT32 value) {
+    AMDBC250_IOCTL_MMIO_TEST m = {0};
+    m.PhysicalAddress = pa; m.Size = 4; m.OffsetWrite = 0; m.ValueWrite = value;
+    DWORD bytes = 0;
+    DeviceIoControl(h, IOCTL_AMDBC250_MMIO_TEST, &m, sizeof(m), &m, sizeof(m), &bytes, NULL);
+}
+
+static UINT32 SmuRead(HANDLE h, UINT32 off) {
+    return MmioRead(h, 0xFE800000ULL + off);
+}
+
+static void SmuWrite(HANDLE h, UINT32 off, UINT32 value) {
+    MmioWrite(h, 0xFE800000ULL + off, value);
+}
+
+static UINT32 SmuSend(HANDLE h, const char *name, UINT32 msg, UINT32 param, UINT32 timeoutMs) {
+    UINT32 deadline = GetTickCount() + timeoutMs;
+    UINT32 response = 0;
+    UINT32 result = 0;
+
+    Log("SMU %s (msg=0x%02X, param=0x%08X)\n", name, msg, param);
+    SmuWrite(h, 0x16A68, 0);
+    SmuWrite(h, 0x16A48, param);
+    SmuWrite(h, 0x16A08, msg & 0xFFFF);
+
+    do {
+        Sleep(10);
+        response = SmuRead(h, 0x16A68);
+    } while (response == 0 && GetTickCount() < deadline);
+
+    result = SmuRead(h, 0x16A48);
+    Log("  C2PMSG_90=0x%08X  C2PMSG_82=0x%08X  %s\n",
+        response, result, response == 1 ? "OK" : "FAIL");
+    return response == 1 ? result : 0;
+}
+
 int main(void) {
     g_log = fopen("C:\\AMD-BC-250\\AMD-BC-250-Windows-Driver-main\\output\\smu-probe.log", "w");
     if (!g_log) { printf("Cannot open log\n"); return 1; }
@@ -304,6 +340,11 @@ int main(void) {
         if (v != 0 && v != 0xDEAD0000) Log("  +0x%05X: 0x%08X\n", (UINT32)off, v);
     }
     Log("S33 DONE\n\n");
+
+    Log("=== SMU v11.8 Mailbox Commands ===\n");
+    SmuSend(hDev, "TestMessage", 0x1, 0, 100);
+    SmuSend(hDev, "RequestActiveWgp", 0x18, 0, 1000);
+    Log("S34 DONE\n\n");
 
     CloseHandle(hDev);
     Log("=== ALL DONE ===\n");

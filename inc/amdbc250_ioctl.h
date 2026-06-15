@@ -414,6 +414,15 @@ typedef struct _AMDBC250_IOCTL_MMIO_TEST {
     UINT32 Padding;                 /* alignment */
 } AMDBC250_IOCTL_MMIO_TEST, *PAMDBC250_IOCTL_MMIO_TEST;
 
+/* --- Get BAR5 virtual address (for PSP driver mailbox access) --- */
+#define IOCTL_AMDBC250_BAR5_READ_PROXY      CTL_CODE_AMDBC250(0x83, METHOD_BUFFERED, FILE_ANY_ACCESS)
+
+typedef struct _AMDBC250_IOCTL_BAR5_READ_PROXY {
+    UINT64 Bar5VirtualAddress;        /* OUT: BAR5 virtual address */
+    UINT32 Bar5Size;                  /* OUT: BAR5 size in bytes */
+    UINT32 Padding;                   /* alignment */
+} AMDBC250_IOCTL_BAR5_READ_PROXY, *PAMDBC250_IOCTL_BAR5_READ_PROXY;
+
 #pragma pack(pop)
 
 #endif /* _AMDBC250_IOCTL_H_ */

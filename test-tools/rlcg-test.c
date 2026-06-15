@@ -105,6 +105,22 @@ int main(void) {
         WriteReg(h, 0x1500, v);
     }
 
+    Log("\n--- PSP C2PMSG alias probe (GC_BASE shifted aliases) ---\n"); fflush(g);
+    {
+        UINT32 c2pAlias[] = {
+            0x1500, 0x1504, 0x1508, 0x150C, 0x1510, 0x1514
+        };
+        const char *c2pAliasName[] = {
+            "RLCG_CNTL aliased", "RLCG_DATA aliased", "RLCG_CNTL2 aliased",
+            "RLCG_CNTL3 aliased", "RLCG_CNTL4 aliased", "RLCG_CNTL5 aliased"
+        };
+        int j;
+        for (j = 0; j < _countof(c2pAlias); j++) {
+            ReadReg(h, c2pAlias[j], &v);
+            Log("  shifted 0x%04X = 0x%08X  (%s)\n", c2pAlias[j], v, c2pAliasName[j]);
+        }
+    }
+
     CloseHandle(h);
     Log("\n=== Done ===\n"); fflush(g);
     if (g) fclose(g);

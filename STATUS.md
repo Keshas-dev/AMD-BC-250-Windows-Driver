@@ -1,8 +1,18 @@
 # AMD BC-250 Windows Driver — Status Report
 
-**Data:** 2026-06-02
-**Versija:** v4.3.1
+**Data:** 2026-06-15  
+**Versija:** v4.3.2  
 **Projektas:** Windows GPU driver for AMD BC-250 (Cyan Skillfish / RDNA2 / GFX1013)
+
+---
+
+## Latest Discovery (2026-06-15)
+
+- `test-psp-driver.exe -E` successfully loads embedded SOS firmware via PSP mailbox.
+- `test-psp-driver.exe -B` completes boot sequence: SYSDRV (0x4) + SOS (0x8) SENT, GRBM_STATUS = 0x00000000 (NBIO unlocked).
+- `C2PMSG_81` reads `0xF0000010` via mailbox (`-m`) after boot — **SOS is alive**.
+- PSP driver IOCTL `IOCTL_PSP_KIQ_LOAD_FW` (`0x822`) is now implemented and usable for loading ME/PFP/MEC/RLC firmware blobs (`cyan_skillfish2_*.bin`).
+- **Immediate next step:** Load ME (`0x01`) and PFP (`0x02`) firmware via `test-psp-driver.exe -Q 1|2 <fwfile>` to enable CP command execution.
 
 ---
 
@@ -27,21 +37,21 @@
 
 | # | Komponentas | Statusas |
 |---|-------------|----------|
-| 1 | IOCTL dispatch (30+ handlers) | ✅ |
-| 2 | g_PciDevExt initialization | ✅ |
-| 3 | IB packet + EOP fence | ✅ |
-| 4 | AllocVidMem (MDL-based, 40-bit) | ✅ |
-| 5 | INIT_HARDWARE (user-mode MMIO) | ✅ |
-| 6 | SEND_PM4 / READ_REG / WRITE_REG | ✅ |
-| 7 | GET_HW_STATUS | ✅ |
-| 8 | SDMA copy/fill engine | ✅ |
-| 9 | TDR reset recovery | ✅ |
-| 10 | 40 CU unlock | ✅ |
-| 11 | Power/thermal management | ✅ |
-| 12 | MMIO mapping (MmMapIoSpace) | ❌ SMU block |
-| 13 | IOCTL_GET_GPU_INFO (0x80000C00) | ✅ |
-| 14 | IOCTL_GET_FIREWALL_STATUS (0x80000C04) | ✅ |
-| 15 | IOCTL_TEST_REGISTER (0x80000C08) | ✅ |
+| 1 | IOCTL dispatch (30+ handlers) | ✅ Working |
+| 2 | g_PciDevExt initialization | ✅ Working |
+| 3 | IB packet + EOP fence | ✅ Working |
+| 4 | AllocVidMem (MDL-based, 40-bit) | ✅ Working |
+| 5 | INIT_HARDWARE (user-mode MMIO) | ✅ Working |
+| 6 | SEND_PM4 / READ_REG / WRITE_REG | ✅ Working |
+| 7 | GET_HW_STATUS | ✅ Working |
+| 8 | SDMA copy/fill engine | ✅ Working |
+| 9 | TDR reset recovery | ✅ Working |
+| 10 | 40 CU unlock | ✅ Working |
+| 11 | Power/thermal management | ✅ Working |
+| 12 | MMIO mapping (MmMapIoSpace) | ❌ Blocked — SMU blocks access without PSP firmware auth |
+| 13 | IOCTL_GET_GPU_INFO (0x80000C00) | ✅ Working |
+| 14 | IOCTL_GET_FIREWALL_STATUS (0x80000C04) | ✅ Working |
+| 15 | IOCTL_TEST_REGISTER (0x80000C08) | ✅ Working |
 
 ## Vulkan ICD — `amdbc250vulkan.dll`
 
@@ -185,9 +195,10 @@ Three critical bugs found and fixed:
 ## Next Steps
 
 ### Trumpalaikiai (1-2 savaitės)
-1. **PSP firmware loading** — įgyvendinti Cyan Skillfish PSP init su C2PMSG registrų seka
-2. **NBIO unlock** — išbandyti PSP komandas atblokuoti MMHUB/GC registrus
-3. **SMN access** — pridėti tiesioginį SMN registrų skaitymą per PSP MMIO
+1. **PSP firmware loading** — ✅ Em dedykamas dokumentacija: **Embedded SOS jau įkrautas ir bootinamas per `LOAD_EMBEDDED_FW` / `BOOT_SEQUENCE`**
+2. **NBIO unlock** — ✅ Įrodyta, kad boot sequence atrakina NBIO (C2PMSG_81=0xF0000010)
+3. **ME/PFP firmware load via KIQ** — `IOCTL_PSP_KIQ_LOAD_FW` (`0x822`) įdiegtas; naudoti `test-psp-driver.exe -Q 1|2 ...`
+4. **CP scratch + ring pasitikrinti** — po ME/PFP load patikrinti `CP_SCRATCH_REG0` ir `WPTR` pokytį
 
 ### Vidutinės trukmės (1-2 mėnesiai)
 4. **GFX ring init** — inicializuoti Command Processor ring buffer

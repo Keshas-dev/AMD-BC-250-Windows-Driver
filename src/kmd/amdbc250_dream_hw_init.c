@@ -860,32 +860,10 @@ DreamV3HwInitDisplay(_In_ PDREAM_V3_DEVICE_EXTENSION DevExt)
 static NTSTATUS
 DreamV3InitCommandProcessor(_In_ PDREAM_V3_DEVICE_EXTENSION DevExt)
 {
-    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-               "AMDBC250-DREAM-V4.3: InitCommandProcessor (GFX10)\n"));
-
-    /*
-     * In production driver, this would load:
-     * - amdgpu/navi10_pfp.bin (PFP firmware)
-     * - amdgpu/navi10_me.bin (ME firmware)
-     * - amdgpu/navi10_mec.bin (MEC compute firmware)
-     * 
-     * For now, verify CP is responsive via scratch register test.
-     */
-
-    /* Test CP responsiveness */
-    DreamV3WriteRegister(DevExt, AMDBC250_REG_SCRATCH_REG0, 0xDEADBEEF);
-    ULONG TestVal = DreamV3ReadRegister(DevExt, AMDBC250_REG_SCRATCH_REG0);
-    
-    if (TestVal != 0xDEADBEEF) {
-        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
-                   "AMDBC250-DREAM-V4.3: CP scratch test FAILED (got 0x%08X)\n", TestVal));
-        return STATUS_DEVICE_CONFIGURATION_ERROR;
-    }
-
-    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-               "AMDBC250-DREAM-V4.3: Command processor initialized\n"));
-
-    return STATUS_SUCCESS;
+    UNREFERENCED_PARAMETER(DevExt);
+    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
+               "AMDBC250-DREAM-V4.3: InitCommandProcessor FAILED — ME/PFP firmware not loaded\n"));
+    return STATUS_UNSUCCESSFUL;
 }
 
 /*===========================================================================

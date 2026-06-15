@@ -4423,6 +4423,71 @@ DreamV3DeviceControl(
         break;
     }
 
+    /* --- BAR5 Proxy Read (for PSP driver mailbox access) --- */
+    case 0x900: { /* IOCTL_AMDBC250_BAR5_READ_PROXY */
+        if (inputLen >= sizeof(ULONG) && outputLen >= sizeof(ULONG)) {
+            PULONG inOffset = (PULONG)inputBuffer;
+            PULONG outValue = (PULONG)outputBuffer;
+            ULONG offset = *inOffset;
+            
+            if (DevExt && DevExt->MmioVirtualBase && offset < 0x80000) {
+                PUCHAR mmioBase = (PUCHAR)DevExt->MmioVirtualBase;
+                *outValue = READ_REGISTER_ULONG((PULONG)(mmioBase + offset));
+                bytesReturned = sizeof(ULONG);
+                status = STATUS_SUCCESS;
+                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_TRACE_LEVEL,
+                    "AMDBC250-DREAM-V4.3: BAR5_PROXY_READ offset=0x%X value=0x%08X\n",
+                    offset, *outValue));
+            } else {
+                *outValue = 0xFFFFFFFF;
+                bytesReturned = sizeof(ULONG);
+                status = STATUS_BUFFER_TOO_SMALL;
+            }
+        } else {
+            status = STATUS_BUFFER_TOO_SMALL;
+        }
+        break;
+    }
+
+    case 0x901: { /* IOCTL_AMDBC250_BAR5_WRITE_PROXY */
+        if (inputLen >= sizeof(ULONG) * 2 && DevExt && DevExt->MmioVirtualBase) {
+            PULONG params = (PULONG)inputBuffer;
+            ULONG offset = params[0];
+            ULONG value = params[1];
+            
+            if (offset < 0x80000) {
+                PUCHAR mmioBase = (PUCHAR)DevExt->MmioVirtualBase;
+                WRITE_REGISTER_ULONG((PULONG)(mmioBase + offset), value);
+                bytesReturned = 0;
+                status = STATUS_SUCCESS;
+                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_TRACE_LEVEL,
+                    "AMDBC250-DREAM-V4.3: BAR5_PROXY_WRITE offset=0x%X value=0x%08X\n",
+                    offset, value));
+            } else {
+                status = STATUS_ARRAY_BOUNDS_EXCEEDED;
+            }
+        } else {
+            status = STATUS_BUFFER_TOO_SMALL;
+        }
+        break;
+    }
+
+    case IOCTL_AMDBC250_BAR5_READ_PROXY: {
+        if (outputLen >= sizeof(AMDBC250_IOCTL_BAR5_READ_PROXY) && DevExt && DevExt->MmioVirtualBase) {
+            PAMDBC250_IOCTL_BAR5_READ_PROXY bar5Info = (PAMDBC250_IOCTL_BAR5_READ_PROXY)outputBuffer;
+            bar5Info->Bar5VirtualAddress = (UINT64)DevExt->MmioVirtualBase;
+            bar5Info->Bar5Size = 0x80000;
+            bytesReturned = sizeof(AMDBC250_IOCTL_BAR5_READ_PROXY);
+            status = STATUS_SUCCESS;
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_TRACE_LEVEL,
+                "AMDBC250-DREAM-V4.3: BAR5_PROXY returning VA=0x%llX size=0x%X\n",
+                bar5Info->Bar5VirtualAddress, bar5Info->Bar5Size));
+        } else {
+            status = STATUS_BUFFER_TOO_SMALL;
+        }
+        break;
+    }
+
     default:
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
                    "AMDBC250-DREAM-V4.3: Unknown IOCTL 0x%08X\n", ioctlCode));
@@ -4878,3 +4943,10 @@ DreamV3ShaderCompileStub(
 
 /* Note: These are called from the existing IOCTL dispatch.
  * New IOCTL codes added for SDMA, EDID, and shader operations. */
+
+/* BAR5 proxy IOCTL for PSP driver mailbox access */
+// IOCTL code 0x900: Read GPU BAR5 register via GPU driver's mapping
+// Input: ULONG Offset (register offset from BAR5 base)
+// Output: ULONG Value (register value read)
+// This allows PSP driver to access mailbox registers on Windows 11 26100
+// where MmMapIoSpace for BAR5 is blocked from the PSP driver.

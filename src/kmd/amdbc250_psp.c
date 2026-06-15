@@ -279,35 +279,35 @@ NTSTATUS Amdbc250PspKiqLoadFirmware(ULONG FwType, ULONG FwSize, PHYSICAL_ADDRESS
 /* Allocate shared memory for firmware loading via KIQ */
 NTSTATUS Amdbc250PspAllocateFirmwareBuffer(ULONG Size)
 {
-    KeAcquireSpinLock(&g_FwLock, NULL);
-    
+    KIRQL oldIrql;
+    KeAcquireSpinLock(&g_FwLock, &oldIrql);
+
     if (g_FwBuffer) {
         if (g_FwBufferSize >= Size) {
-            KeReleaseSpinLock(&g_FwLock, NULL);
+            KeReleaseSpinLock(&g_FwLock, oldIrql);
             return STATUS_SUCCESS;
         }
-        /* Free existing buffer */
         MmFreeContiguousMemory(g_FwBuffer);
         g_FwBuffer = NULL;
         g_FwBufferPa.QuadPart = 0;
         g_FwBufferSize = 0;
     }
-    
+
     PHYSICAL_ADDRESS low = {0};
     PHYSICAL_ADDRESS high = {0};
     high.QuadPart = 0xFFFFFFFFULL;
-    
+
     g_FwBuffer = MmAllocateContiguousMemory(Size, low);
     if (!g_FwBuffer) {
-        KeReleaseSpinLock(&g_FwLock, NULL);
+        KeReleaseSpinLock(&g_FwLock, oldIrql);
         return STATUS_INSUFFICIENT_RESOURCES;
     }
-    
+
     g_FwBufferPa = MmGetPhysicalAddress(g_FwBuffer);
     g_FwBufferSize = Size;
     g_FwCount = 0;
-    
-    KeReleaseSpinLock(&g_FwLock, NULL);
+
+    KeReleaseSpinLock(&g_FwLock, oldIrql);
     KdPrint(("FW_BUF: allocated %u bytes at PA=0x%llX\n", Size, g_FwBufferPa.QuadPart));
     return STATUS_SUCCESS;
 }
@@ -318,16 +318,17 @@ NTSTATUS Amdbc250PspCopyFirmwareData(PUCHAR FirmwareData, ULONG Size)
     if (!g_FwBuffer || !FirmwareData || Size == 0) {
         return STATUS_INVALID_PARAMETER;
     }
-    
-    KeAcquireSpinLock(&g_FwLock, NULL);
+
+    KIRQL oldIrql;
+    KeAcquireSpinLock(&g_FwLock, &oldIrql);
     if (Size > g_FwBufferSize) {
-        KeReleaseSpinLock(&g_FwLock, NULL);
+        KeReleaseSpinLock(&g_FwLock, oldIrql);
         return STATUS_BUFFER_OVERFLOW;
     }
-    
+
     RtlCopyMemory(g_FwBuffer, FirmwareData, Size);
     g_FwCount++;
-    KeReleaseSpinLock(&g_FwLock, NULL);
+    KeReleaseSpinLock(&g_FwLock, oldIrql);
     return STATUS_SUCCESS;
 }
 

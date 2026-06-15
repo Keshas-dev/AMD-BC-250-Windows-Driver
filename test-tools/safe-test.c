@@ -11,9 +11,26 @@ static void Log(const char *fmt, ...) {
     if (g) { va_start(a, fmt); vfprintf(g, fmt, a); va_end(a); fflush(g); }
 }
 
-int main(void) {
+int main(int argc, char *argv[]) {
     g = fopen("C:\\AMD-BC-250\\AMD-BC-250-Windows-Driver-main\\output\\safe-test.log", "w");
     if (!g) { printf("Cannot open log\n"); return 1; }
+
+    if (argc >= 3 && strcmp(argv[1], "-r") == 0) {
+        char *end = NULL;
+        unsigned long offset = strtoul(argv[2], &end, 0);
+        if (!end || *end != '\0') { printf("Bad offset: %s\n", argv[2]); return 1; }
+        HANDLE h = CreateFileW(L"\\\\.\\AMDBC250DreamV43",
+            GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
+        if (h == INVALID_HANDLE_VALUE) { printf("Open failed error=%lu\n", GetLastError()); return 1; }
+        UINT32 ra[2] = {(UINT32)offset, 0xDEADBEEF};
+        DWORD br = 0;
+        BOOL ok = DeviceIoControl(h, 0x80000B88, ra, sizeof(ra), ra, sizeof(ra), &br, NULL);
+        if (ok) printf("READ_REG[0x%04X] = 0x%08X\n", (unsigned)offset, ra[1]);
+        else printf("READ_REG[0x%04X] FAILED err=%lu\n", (unsigned)offset, GetLastError());
+        CloseHandle(h);
+        return 0;
+    }
+
     Log("=== Safe Test Start ===\n");
     fflush(g);
 

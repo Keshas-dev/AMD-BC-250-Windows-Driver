@@ -73,6 +73,20 @@ Despite reads working, writes to CC_GC_SHADER_ARRAY_CONFIG (0x3264) and SPI_PG_E
 3. SPI_PG_ENABLE_STATIC_WGP_MASK **is** writable at the register level (confirmed via Linux devmem: bits 8-14 toggle all 6 WGPs)
 4. But writes have no effect until SMU powers up the GC domain
 
+### Windows 11 26100 Compatibility
+
+On Windows 11 26100, direct BAR5 MMIO mapping via `MmMapIoSpace` is blocked. The driver handles this by:
+
+1. **GPU driver** maps BAR5 at `0xFE800000` during `INIT_HARDWARE`
+2. **PSP driver** uses GPU proxy for mailbox access when direct mapping fails
+3. **Proxy IOCTLs**: `IOCTL_AMDBC250_BAR5_READ_PROXY` (0x900) and `IOCTL_AMDBC250_BAR5_WRITE_PROXY` (0x901)
+
+**Required sequence for Windows 11 26100:**
+1. Install GPU driver first (maps BAR5)
+2. Install PSP driver
+3. Use `safe-test.exe -m` to verify BAR5 access
+4. Use `test-psp-driver.exe -m` to verify PSP mailbox
+
 ### SMU v11.8 Discovery
 
 **Critical finding (2026-06-12):** BC-250 uses SMU v11.8, with different register offsets and protocol than Navi10's SMU v11.0.
@@ -157,10 +171,16 @@ MMHUB contains 7 identical blocks (spaced 0x180 apart), each with 6 registers at
 - ✅ **Confirmed NBIO NOT blocking GC registers** — verified on both Linux devmem and Windows
 
 ### In Progress
-- ⏳ **SMU communication testing** — need to verify TestMessage (0x1) + GetSmuVersion (0x2) with corrected offsets
+- ⏳ **SMU communication testing** — TestMessage (0x1) + GetSmuVersion (0x2) with corrected offsets
 - ⏳ **GC power-up via SMU** — send RequestActiveWgp (0x18) to enable WGPs
 - ⏳ **CU enable** — use SetCoreEnableMask (0x2C) + SPI_PG_ENABLE_STATIC_WGP_MASK after SMU power-up
 - ⏳ **CP firmware loading** — PFP/ME/CE/MEC from embedded firmware_data.h
+
+### Test Results (2026-06-15)
+- ✅ **safe-test.exe** — GPU_ID: 0x9FFF9700, scratch: 0x4D585042, CP alive
+- ✅ **test-wddm.exe** — Basic WDDM tests pass (DXGI/S20-S24 skipped - WDDM stub hangs)
+- ✅ **PSP boot sequence** — NBIO UNLOCKED, firmware loaded, SOS/SMSDRV sent
+- ⚠️ **SMU wake** — C2PMSG_90 timeout (but GPU powered via PSP boot)
 
 ### Known Limitations
 - GC block likely power-gated — SMU must run RequestActiveWgp to enable WGPs
