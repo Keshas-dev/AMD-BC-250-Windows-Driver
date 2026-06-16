@@ -26,13 +26,50 @@
 
 ## BC-250 hardware facts
 - BC-250 GC registers are shifted by `GC_BASE=0x1260`; use `AMDBC250_REG_*` macros. Navi10 offsets like `0x2000`/`0x2004` read `0xFFFFFFFF` because they are unmapped, not NBIO-blocked.
-- Key corrected offsets: GRBM `0x3260`, CC `0x3264`, scratch `0x32D4`, SPI WGP mask `0x34FC`, THM `0x8000`.
+- Key corrected offsets: GRBM `0x3260`, CC `0x3264`, scratch `0x32D4`, SPI WGP mask `0x34FC`.
 - NBIO blocks writes in native `0xC000+` ranges such as `CP_ME_CNTL`/`CP_MEC_CNTL`; GC_BASE-shifted ring aliases can bypass NBIO but some BASE registers are hardware read-only.
+- **Linux IP Base Map** (from `cyan_skillfish_ip_offset.h` — full details in `docs/BC250-LINUX-IP-MAP.md`):
+  - GC: `0x1260` (+ `0xA000`), NBIO: `0x0000`, HDP: `0x0F20`, MMHUB: `0x1A000`
+  - DF: `0x7000`, OSSSYS: `0x10A0`, MP0/PSP: `0x16000`, THM: `0x16600`
+  - SMUIO: `0x16800`/`0x16A00`, CLK: `0x16C00+`, UMC0: `0x14000`, FUSE: `0x17400`
+  - GC IP version: 10.1.3, NBIO: 2.1.1, MP0/PSP: 11.0.8
+  - Linux skips PSP firmware loading entirely for BC-250 (`psp_v11_0_8.c` is minimal)
+  - `cg_flags=0`, `pg_flags=0` (no clock/power gating), `external_rev_id = rev_id + 0x82`
+- **40 CU unlock** (from duggasco/bc250-40cu-unlock): Write `CC_GC_SHADER_ARRAY_CONFIG` (0x3264) + `SPI_PG_ENABLE_STATIC_WGP_MASK` (0x34FC) together during `gfx_v10_0_get_cu_info()`
 
 ## Current command path and blockers
-- KIQ submit from the GPU driver uses `PSP_IOCTL_KIQ_SUBMIT` (`0x818`) against the PSP driver, not `PSP_IOCTL_WRITE_REG` (`0x801`).
-- KIQ_BASE_LO `0xE060` is writable, but KIQ_CNTL/RPTR/WPTR behavior is not proven; test PM4 NOP/scratch/fence behavior before assuming command execution.
-- GFX ring `CP_RING0_BASE_LO` (`0xDA60`) is read-only on current hardware, so legacy ring init cannot be considered working.
+- KIQ submit from the GPU driver uses `PSP_IOCTL_KIQ_SUBMIT` (`0x818`) against the PSP driver.
+- **PSP driver now programs GPU HQD registers** (PspKiq.c rewrite): KIQ_BASE, PQ_BASE, PQ_CONTROL, VMID, ACTIVE, WPTR.
+- GPU driver SEND_PM4: PATH 1 (PSP KIQ) no longer requires GfxRing — only needs `HardwareInitialized`.
+- GFX ring `CP_RING0_BASE_LO` (`0xDA60`) is read-only on current hardware.
+- **FUNDAMENTAL BLOCKER**: SOS firmware (v3 navi10_sos.bin) does not support ring protocol (C2PMSG_64 bit 31 never sets).
+- **NBIO_MAP INIT_HARDWARE works**: Driver fix (moved GPU alive test after NBIO_MAP break) resolved system hangs.
+- CP registers at GC_BASE-shifted 0x3AD8-0x3AEC contain fence/doorbell addresses (0x02A8xxxx range).
+- NBIO_ID at 0xC100 = 0xFEDCBAEF confirms NBIO accessible.
+- SCRATCH (0x32D4) bit 31 is write-masked by hardware (W1C or read-only).
+- **SCRATCH test**: W=0xDEADBEEF reads 0x5EADBEEF (bit 31 cleared), W=0x12345678 reads 0x12345678 OK.
+
+## Progress
+### Done
+- ✅ GPU driver: BAR5 proxy IOCTLs (0x900 read, 0x901 write)
+- ✅ PSP driver: GPU proxy fallback when `MmMapIoSpace` fails
+- ✅ PSP mailbox working: `C2PMSG_81=0xF0000010`
+- ✅ Firmware loading working: `LOAD_EMBEDDED_FW` succeeds
+- ✅ KIQ submit working: `wptr` increments
+- ✅ NBIO unlock working: `BOOT_SEQUENCE` sends SYSDRV/SOS
+- ✅ All tests pass on Windows 11 26100
+- ✅ v3 firmware (navi10_sos.bin) loaded via GPU proxy
+- ✅ GRBM_STATUS accessible with v3 firmware (0x00000000)
+- ✅ CREATE_RING implemented (allocates ring buffer, programs regs)
+- ✅ NBIO_VIA_RING implemented (mailbox-based fallback) — **GRBM UNLOCKED via this path**
+- ✅ INIT_HARDWARE NBIO_MAP fix: driver no longer hangs on init (moved GPU alive test after NBIO_MAP break)
+- ✅ GC_BASE-shifted registers fully accessible: GPU_ID, GRBM_STATUS, CC_CONFIG, SCRATCH, SPI_WGP
+
+### Blocked
+- ❌ GPCOM ring: TOS protocol not in SOS firmware (`C2PMSG_64` bit 31 never sets)
+- ❌ SDMA ring: Same ring protocol issue
+- ❌ 3D rendering: No working command submission path
+- ❌ GPU firmware: Missing CE/PFP/ME/MEC/RLC/SDMA binaries
 
 ## Windows 11 26100 BAR5 Proxy Support
 - GPU driver maps BAR5 at `0xFE800000` via `INIT_HARDWARE` IOCTL
@@ -44,3 +81,4 @@
 ## Source and docs to trust
 - Prefer `build.bat`, `src/kmd/amdbc250_dream_kmd.c`, `src/kmd/amdbc250_dream_hw_init.c`, `src/kmd/amdbc250_psp.c`, and `inc/amdbc250_dream_hw.h` over historical docs.
 - Useful but potentially stale docs: `docs\REGISTER-MAP-BC250.md`, `docs\PSP-PROXY-BYPASS.md`, and `docs\RING-INIT-STATUS.md`.
+- Trust: `docs\BC250-LINUX-IP-MAP.md` (Linux kernel source-verified IP base addresses).

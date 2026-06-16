@@ -1403,12 +1403,13 @@ DreamV3WriteEopFence(
      *   DWORD 4: Data low (fence value low)
      *   DWORD 5: Data high (fence value high)
      */
-    ULONG Header = PM4_TYPE3_HDR(IT_EVENT_WRITE_EOP, 4);
+    ULONG Header = PM4_TYPE3_HDR(IT_EVENT_WRITE_EOP, 5);
     Ring[WPtr / sizeof(ULONG)] = Header;
     WPtr += sizeof(ULONG);
     
-    /* Control: EVENT_TYPE=0x47(EOP) | EVENT_INDEX=5 | DATA_SEL=2(write 64-bit fence) | INT_SEL=2(interrupt) */
-    Ring[WPtr / sizeof(ULONG)] = (0x47 << 0) | (5 << 8) | (2 << 24) | (2 << 28);
+    /* Control: EVENT_TYPE=0x47(EOP) | EVENT_INDEX=5 | DATA_SEL=2(write 64-bit fence) | INT_SEL=1(interrupt)
+     * GFX10 EVENT_WRITE_EOP bit layout: EVENT_TYPE[7:0] | EVENT_INDEX[11:8] | DATA_SEL[13:12] | INT_SEL[14] */
+    Ring[WPtr / sizeof(ULONG)] = (0x47 << 0) | (5 << 8) | (2 << 12) | (1 << 14);
     WPtr += sizeof(ULONG);
     
     /* Address (64-bit physical, DWORD aligned) */
@@ -3388,17 +3389,10 @@ DreamV3DeviceControl(
                     DevExt->FbVirtualBase, InitHw->FbPhysicalBase, InitHw->FbSize));
             }
 
-            /* Verify GPU is alive — read a known register */
-            {
-                ULONG gpuId = DreamV3ReadRegister(DevExt, 0x0000); /* GPU_ID or scratch */
-                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-                    "AMDBC250-DREAM-V4.3: GPU reg[0x0000] = 0x%08X (GPU alive test)\n", gpuId));
-            }
-
-            /* If NBIO_MAP flag set, skip GPU init (just map memory for NBIO config access) */
+            /* If NBIO_MAP flag set, skip GPU alive test and GPU init (just map memory) */
             if (InitHw->Flags & AMDBC250_INIT_FLAG_NBIO_MAP) {
                 KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-                    "AMDBC250-DREAM-V4.3: NBIO_MAP flag set - skipping GPU init\n"));
+                    "AMDBC250-DREAM-V4.3: NBIO_MAP flag set - skipping GPU alive test + GPU init\n"));
                 DevExt->HardwareInitialized = TRUE;
                 DevExt->GpuClockMhz = AMDBC250_BOOST_CLOCK_MHZ;
                 DevExt->MemoryClockMhz = AMDBC250_MEMORY_CLOCK_MHZ;
@@ -3406,24 +3400,40 @@ DreamV3DeviceControl(
                 break;
             }
 
-            /* Try to enable PCI Memory Space via HalSetBusDataByOffset */
+            /* Verify GPU is alive — read a known register */
             {
-                ULONG slotNumber = (1 << 0) | (0 << 5); /* Bus 1, Dev 0, Func 0 */
-                PCI_COMMON_CONFIG pciCfg;
-                RtlZeroMemory(&pciCfg, sizeof(pciCfg));
-                pciCfg.Command = 0x0007; /* I/O + Mem + BusMaster */
-                ULONG bytesWritten = HalSetBusDataByOffset(
-                    PCIConfiguration, 1, slotNumber,
-                    &pciCfg, 0x04, sizeof(UINT16));
+                ULONG gpuId = DreamV3ReadRegister(DevExt, 0x0000); /* GPU_ID or scratch */
                 KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-                    "AMDBC250-DREAM-V4.3: HalSetBusDataByOffset write Command=7: %lu bytes written\n", bytesWritten));
+                    "AMDBC250-DREAM-V4.3: GPU reg[0x0000] = 0x%08X (GPU alive test)\n", gpuId));
+            }
 
-                /* Also try IO port write */
-                WRITE_PORT_ULONG((PULONG)(UINT_PTR)0xCF8,
-                    0x80000000 | (1 << 16) | (0 << 11) | (0 << 8) | 4);
-                KeMemoryBarrier();
-                WRITE_PORT_ULONG((PULONG)(UINT_PTR)0xCFC, 0x0007);
-                KeMemoryBarrier();
+            /* Try to enable PCI Memory Space — scan for BC-250 via IO ports */
+            {
+                BOOLEAN foundPci = FALSE;
+                for (ULONG bus = 0; bus < 256 && !foundPci; bus++) {
+                    for (ULONG dev = 0; dev < 32 && !foundPci; dev++) {
+                        for (ULONG func = 0; func < 8 && !foundPci; func++) {
+                            WRITE_PORT_ULONG((PULONG)(UINT_PTR)0xCF8,
+                                0x80000000 | (bus << 16) | (dev << 11) | (func << 8) | 0);
+                            ULONG id = READ_PORT_ULONG((PULONG)(UINT_PTR)0xCFC);
+                            if ((id & 0xFFFF) == 0x1002 && ((id >> 16) & 0xFFFF) == 0x13FE) {
+                                foundPci = TRUE;
+                                /* Enable I/O + Mem + BusMaster */
+                                WRITE_PORT_ULONG((PULONG)(UINT_PTR)0xCF8,
+                                    0x80000000 | (bus << 16) | (dev << 11) | (func << 8) | 4);
+                                KeMemoryBarrier();
+                                WRITE_PORT_ULONG((PULONG)(UINT_PTR)0xCFC, 0x0007);
+                                KeMemoryBarrier();
+                                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                                    "AMDBC250-DREAM-V4.3: PCI enable at B%lu:D%lu:F%lu\n", bus, dev, func));
+                            }
+                        }
+                    }
+                }
+                if (!foundPci) {
+                    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+                        "AMDBC250-DREAM-V4.3: PCI scan did not find BC-250 (continuing)\n"));
+                }
 
                 /* Re-read GPU ID after enable */
                 ULONG gpuId2 = DreamV3ReadRegister(DevExt, 0x0000);
@@ -3467,7 +3477,7 @@ DreamV3DeviceControl(
         if (inputLen >= sizeof(AMDBC250_IOCTL_SEND_PM4)) {
             PAMDBC250_IOCTL_SEND_PM4 SendPm4 = (PAMDBC250_IOCTL_SEND_PM4)inputBuffer;
 
-            if (!DevExt->HardwareInitialized || DevExt->GfxRing.VirtualAddress == NULL) {
+            if (!DevExt->HardwareInitialized) {
                 KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
                     "AMDBC250-DREAM-V4.3: SEND_PM4 but hardware not initialized\n"));
                 status = STATUS_DEVICE_NOT_READY;
@@ -3490,10 +3500,11 @@ DreamV3DeviceControl(
                 if (SendPm4->FenceValue > 0) {
                     /* Append EOP fence packet (6 DWORDs) */
                     ULONG idx = Pm4Count;
-                    /* EOP header: type=3, count=4, opcode=IT_EVENT_WRITE_EOP (0x3B) */
-                    Pm4Buffer[idx++] = (3u << 30) | (4u << 16) | 0x3B;
-                    /* EOP control: event=0x47, index=5, data_sel=2, int_sel=2 */
-                    Pm4Buffer[idx++] = (0x47 << 0) | (5 << 8) | (2 << 14) | (2 << 20);
+                    /* EOP header: type=3, count=5, opcode=IT_EVENT_WRITE_EOP(0x47) */
+                    Pm4Buffer[idx++] = PM4_TYPE3_HDR(IT_EVENT_WRITE_EOP, 5);
+                    /* EOP control: EVENT_TYPE=0x47, EVENT_INDEX=5, DATA_SEL=2(64-bit), INT_SEL=1(interrupt)
+                     * GFX10 layout: EVENT_TYPE[7:0] | EVENT_INDEX[11:8] | DATA_SEL[13:12] | INT_SEL[14] */
+                    Pm4Buffer[idx++] = (0x47 << 0) | (5 << 8) | (2 << 12) | (1 << 14);
                     /* Fence address low/high */
                     Pm4Buffer[idx++] = (ULONG)DevExt->GlobalFence.PhysicalAddress.QuadPart;
                     Pm4Buffer[idx++] = (ULONG)(DevExt->GlobalFence.PhysicalAddress.QuadPart >> 32);
