@@ -1,4 +1,4 @@
-/*++
+﻿/*++
 
 Copyright (c) 2026 AMD BC-250 "Dream Drivers" Project — Version 3.0
 
@@ -87,9 +87,91 @@ NTSTATUS APIENTRY DreamV3DdiCreateOverlay(PVOID, PVOID, PVOID);
 
 /*===========================================================================
   DreamV3DxgkInitialize — Calls real DxgkInitialize from dxgkrnl.sys
-  dxgkrnl.lib generated from src/kmd/dxgkrnl.def (not shipped in WDK).
-  Registers all DDI callbacks with dxgkrnl for proper WDDM operation.
-============================================================================*/
+  Resolves at RUNTIME from dxgkrnl.sys export table (link-time import
+  from dxgkrnl.lib causes Code 39 on Win11 26100).
+===========================================================================*/
+
+typedef NTSTATUS (NTAPI *PFN_DXGK_INITIALIZE)(
+    PDRIVER_OBJECT, PUNICODE_STRING, PDRIVER_INITIALIZATION_DATA);
+
+static PFN_DXGK_INITIALIZE g_pfnDxgkInitialize = NULL;
+
+static NTSTATUS
+DreamV3ResolveDxgkInitialize(VOID)
+{
+    NTSTATUS status;
+    ULONG needed = 0;
+
+    if (g_pfnDxgkInitialize != NULL) {
+        return STATUS_SUCCESS;
+    }
+
+    status = ZwQuerySystemInformation(SystemModuleInformation, &needed, 0, &needed);
+    PSYSTEM_MODULE_INFORMATION pModInfo = (PSYSTEM_MODULE_INFORMATION)
+        ExAllocatePool2(POOL_FLAG_NON_PAGED, needed, 'xmGD');
+    if (pModInfo == NULL) return STATUS_NO_MEMORY;
+
+    status = ZwQuerySystemInformation(SystemModuleInformation, pModInfo, needed, &needed);
+    if (!NT_SUCCESS(status)) {
+        ExFreePoolWithTag(pModInfo, 'xmGD');
+        return status;
+    }
+
+    PVOID modBase = NULL;
+    for (ULONG i = 0; i < pModInfo->NumberOfModules; i++) {
+        PUCHAR modPath = pModInfo->Modules[i].FullPathName;
+        SIZE_T modPathLen = strlen((PCHAR)modPath);
+        if (modPathLen >= 10 &&
+            _stricmp((PCHAR)modPath + modPathLen - 10, "dxgkrnl.sys") == 0) {
+            modBase = pModInfo->Modules[i].ImageBase;
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                       "AMDBC250-DREAM-V4.3: dxgkrnl.sys base=%p\n", modBase));
+            break;
+        }
+    }
+    ExFreePoolWithTag(pModInfo, 'xmGD');
+
+    if (modBase == NULL) {
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
+                   "AMDBC250-DREAM-V4.3: dxgkrnl.sys NOT found in memory\n"));
+        return STATUS_NOT_FOUND;
+    }
+
+    PIMAGE_DOS_HEADER pDos = (PIMAGE_DOS_HEADER)modBase;
+    if (pDos->e_magic != IMAGE_DOS_SIGNATURE) return STATUS_INVALID_IMAGE_FORMAT;
+    PIMAGE_NT_HEADERS pNt = (PIMAGE_NT_HEADERS)((PUCHAR)modBase + pDos->e_lfanew);
+    if (pNt->Signature != IMAGE_NT_SIGNATURE) return STATUS_INVALID_IMAGE_FORMAT;
+
+    PIMAGE_DATA_DIRECTORY pExpDir =
+        &pNt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
+    if (pExpDir->Size == 0 || pExpDir->VirtualAddress == 0) {
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
+                   "AMDBC250-DREAM-V4.3: No export dir in dxgkrnl\n"));
+        return STATUS_NOT_FOUND;
+    }
+
+    PIMAGE_EXPORT_DIRECTORY pExports = (PIMAGE_EXPORT_DIRECTORY)
+        ((PUCHAR)modBase + pExpDir->VirtualAddress);
+    PULONG pFunctions = (PULONG)((PUCHAR)modBase + pExports->AddressOfFunctions);
+    PULONG pNames = (PULONG)((PUCHAR)modBase + pExports->AddressOfNames);
+    PUSHORT pOrdinals = (PUSHORT)((PUCHAR)modBase + pExports->AddressOfNameOrdinals);
+
+    for (ULONG i = 0; i < pExports->NumberOfNames; i++) {
+        PCHAR name = (PCHAR)((PUCHAR)modBase + pNames[i]);
+        if (strcmp(name, "DxgkInitialize") == 0) {
+            g_pfnDxgkInitialize = (PFN_DXGK_INITIALIZE)
+                ((PUCHAR)modBase + pFunctions[pOrdinals[i]]);
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                       "AMDBC250-DREAM-V4.3: DxgkInitialize resolved=%p\n",
+                       g_pfnDxgkInitialize));
+            return STATUS_SUCCESS;
+        }
+    }
+
+    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
+               "AMDBC250-DREAM-V4.3: DxgkInitialize NOT found in dxgkrnl exports\n"));
+    return STATUS_NOT_FOUND;
+}
 
 static NTSTATUS
 DreamV3DxgkInitialize(
@@ -106,17 +188,24 @@ DreamV3DxgkInitialize(
 
     RtlCopyMemory(&g_InitData, DriverInitializationData, sizeof(DRIVER_INITIALIZATION_DATA));
 
-    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-               "AMDBC250-DREAM-V4.3: Calling DxgkInitialize (from dxgkrnl.sys), DDI version=%u\n",
-               DriverInitializationData->Version));
+    Status = DreamV3ResolveDxgkInitialize();
+    if (!NT_SUCCESS(Status)) {
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
+                   "AMDBC250-DREAM-V4.3: Cannot resolve DxgkInitialize: 0x%08X\n", Status));
+        return Status;
+    }
 
-    Status = DxgkInitialize(DriverObject, RegistryPath, DriverInitializationData);
+    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+               "AMDBC250-DREAM-V4.3: Calling DxgkInitialize=%p DDI=%u\n",
+               g_pfnDxgkInitialize, DriverInitializationData->Version));
+
+    Status = g_pfnDxgkInitialize(DriverObject, RegistryPath, DriverInitializationData);
 
     if (NT_SUCCESS(Status)) {
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                    "AMDBC250-DREAM-V4.3: DxgkInitialize SUCCESS\n"));
     } else {
-        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
                    "AMDBC250-DREAM-V4.3: DxgkInitialize FAILED: 0x%08X\n", Status));
     }
 
