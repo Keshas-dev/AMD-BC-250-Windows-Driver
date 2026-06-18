@@ -120,9 +120,10 @@ DreamV3ResolveDxgkInitialize(VOID)
     PVOID modBase = NULL;
     for (ULONG i = 0; i < pModInfo->NumberOfModules; i++) {
         PUCHAR modPath = pModInfo->Modules[i].FullPathName;
-        SIZE_T modPathLen = strlen((PCHAR)modPath);
+        /* FullPathName is 256 bytes, NOT null-terminated — use strnlen */
+        SIZE_T modPathLen = strnlen((PCHAR)modPath, sizeof(pModInfo->Modules[i].FullPathName));
         if (modPathLen >= 10 &&
-            _stricmp((PCHAR)modPath + modPathLen - 10, "dxgkrnl.sys") == 0) {
+            _strnicmp((PCHAR)modPath + modPathLen - 10, "dxgkrnl.sys", 10) == 0) {
             modBase = pModInfo->Modules[i].ImageBase;
             KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                        "AMDBC250-DREAM-V4.3: dxgkrnl.sys base=%p\n", modBase));
