@@ -83,22 +83,19 @@ NTSTATUS APIENTRY DreamV3DdiStopCapture(PVOID, PVOID);
 NTSTATUS APIENTRY DreamV3DdiCreateOverlay(PVOID, PVOID, PVOID);
 
 /*===========================================================================
-  DreamV3DxgkInitialize Stub
-  DxgkInitialize is NOT exported by dxgkrnl.sys on Windows 11 26100+.
-  We store the init data but do not call the real DxgkInitialize.
-  UMD communication uses IRP_MJ_DEVICE_CONTROL on control device.
+  DreamV3DxgkInitialize — Calls real DxgkInitialize from dxgkrnl.sys
+  dxgkrnl.lib generated from src/kmd/dxgkrnl.def (not shipped in WDK).
+  Registers all DDI callbacks with dxgkrnl for proper WDDM operation.
 ============================================================================*/
 
-NTSTATUS
-NTAPI
+static NTSTATUS
 DreamV3DxgkInitialize(
     _In_ PDRIVER_OBJECT DriverObject,
     _In_ PUNICODE_STRING RegistryPath,
     _In_ PDRIVER_INITIALIZATION_DATA DriverInitializationData
     )
 {
-    UNREFERENCED_PARAMETER(DriverObject);
-    UNREFERENCED_PARAMETER(RegistryPath);
+    NTSTATUS Status;
 
     if (DriverInitializationData == NULL) {
         return STATUS_INVALID_PARAMETER;
@@ -107,10 +104,20 @@ DreamV3DxgkInitialize(
     RtlCopyMemory(&g_InitData, DriverInitializationData, sizeof(DRIVER_INITIALIZATION_DATA));
 
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-               "AMDBC250-DREAM-V4.3: DreamV3DxgkInitialize stub (DxgkInitialize not available), DDI version=%u\n",
+               "AMDBC250-DREAM-V4.3: Calling DxgkInitialize (from dxgkrnl.sys), DDI version=%u\n",
                DriverInitializationData->Version));
 
-    return STATUS_SUCCESS;
+    Status = DxgkInitialize(DriverObject, RegistryPath, DriverInitializationData);
+
+    if (NT_SUCCESS(Status)) {
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                   "AMDBC250-DREAM-V4.3: DxgkInitialize SUCCESS\n"));
+    } else {
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
+                   "AMDBC250-DREAM-V4.3: DxgkInitialize FAILED: 0x%08X\n", Status));
+    }
+
+    return Status;
 }
 
 /* Forward declaration */
