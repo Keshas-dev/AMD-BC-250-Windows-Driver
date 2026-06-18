@@ -155,22 +155,58 @@ Formula: `BAR5_offset = GC_BASE(0x1260) + Linux_DWORD_offset * 4`
 | L2 TLB tag | 0x0B31C | **RO** | BIOS-cached tag data |
 | L2 TLB data 1-2 | 0x0B320-0x0B324 | **WRITABLE** | Were BIOS values; destroyed by test |
 | L2 TLB data 3-15 | 0x0B328-0x0B35C | **RO** | BIOS page translations |
-| L2_CNTL | 0x0B360 | **RO** | Value 0x013C67B8, bit0=0 (L2 cache disabled?) |
+| L2_CNTL | 0x0B360 | **RO** | Value 0x013C67B8→0x013C7798 (varies per boot) |
 | L2 config 1-3 | 0x0B364-0x0B36C | **RO** | Additional L2 config |
 | Context0 base | 0x0B404 | **MASKED** | 0x00000CC5 (low bits writable) |
-| Context0 regs | 0x0B408-0x0B4AC | **WRITABLE** | 39 regs, BIOS state DESTROYED by test |
+| Context0 regs | 0x0B408-0x0B4AC | **WRITABLE** | 39 regs, BIOS state — need save/restore |
 | Context0 config | 0x0B4C0-0x0B4D4 | **MASKED** | Bits 0-7 writable |
 | Invalidate tag | 0x0B51C | **RO** | |
 | Invalidate data | 0x0B520-0x0B524 | **WRITABLE** | |
 | Invalidate rest | 0x0B528-0x0B56C | **RO** | 17 DWORDs |
 | PT_BASE_LO/HI | 0x0B608-0x0B60C | **RO** | HARDWARE LOCKED, always 0 |
-| GCVM_CONTEXT0_CNTL | 0x0B460 | **WRITABLE** | bit0=1 enables L1 TLB |
+| GCVM_CONTEXT0_CNTL | 0x0B460 | **WRITABLE** | bit0=1 enables context, bit1=DEFAULT_PAGE |
 
-### Key finding: Context0 regs (0x0B408-0x0B4AC) are WRITABLE but contain BIOS-configured state
-- These could be **page table entries** or **identity mapping config**
-- BIOS writes them at boot; we destroyed them with 0xDEADBEEF
-- Need to read ALL values BEFORE overwriting, then decode format
-- Some registers at 0x0B4C0-0x0B4D4 are MASKED (partial write protection)
+### Context0 BIOS State (fresh boot, safe read 2026-06-18)
+- **0x0B404**: 0x00000CC5 (MASKED — partial write protection)
+- **0x0B408**: 0x007ECCC4
+- **0x0B40C**: 0x7D9AB14E
+- **0x0B41C**: 0xC4121908
+- **0x0B420**: 0x8DCFBF89 (VALID bit set)
+- **0x0B424**: 0x6F8C79EE
+- **0x0B428**: 0x5E6DADDB (VALID + SYSTEM bits set)
+- **0x0B42C**: 0xEFF50989 (VALID)
+- **0x0B430**: 0x0BC0DB40
+- **0x0B434-0x0B45C**: various (see safe-read dump)
+- **0x0B460**: 0x010CA88D (CONTEXT0_CNTL — bits 0,2,3,7,11,13,15,18,19,24)
+- **0x0B4C0**: 0x000F0D8F (MASKED)
+- **0x0B4C8**: 0x00000075 (MASKED)
+- **0x0B4CC**: 0x0000000F (MASKED)
+- **0x0B4D0**: 0x0000007D (MASKED)
+- **0x0B4D4**: 0x0000005F (MASKED)
+
+## GCVM DEFAULT_PAGE Discovery (2026-06-18)
+- **CONTEXT0_CNTL bit1 = ENABLE_DEFAULT_PAGE** (Linux sets this, BIOS does NOT)
+- BIOS value: 0x010CA88D (bit1=0, DEFAULT_PAGE disabled)
+- Setting bit1: 0x010CA88F — **WRITABLE, survives GPU_KIQ_TEST**
+- **Effect: NONE** — PM4 still doesn't execute with DEFAULT_PAGE enabled
+- Tested: CONTEXT0_CNTL = 0x00, 0x02, 0x03, 0x010CA88F — all fail
+- Conclusion: DEFAULT_PAGE does not provide flat/physical addressing for ring buffer access
+
+## Firmware Loading Status (2026-06-18)
+- **LOAD_CP_FW works via MMIO** — IC_BASE DMA bypasses GCVM
+- ME: Result=1 (success), UcodeVer=0x63 (99)
+- PFP: Result=1 (success), UcodeVer=0x94 (148)
+- ME_CNTL after FW: 0x30000000 (ME_HALT+CE_HALT, PFP running)
+- **Key insight**: IC_BASE DMA reads firmware from system RAM successfully, but GPU CP ring buffer access uses different GCVM path
+
+## PM4 Submission Root Cause (2026-06-18)
+- **GPU CP cannot access ring buffer memory via GCVM**
+- IC_BASE DMA works (firmware loads) → GPU CAN read system RAM for DMA
+- Ring buffer access goes through GCVM translation → FAILS
+- PT_BASE locked at 0 → no page tables
+- DEFAULT_PAGE doesn't help → no flat mapping
+- Context0 TLB entries (0x0B408-0x0B4AC) — UNKNOWN format, need decode
+- **NEXT**: Try injecting PTE-format entries into empty Context0 slots (0x0B408-0x0B4AC bit0=0 entries)
 
 ## Key Next Steps
 1. **PT_BASE is NOT writable** — BIOS hardware-locks GCVM_CONTEXT0_PT_BASE (0x0B608/0x0B60C). Cannot configure page tables from OS.
