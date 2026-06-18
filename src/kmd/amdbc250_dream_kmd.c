@@ -37,6 +37,9 @@ static PDRIVER_OBJECT g_DriverObject = NULL;
 
 static PDEVICE_OBJECT g_ControlDevice = NULL;
 
+/* TRUE if DxgkInitialize succeeded — dxgkrnl owns the DriverObject */
+static BOOLEAN g_DxgkInitialized = FALSE;
+
 /* PCI device extension (from DxgkDdiAddDevice) - used by IOCTL handler */
 static PDREAM_V3_DEVICE_EXTENSION g_PciDevExt = NULL;
 
@@ -273,123 +276,113 @@ DriverEntry(
     }
 
     if (NT_SUCCESS(Status)) {
+        g_DxgkInitialized = TRUE;
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-                   "AMDBC250-DREAM-V4.3: DreamV3DxgkInitialize successful\n"));
+                   "AMDBC250-DREAM-V4.3: DxgkInitialize SUCCESS — dxgkrnl owns DriverObject\n"));
+        /* DxgkInitialize succeeded: dxgkrnl owns the DriverObject and MajorFunction table.
+           Do NOT create WDM control device or touch MajorFunction — dxgkrnl handles everything.
+           DxgkDdiAddDevice/StartDevice will be called by dxgkrnl. */
     } else {
-        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
-                   "AMDBC250-DREAM-V4.3: DreamV3DxgkInitialize failed: 0x%08X\n", Status));
-    }
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+                   "AMDBC250-DREAM-V4.3: DxgkInitialize FAILED: 0x%08X — falling back to WDM IOCTL mode\n", Status));
 
-    /* Create control device for UMD IOCTL communication */
-    {
-        UNICODE_STRING devName, symLink;
-        NTSTATUS symStatus;
-        RtlInitUnicodeString(&devName, L"\\Device\\AMDBC250DreamV43");
-        RtlInitUnicodeString(&symLink, L"\\DosDevices\\AMDBC250DreamV43");
-        RtlCopyMemory(&g_DeviceName, &devName, sizeof(UNICODE_STRING));
-        RtlCopyMemory(&g_SymlinkName, &symLink, sizeof(UNICODE_STRING));
-
-        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-                   "AMDBC250-DREAM-V4.3: Creating control device...\n"));
-
-        /* Delete any stale control device from a previous failed unload (fixes Error 38) */
+        /* DxgkInitialize failed: create WDM control device for IOCTL communication */
         {
-            PFILE_OBJECT oldFileObj = NULL;
-            PDEVICE_OBJECT oldDevObj = NULL;
-            NTSTATUS openStatus = IoGetDeviceObjectPointer(
-                &devName, FILE_ALL_ACCESS, &oldFileObj, &oldDevObj);
-            if (NT_SUCCESS(openStatus) && oldDevObj != NULL) {
-                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
-                    "AMDBC250-DREAM-V4.3: Found stale control device at %p, deleting...\n", oldDevObj));
-                if (oldFileObj != NULL) {
-                    ObDereferenceObject(oldFileObj);
-                }
-                IoDeleteDevice(oldDevObj);
-                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
-                    "AMDBC250-DREAM-V4.3: Stale control device deleted\n"));
-            }
-        }
-
-        Status = IoCreateDevice(
-            DriverObject,
-            sizeof(DREAM_V3_DEVICE_EXTENSION),
-            &devName,
-            FILE_DEVICE_UNKNOWN,
-            0,
-            FALSE,
-            &g_ControlDevice);
-
-        if (NT_SUCCESS(Status)) {
-            g_ControlDevice->Flags |= DO_BUFFERED_IO;
-            g_ControlDevice->Flags &= ~DO_DEVICE_INITIALIZING;
-            symStatus = IoCreateSymbolicLink(&symLink, &devName);
-
-            /* Mark that device was created */
-            {
-                UNICODE_STRING devPath2, valName2;
-                OBJECT_ATTRIBUTES objAttr2;
-                RtlInitUnicodeString(&devPath2, L"\\Registry\\Machine\\SYSTEM\\CurrentControlSet\\Services\\atikmdag");
-                InitializeObjectAttributes(&objAttr2, &devPath2, OBJ_CASE_INSENSITIVE, NULL, NULL);
-                HANDLE hKey2 = NULL;
-                if (NT_SUCCESS(ZwOpenKey(&hKey2, KEY_SET_VALUE, &objAttr2))) {
-                    ULONG devCreated = 1;
-                    RtlInitUnicodeString(&valName2, L"ControlDeviceCreated");
-                    ZwSetValueKey(hKey2, &valName2, 0, REG_DWORD, &devCreated, sizeof(devCreated));
-                    ULONG symVal = NT_SUCCESS(symStatus) ? 1 : 0;
-                    RtlInitUnicodeString(&valName2, L"SymlinkCreated");
-                    ZwSetValueKey(hKey2, &valName2, 0, REG_DWORD, &symVal, sizeof(symVal));
-                    ZwClose(hKey2);
-                }
-            }
+            UNICODE_STRING devName, symLink;
+            NTSTATUS symStatus;
+            RtlInitUnicodeString(&devName, L"\\Device\\AMDBC250DreamV43");
+            RtlInitUnicodeString(&symLink, L"\\DosDevices\\AMDBC250DreamV43");
+            RtlCopyMemory(&g_DeviceName, &devName, sizeof(UNICODE_STRING));
+            RtlCopyMemory(&g_SymlinkName, &symLink, sizeof(UNICODE_STRING));
 
             KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-                       "AMDBC250-DREAM-V4.3: IoCreateDevice OK, symlink=0x%08X\n", symStatus));
-            /* CREATE/CLOSE + DEVICE_CONTROL on control device — safe because
-               we do NOT call DxgkInitialize, so no WDDM adapter device exists. */
-            DriverObject->MajorFunction[IRP_MJ_CREATE] = DreamV3CreateClose;
-            DriverObject->MajorFunction[IRP_MJ_CLOSE] = DreamV3CreateClose;
-            DriverObject->MajorFunction[IRP_MJ_DEVICE_CONTROL] = DreamV3DeviceControl;
+                       "AMDBC250-DREAM-V4.3: Creating WDM control device (fallback mode)...\n"));
 
-            /* Allocate PCI device extension for IOCTL handler */
+            /* Delete any stale control device from a previous failed unload (fixes Error 38) */
             {
-                g_PciDevExt = (PDREAM_V3_DEVICE_EXTENSION)
-                    ExAllocatePool2(POOL_FLAG_NON_PAGED, sizeof(DREAM_V3_DEVICE_EXTENSION), '3vDA');
-                if (g_PciDevExt != NULL) {
-                    RtlZeroMemory(g_PciDevExt, sizeof(DREAM_V3_DEVICE_EXTENSION));
-                    ExInitializeFastMutex(&g_PciDevExt->DeviceMutex);
-                    KeInitializeSpinLock(&g_PciDevExt->FenceLock);
-                    InitializeListHead(&g_PciDevExt->AllocationList);
-                    KeInitializeEvent(&g_PciDevExt->DeviceRemoved, NotificationEvent, FALSE);
-
-                    g_PciDevExt->VendorId = 0x1002;
-                    g_PciDevExt->DeviceId = 0x13FE;
-                    g_PciDevExt->VisibleVramBytes = 4ULL * 1024 * 1024 * 1024;
-                    g_PciDevExt->TotalVramBytes = 16ULL * 1024 * 1024 * 1024;
-                    g_PciDevExt->NumDisplayPipes = 4;
-                    g_PciDevExt->NextGpuVa = 0x100000000ULL;
-
-                    g_ControlDevice->DeviceExtension = g_PciDevExt;
-
-                    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-                               "AMDBC250-DREAM-V4.3: g_PciDevExt allocated at %p\n", g_PciDevExt));
+                PFILE_OBJECT oldFileObj = NULL;
+                PDEVICE_OBJECT oldDevObj = NULL;
+                NTSTATUS openStatus = IoGetDeviceObjectPointer(
+                    &devName, FILE_ALL_ACCESS, &oldFileObj, &oldDevObj);
+                if (NT_SUCCESS(openStatus) && oldDevObj != NULL) {
+                    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+                        "AMDBC250-DREAM-V4.3: Found stale control device at %p, deleting...\n", oldDevObj));
+                    if (oldFileObj != NULL) {
+                        ObDereferenceObject(oldFileObj);
+                    }
+                    IoDeleteDevice(oldDevObj);
+                    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+                        "AMDBC250-DREAM-V4.3: Stale control device deleted\n"));
                 }
             }
-        } else {
-            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
-                       "AMDBC250-DREAM-V4.3: IoCreateDevice FAILED: 0x%08X\n", Status));
-            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
-                       "AMDBC250-DREAM-V4.3: DriverObject=%p, DevExtSize=%u\n",
-                       DriverObject, sizeof(DREAM_V3_DEVICE_EXTENSION)));
 
-            /* Write error to registry so user-mode can read it */
-            {
-                UNICODE_STRING valName;
-                RtlInitUnicodeString(&valName, L"IoCreateDeviceFailed");
-                ULONG errorVal = (ULONG)Status;
-                ZwSetValueKey(RegistryPath, &valName, 0, REG_DWORD, &errorVal, sizeof(errorVal));
+            Status = IoCreateDevice(
+                DriverObject,
+                sizeof(DREAM_V3_DEVICE_EXTENSION),
+                &devName,
+                FILE_DEVICE_UNKNOWN,
+                0,
+                FALSE,
+                &g_ControlDevice);
+
+            if (NT_SUCCESS(Status)) {
+                g_ControlDevice->Flags |= DO_BUFFERED_IO;
+                g_ControlDevice->Flags &= ~DO_DEVICE_INITIALIZING;
+                symStatus = IoCreateSymbolicLink(&symLink, &devName);
+
+                /* Mark that device was created */
+                {
+                    UNICODE_STRING devPath2, valName2;
+                    OBJECT_ATTRIBUTES objAttr2;
+                    RtlInitUnicodeString(&devPath2, L"\\Registry\\Machine\\SYSTEM\\CurrentControlSet\\Services\\atikmdag");
+                    InitializeObjectAttributes(&objAttr2, &devPath2, OBJ_CASE_INSENSITIVE, NULL, NULL);
+                    HANDLE hKey2 = NULL;
+                    if (NT_SUCCESS(ZwOpenKey(&hKey2, KEY_SET_VALUE, &objAttr2))) {
+                        ULONG devCreated = 1;
+                        RtlInitUnicodeString(&valName2, L"ControlDeviceCreated");
+                        ZwSetValueKey(hKey2, &valName2, 0, REG_DWORD, &devCreated, sizeof(devCreated));
+                        ULONG symVal = NT_SUCCESS(symStatus) ? 1 : 0;
+                        RtlInitUnicodeString(&valName2, L"SymlinkCreated");
+                        ZwSetValueKey(hKey2, &valName2, 0, REG_DWORD, &symVal, sizeof(symVal));
+                        ZwClose(hKey2);
+                    }
+                }
+
+                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                           "AMDBC250-DREAM-V4.3: IoCreateDevice OK, symlink=0x%08X\n", symStatus));
+                DriverObject->MajorFunction[IRP_MJ_CREATE] = DreamV3CreateClose;
+                DriverObject->MajorFunction[IRP_MJ_CLOSE] = DreamV3CreateClose;
+                DriverObject->MajorFunction[IRP_MJ_DEVICE_CONTROL] = DreamV3DeviceControl;
+
+                /* Allocate PCI device extension for IOCTL handler */
+                {
+                    g_PciDevExt = (PDREAM_V3_DEVICE_EXTENSION)
+                        ExAllocatePool2(POOL_FLAG_NON_PAGED, sizeof(DREAM_V3_DEVICE_EXTENSION), '3vDA');
+                    if (g_PciDevExt != NULL) {
+                        RtlZeroMemory(g_PciDevExt, sizeof(DREAM_V3_DEVICE_EXTENSION));
+                        ExInitializeFastMutex(&g_PciDevExt->DeviceMutex);
+                        KeInitializeSpinLock(&g_PciDevExt->FenceLock);
+                        InitializeListHead(&g_PciDevExt->AllocationList);
+                        KeInitializeEvent(&g_PciDevExt->DeviceRemoved, NotificationEvent, FALSE);
+
+                        g_PciDevExt->VendorId = 0x1002;
+                        g_PciDevExt->DeviceId = 0x13FE;
+                        g_PciDevExt->VisibleVramBytes = 4ULL * 1024 * 1024 * 1024;
+                        g_PciDevExt->TotalVramBytes = 16ULL * 1024 * 1024 * 1024;
+                        g_PciDevExt->NumDisplayPipes = 4;
+                        g_PciDevExt->NextGpuVa = 0x100000000ULL;
+
+                        g_ControlDevice->DeviceExtension = g_PciDevExt;
+
+                        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                                   "AMDBC250-DREAM-V4.3: g_PciDevExt allocated at %p\n", g_PciDevExt));
+                    }
+                }
+            } else {
+                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
+                           "AMDBC250-DREAM-V4.3: IoCreateDevice FAILED: 0x%08X\n", Status));
+                Status = STATUS_SUCCESS; /* Non-fatal */
             }
-
-            Status = STATUS_SUCCESS; /* Non-fatal */
         }
     }
 
@@ -661,62 +654,38 @@ DreamV3DdiStartDevice(
         }
     }
 
-    /* Control device already created in DriverEntry — skip if it exists */
-    if (g_ControlDevice == NULL) {
-        UNICODE_STRING devName, symLink;
-        RtlInitUnicodeString(&devName, L"\\Device\\AMDBC250DreamV43");
-        RtlInitUnicodeString(&symLink, L"\\DosDevices\\AMDBC250DreamV43");
-
-        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-                   "AMDBC250-DREAM-V4.3: Creating WDM control device in WDDM path...\n"));
-
-        Status = IoCreateDevice(
-            g_DriverObject,
-            0,
-            &devName,
-            FILE_DEVICE_UNKNOWN,
-            0,
-            FALSE,
-            &g_ControlDevice);
-
-        if (NT_SUCCESS(Status)) {
-            NTSTATUS symStatus;
-            g_ControlDevice->Flags |= DO_BUFFERED_IO;
-            g_ControlDevice->Flags &= ~DO_DEVICE_INITIALIZING;
-            symStatus = IoCreateSymbolicLink(&symLink, &devName);
-            g_ControlDevice->DeviceExtension = DevExt;
-            g_PciDevExt = DevExt;
-
-            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-                       "AMDBC250-DREAM-V4.3: WDM control device created in WDDM path, symlink=0x%08X\n",
-                       symStatus));
-        } else {
-            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
-                       "AMDBC250-DREAM-V4.3: WDM control device creation FAILED: 0x%08X (non-fatal)\n",
-                       Status));
-        }
-    } else {
-        /* Already exists from DriverEntry — just update the device extension pointers */
+    /* Control device: only exists in WDM IOCTL mode (when DxgkInitialize failed) */
+    if (g_ControlDevice != NULL) {
+        /* Control device exists from DriverEntry fallback — update pointers */
         if (g_ControlDevice->DeviceExtension == NULL) {
             g_ControlDevice->DeviceExtension = DevExt;
         }
         g_PciDevExt = DevExt;
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-                   "AMDBC250-DREAM-V4.3: Control device already exists, pointers updated\n"));
+                   "AMDBC250-DREAM-V4.3: Control device already exists, pointers updated (WDM mode)\n"));
+    } else {
+        /* DxgkInitialize succeeded — no WDM control device, dxgkrnl owns everything */
+        g_PciDevExt = DevExt;
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                   "AMDBC250-DREAM-V4.3: WDDM mode — dxgkrnl owns adapter\n"));
     }
 
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                "AMDBC250-DREAM-V4.3: StartDevice SUCCESS\n"));
 
-    /* CRITICAL: Re-set CREATE/CLOSE handlers AFTER dxgkInitialize has completed.
-       dxgkrnl overwrites MajorFunction table when it takes over the DriverObject.
-       Setting handlers here ensures they survive dxgkrnl's initialization.
-       DEVICE_CONTROL is NOT set here — DxgkDdiEscape handles UMD communication. */
-    g_DriverObject->MajorFunction[IRP_MJ_CREATE] = DreamV3CreateClose;
-    g_DriverObject->MajorFunction[IRP_MJ_CLOSE] = DreamV3CreateClose;
-    g_DriverObject->DriverUnload = DreamV3WdmUnload;
-    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-               "AMDBC250-DREAM-V4.3: MajorFunction[CREATE/CLOSE] + DriverUnload re-set after dxgkrnl init\n"));
+    /* Only re-set MajorFunction in WDM IOCTL mode (when DxgkInitialize failed and
+       we have a control device). When DxgkInitialize succeeded, dxgkrnl owns the
+       DriverObject and we must NOT touch MajorFunction — it causes BSOD. */
+    if (g_ControlDevice != NULL) {
+        g_DriverObject->MajorFunction[IRP_MJ_CREATE] = DreamV3CreateClose;
+        g_DriverObject->MajorFunction[IRP_MJ_CLOSE] = DreamV3CreateClose;
+        g_DriverObject->DriverUnload = DreamV3WdmUnload;
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                   "AMDBC250-DREAM-V4.3: MajorFunction re-set (WDM IOCTL mode)\n"));
+    } else {
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                   "AMDBC250-DREAM-V4.3: MajorFunction NOT re-set (WDDM mode — dxgkrnl owns)\n"));
+    }
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                "AMDBC250-DREAM-V4.3:   24 CU RDNA2, 1536 SP\n"));
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
