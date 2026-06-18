@@ -192,6 +192,13 @@ Formula: `BAR5_offset = GC_BASE(0x1260) + Linux_DWORD_offset * 4`
 - Tested: CONTEXT0_CNTL = 0x00, 0x02, 0x03, 0x010CA88F — all fail
 - Conclusion: DEFAULT_PAGE does not provide flat/physical addressing for ring buffer access
 
+## BIOS Configuration Varies Per Boot (2026-06-18)
+- **Boot 1**: CONTEXT0_CNTL = 0x010CA88D, 15+ Context0 regs non-zero
+- **Boot 2**: CONTEXT0_CNTL = 0x00000001, ALL Context0 regs 0x0
+- L2 TLB entries (0x0B31C-0x0B36C) populated on both boots (different values)
+- **Hypothesis**: Warm reboot doesn't fully reset GPU; BIOS config depends on GPU state
+- **Need cold boot** to get consistent BIOS GCVM configuration
+
 ## Firmware Loading Status (2026-06-18)
 - **LOAD_CP_FW works via MMIO** — IC_BASE DMA bypasses GCVM
 - ME: Result=1 (success), UcodeVer=0x63 (99)
