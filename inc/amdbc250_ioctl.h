@@ -423,6 +423,31 @@ typedef struct _AMDBC250_IOCTL_BAR5_READ_PROXY {
     UINT32 Padding;                   /* alignment */
 } AMDBC250_IOCTL_BAR5_READ_PROXY, *PAMDBC250_IOCTL_BAR5_READ_PROXY;
 
+/* --- GPU-local KIQ ring test (bypasses PSP entirely) --- */
+#define IOCTL_AMDBC250_GPU_KIQ_TEST   CTL_CODE_AMDBC250(0x84, METHOD_BUFFERED, FILE_ANY_ACCESS)
+
+typedef struct _AMDBC250_IOCTL_GPU_KIQ_TEST {
+    UINT32 Result;                    /* OUT: 0=fail, else success code */
+    UINT32 ScratchBefore;             /* OUT: SCRATCH before PM4 */
+    UINT32 ScratchAfter;              /* OUT: SCRATCH after PM4 */
+    UINT32 MmioMapped;                /* OUT: 1 if BAR5 mapped */
+    UINT32 RingAllocated;             /* OUT: 1 if ring allocated */
+    UINT32 HqdProgrammed;             /* OUT: 1 if HQD registers written */
+    UINT32 Pm4Submitted;              /* OUT: 1 if PM4 written to ring */
+    UINT32 Padding;                   /* alignment */
+} AMDBC250_IOCTL_GPU_KIQ_TEST, *PAMDBC250_IOCTL_GPU_KIQ_TEST;
+
+/* --- Direct CP firmware load via MMIO (bypasses PSP entirely) --- */
+#define IOCTL_AMDBC250_LOAD_CP_FW    CTL_CODE_AMDBC250(0x85, METHOD_BUFFERED, FILE_ANY_ACCESS)
+
+typedef struct _AMDBC250_IOCTL_LOAD_CP_FW {
+    UINT32 FwType;                  /* IN: 1=ME, 2=PFP, 3=CE */
+    UINT32 FwSize;                  /* IN: total firmware blob size in bytes */
+    UINT32 Result;                  /* OUT: 0=fail, 1=success, error codes */
+    UINT32 UcodeVersion;            /* OUT: firmware version from header */
+    /* Firmware data follows immediately after this struct */
+} AMDBC250_IOCTL_LOAD_CP_FW, *PAMDBC250_IOCTL_LOAD_CP_FW;
+
 #pragma pack(pop)
 
 #endif /* _AMDBC250_IOCTL_H_ */

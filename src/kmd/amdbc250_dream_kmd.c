@@ -3396,6 +3396,18 @@ DreamV3DeviceControl(
                 DevExt->HardwareInitialized = TRUE;
                 DevExt->GpuClockMhz = AMDBC250_BOOST_CLOCK_MHZ;
                 DevExt->MemoryClockMhz = AMDBC250_MEMORY_CLOCK_MHZ;
+
+                /* Initialize KIQ ring even in NBIO_MAP mode (needed for SEND_PM4) */
+                if (NT_SUCCESS(Amdbc250PspKiqInit())) {
+                    DevExt->KiqAvailable = TRUE;
+                    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                        "AMDBC250-DREAM-V4.3: KIQ ring initialized (NBIO_MAP mode)\n"));
+                } else {
+                    DevExt->KiqAvailable = FALSE;
+                    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+                        "AMDBC250-DREAM-V4.3: KIQ init FAILED in NBIO_MAP mode\n"));
+                }
+
                 status = STATUS_SUCCESS;
                 break;
             }
@@ -4496,6 +4508,648 @@ DreamV3DeviceControl(
         } else {
             status = STATUS_BUFFER_TOO_SMALL;
         }
+        break;
+    }
+
+    /* --- GPU-local KIQ test: allocate ring + program HQD + submit PM4, all via BAR5 --- */
+    case 0x80000BD0: { /* IOCTL_AMDBC250_GPU_KIQ_TEST = CTL_CODE_AMDBC250(0x84) */
+        if (outputLen >= sizeof(AMDBC250_IOCTL_GPU_KIQ_TEST) && DevExt && DevExt->MmioVirtualBase) {
+            PAMDBC250_IOCTL_GPU_KIQ_TEST kiqTest = (PAMDBC250_IOCTL_GPU_KIQ_TEST)outputBuffer;
+            PUCHAR mmio = (PUCHAR)DevExt->MmioVirtualBase;
+            RtlZeroMemory(kiqTest, sizeof(*kiqTest));
+            kiqTest->MmioMapped = 1;
+
+            /* PT page variables (declared here for cleanup access) */
+            PVOID ptPml4Va = NULL, ptPdpVa = NULL, ptPdVa = NULL, ptPtVa = NULL;
+            PHYSICAL_ADDRESS ptPml4Pa = {0}, ptPdpPa = {0}, ptPdPa = {0}, ptPtPa = {0};
+
+            /* Macros for direct BAR5 register access */
+            #define BAR5_REG32(off) (*(volatile PULONG)(mmio + (off)))
+            #define GRBM_INDEX      0x34D0
+            #define ME_CNTL         0x4A74
+            #define HQD_ACTIVE      0xDAC0
+            #define HQD_VMID        0xDAC4
+            #define HQD_PERSISTENT  0xDAC8
+            #define HQD_PQ_BASE     0xDAD8
+            #define HQD_PQ_BASE_HI  0xDADC
+            #define HQD_PQ_RPTR     0xDAE0
+            #define HQD_PQ_CONTROL  0xDAFC
+            #define HQD_PQ_WPTR_LO  0xDB90
+            #define HQD_PQ_WPTR_HI  0xDB94
+            #define HQD_PQ_WP_POLL  0xDB00
+            #define HQD_PQ_DOORBELL 0xDAF4
+            #define HQD_EOP_BASE    0xDB4C
+            #define HQD_EOP_BASE_HI 0xDB50
+            #define HQD_EOP_CNTL    0xDB54
+            #define HQD_RPTR_RPT    0xDAE4
+            #define HQD_RPTR_RPT_HI 0xDAE8
+            #define HQD_WP_POLL_A   0xDAEC
+            #define HQD_WP_POLL_A_HI 0xDAF0
+            #define KIQ_BASE_LO     0xE060
+            #define KIQ_BASE_HI     0xE064
+            #define KIQ_RPTR        0xE06C
+            #define KIQ_WPTR        0xE078
+            #define RLC_SCHEDULERS  0xECA1
+            #define SCRATCH_OFF     0x32D4
+
+            /* Step 1: Read SCRATCH before */
+            kiqTest->ScratchBefore = BAR5_REG32(SCRATCH_OFF);
+
+            /* Step 2: Allocate 4KB ring buffer (contiguous, non-cached) */
+            PVOID ringVa = NULL;
+            PHYSICAL_ADDRESS ringPa = {0};
+            {
+                PHYSICAL_ADDRESS low = {0}, high = {0}, boundary = {0};
+                high.QuadPart = 0xFFFFFFFFULL;
+                ringVa = MmAllocateContiguousMemorySpecifyCache(
+                    0x1000, low, high, boundary, MmNonCached);
+                if (ringVa) {
+                    RtlZeroMemory(ringVa, 0x1000);
+                    ringPa = MmGetPhysicalAddress(ringVa);
+                    kiqTest->RingAllocated = 1;
+                    KdPrint(("GPU_KIQ_TEST: Ring VA=%p PA=0x%llX\n", ringVa, ringPa.QuadPart));
+                }
+            }
+
+            if (!ringVa) {
+                kiqTest->Result = 0xDEAD0001;  /* ring alloc failed */
+                status = STATUS_SUCCESS;
+                bytesReturned = sizeof(*kiqTest);
+                break;
+            }
+
+            /* Step 2b: Set up GCVM page tables for identity mapping
+             * GCVM registers are at GC_BASE(0x1260) + Linux_DWORD_offset*4
+             * GCVM_CONTEXT0_CNTL  = 0x0B460
+             * GCVM_CONTEXT0_PT_BASE_LO = 0x0B608
+             * GCVM_CONTEXT0_PT_BASE_HI = 0x0B60C
+             *
+             * RDNA2 4-level page table: PML4 → PDP → PD → PT
+             * Each level: 512 entries × 8 bytes = 4KB per page
+             * PTE format: (PA & 0xFFFFFFFFF000) | flags
+             *   flags: bit0=VALID bit5=READABLE bit6=WRITABLE
+             *
+             * We create identity mapping (VA=PA) for the ring buffer page.
+             */
+            #define GCVM_CONTEXT0_CNTL_REG     0x0B460
+            #define GCVM_CONTEXT0_PT_BASE_LO   0x0B608
+            #define GCVM_CONTEXT0_PT_BASE_HI   0x0B60C
+            #define GCVM_L2_CNTL_REG           0x0B360
+
+            /* Step 2b: Set up GCVM page tables for identity mapping */
+            {
+                PHYSICAL_ADDRESS low = {0}, high = {0}, boundary = {0};
+                high.QuadPart = 0xFFFFFFFFULL;
+
+                ptPml4Va = MmAllocateContiguousMemorySpecifyCache(0x1000, low, high, boundary, MmNonCached);
+                ptPdpVa  = MmAllocateContiguousMemorySpecifyCache(0x1000, low, high, boundary, MmNonCached);
+                ptPdVa   = MmAllocateContiguousMemorySpecifyCache(0x1000, low, high, boundary, MmNonCached);
+                ptPtVa   = MmAllocateContiguousMemorySpecifyCache(0x1000, low, high, boundary, MmNonCached);
+
+                if (ptPml4Va && ptPdpVa && ptPdVa && ptPtVa) {
+                    RtlZeroMemory(ptPml4Va, 0x1000);
+                    RtlZeroMemory(ptPdpVa, 0x1000);
+                    RtlZeroMemory(ptPdVa, 0x1000);
+                    RtlZeroMemory(ptPtVa, 0x1000);
+
+                    ptPml4Pa = MmGetPhysicalAddress(ptPml4Va);
+                    ptPdpPa  = MmGetPhysicalAddress(ptPdpVa);
+                    ptPdPa   = MmGetPhysicalAddress(ptPdVa);
+                    ptPtPa   = MmGetPhysicalAddress(ptPtVa);
+
+                    KdPrint(("GPU_KIQ_TEST: PT pages: PML4=0x%llX PDP=0x%llX PD=0x%llX PT=0x%llX\n",
+                        ptPml4Pa.QuadPart, ptPdpPa.QuadPart, ptPdPa.QuadPart, ptPtPa.QuadPart));
+
+                    ULONG64 ringAddr = ringPa.QuadPart;
+                    ULONG pml4Idx = 0;
+                    ULONG pdpIdx  = (ULONG)((ringAddr >> 30) & 0x1FF);
+                    ULONG pdIdx   = (ULONG)((ringAddr >> 21) & 0x1FF);
+                    ULONG ptIdx   = (ULONG)((ringAddr >> 12) & 0x1FF);
+
+                    KdPrint(("GPU_KIQ_TEST: VA=0x%llX -> PML4[%lu] PDP[%lu] PD[%lu] PT[%lu]\n",
+                        ringAddr, pml4Idx, pdpIdx, pdIdx, ptIdx));
+
+                    PULONG64 pml4 = (PULONG64)ptPml4Va;
+                    PULONG64 pdp = (PULONG64)ptPdpVa;
+                    PULONG64 pd = (PULONG64)ptPdVa;
+                    PULONG64 pt = (PULONG64)ptPtVa;
+
+                    /* PDE: VALID(bit0) | SYSTEM(bit1) */
+                    pml4[0] = (ptPdpPa.QuadPart & 0xFFFFFFFFF000ULL) | 0x03;
+                    pdp[pdpIdx] = (ptPdPa.QuadPart & 0xFFFFFFFFF000ULL) | 0x03;
+                    pd[pdIdx] = (ptPtPa.QuadPart & 0xFFFFFFFFF000ULL) | 0x03;
+                    /* PTE: VALID(bit0) | SYSTEM(bit1) | READABLE(bit5) | WRITABLE(bit6) */
+                    pt[ptIdx] = (ringAddr & 0xFFFFFFFFF000ULL) | 0x63;
+
+                    KdPrint(("GPU_KIQ_TEST: PML4[0]=0x%llX PDP[%lu]=0x%llX PD[%lu]=0x%llX PT[%lu]=0x%llX\n",
+                        pml4[0], pdpIdx, pdp[pdpIdx], pdIdx, pd[pdIdx], ptIdx, pt[ptIdx]));
+
+                    /* Set GCVM_CONTEXT0_PT_BASE to PML4 physical address */
+                    BAR5_REG32(GCVM_CONTEXT0_PT_BASE_LO) = (ULONG)(ptPml4Pa.QuadPart & 0xFFFFFFFF);
+                    BAR5_REG32(GCVM_CONTEXT0_PT_BASE_HI) = (ULONG)(ptPml4Pa.QuadPart >> 32);
+                    KdPrint(("GPU_KIQ_TEST: GCVM_PT_BASE write=0x%llX readback=0x%08X%08X\n",
+                        ptPml4Pa.QuadPart,
+                        BAR5_REG32(GCVM_CONTEXT0_PT_BASE_HI),
+                        BAR5_REG32(GCVM_CONTEXT0_PT_BASE_LO)));
+
+                    /* Enable GCVM context 0 */
+                    ULONG cntlBefore = BAR5_REG32(GCVM_CONTEXT0_CNTL_REG);
+                    BAR5_REG32(GCVM_CONTEXT0_CNTL_REG) = cntlBefore | 0x01;
+                    KdPrint(("GPU_KIQ_TEST: GCVM_CNTL: before=0x%08X after=0x%08X\n",
+                        cntlBefore, BAR5_REG32(GCVM_CONTEXT0_CNTL_REG)));
+                } else {
+                    KdPrint(("GPU_KIQ_TEST: PT alloc failed\n"));
+                    if (ptPml4Va) MmFreeContiguousMemory(ptPml4Va);
+                    if (ptPdpVa) MmFreeContiguousMemory(ptPdpVa);
+                    if (ptPdVa) MmFreeContiguousMemory(ptPdVa);
+                    if (ptPtVa) MmFreeContiguousMemory(ptPtVa);
+                    ptPml4Va = ptPdpVa = ptPdVa = ptPtVa = NULL;
+                }
+            }
+
+            /* Step 3: Halt ME+PFP (preserve other ME_CNTL bits) */
+            {
+                ULONG meVal = BAR5_REG32(ME_CNTL);
+                BAR5_REG32(ME_CNTL) = meVal | (1 << 28) | (1 << 30);  /* set ME_HALT | PFP_HALT, keep rest */
+            }
+            KeStallExecutionProcessor(10);
+
+            /* Step 4: Select KIQ engine */
+            BAR5_REG32(GRBM_INDEX) = 0x00010000;  /* ME=1 */
+
+            /* Step 5: Deactivate queue */
+            BAR5_REG32(HQD_ACTIVE) = 0;
+            KeStallExecutionProcessor(1);
+
+            /* Step 6: Disable WPTR poll + doorbell */
+            BAR5_REG32(HQD_PQ_WP_POLL) = 0;
+            BAR5_REG32(HQD_PQ_DOORBELL) = 0;
+
+            /* Step 7: Clear EOP */
+            BAR5_REG32(HQD_EOP_BASE) = 0;
+            BAR5_REG32(HQD_EOP_BASE_HI) = 0;
+            BAR5_REG32(HQD_EOP_CNTL) = 0x08000000;
+
+            /* Step 8: Clear RPTR report + WPTR poll */
+            BAR5_REG32(HQD_RPTR_RPT) = 0;
+            BAR5_REG32(HQD_RPTR_RPT_HI) = 0;
+            BAR5_REG32(HQD_WP_POLL_A) = 0;
+            BAR5_REG32(HQD_WP_POLL_A_HI) = 0;
+
+            /* Step 9: Set PQ_BASE = ring physical address */
+            BAR5_REG32(HQD_PQ_BASE) = (ULONG)(ringPa.QuadPart & 0xFFFFFF00);
+            BAR5_REG32(HQD_PQ_BASE_HI) = (ULONG)(ringPa.QuadPart >> 32);
+
+            /* Step 9b: Set KIQ_BASE = ring physical address (KIQ engine reads from KIQ_BASE!) */
+            BAR5_REG32(KIQ_BASE_LO) = (ULONG)(ringPa.QuadPart & 0xFFFFFFFF);
+            BAR5_REG32(KIQ_BASE_HI) = (ULONG)(ringPa.QuadPart >> 32);
+
+            /* Step 10: PQ_CONTROL = log2(256 dwords) = 8 */
+            BAR5_REG32(HQD_PQ_CONTROL) = 8;
+
+            /* Step 11: VMID = 0 */
+            BAR5_REG32(HQD_VMID) = 0;
+
+            /* Step 12: PERSISTENT_STATE */
+            BAR5_REG32(HQD_PERSISTENT) = 0xE001;
+
+            /* Step 13: RPTR = WPTR = 0 */
+            BAR5_REG32(HQD_PQ_RPTR) = 0;
+            BAR5_REG32(HQD_PQ_WPTR_LO) = 0;
+            BAR5_REG32(HQD_PQ_WPTR_HI) = 0;
+
+            kiqTest->HqdProgrammed = 1;
+
+            /* Step 15: Restore broadcast, then select KIQ for activate */
+            BAR5_REG32(GRBM_INDEX) = 0x00010000;  /* ME=1 for KIQ */
+
+            /* Step 16: Activate queue */
+            BAR5_REG32(HQD_ACTIVE) = 1;
+            KeStallExecutionProcessor(10);
+
+            /* Step 17: Notify RLC scheduler */
+            BAR5_REG32(RLC_SCHEDULERS) = 0xA0;  /* ENABLE | ME=1 */
+
+            /* Step 18: Resume CP (clear only halt bits, preserve rest) */
+            {
+                ULONG meVal = BAR5_REG32(ME_CNTL);
+                BAR5_REG32(ME_CNTL) = meVal & ~((1 << 28) | (1 << 30));  /* clear ME_HALT | PFP_HALT */
+            }
+            KeStallExecutionProcessor(100);
+
+            /* Step 19: Write PM4 NOP + WRITE_REG to SCRATCH into ring */
+            {
+                volatile PULONG ring = (volatile PULONG)ringVa;
+                /* PM4 Type 3: IT_WRITE_REG (0x12), count=2
+                 * Header: TYPE=3(11), COUNT=2(010), OPCODE=0x12 -> 0xC0021200 */
+                ring[0] = 0xC0021200;  /* PM4 header: WRITE_REG */
+                ring[1] = 0x000032D4;  /* SCRATCH register offset */
+                ring[2] = 0xCAFEBABE;  /* value to write */
+                ring[3] = 0x30000000;  /* NOP */
+                ring[4] = 0x30000000;  /* NOP */
+                ring[5] = 0x30000000;  /* NOP */
+                ring[6] = 0x30000000;  /* NOP */
+                ring[7] = 0x30000000;  /* NOP */
+                KeMemoryBarrier();
+                kiqTest->Pm4Submitted = 1;
+
+                /* Step 20: Update WPTR = 8 DWORDs (both PQ and KIQ paths) */
+                BAR5_REG32(HQD_PQ_WPTR_LO) = 8;
+                BAR5_REG32(HQD_PQ_WPTR_HI) = 0;
+                BAR5_REG32(KIQ_WPTR) = 8;
+            }
+
+            /* Step 22: Wait for GPU to process */
+            {
+                LARGE_INTEGER delay;
+                delay.QuadPart = -10000LL * 50;  /* 50ms */
+                KeDelayExecutionThread(KernelMode, FALSE, &delay);
+            }
+
+            /* Step 23: Read SCRATCH back */
+            kiqTest->ScratchAfter = BAR5_REG32(SCRATCH_OFF);
+
+            /* Step 24: Read WPTR back (to see if GPU consumed commands) */
+            kiqTest->Result = BAR5_REG32(HQD_PQ_WPTR_LO);
+
+            KdPrint(("GPU_KIQ_TEST: ScratchBefore=0x%08X ScratchAfter=0x%08X WPTR=0x%08X\n",
+                kiqTest->ScratchBefore, kiqTest->ScratchAfter, kiqTest->Result));
+
+            /* Cleanup: halt and free ring */
+            BAR5_REG32(GRBM_INDEX) = 0x00010000;
+            BAR5_REG32(HQD_ACTIVE) = 0;
+            {
+                ULONG meVal = BAR5_REG32(ME_CNTL);
+                BAR5_REG32(ME_CNTL) = meVal | (1 << 28) | (1 << 30);  /* set ME_HALT | PFP_HALT */
+            }
+            BAR5_REG32(GRBM_INDEX) = 0xE0000000;
+
+            MmFreeContiguousMemory(ringVa);
+
+            /* Free GCVM page table pages */
+            if (ptPml4Va) MmFreeContiguousMemory(ptPml4Va);
+            if (ptPdpVa) MmFreeContiguousMemory(ptPdpVa);
+            if (ptPdVa) MmFreeContiguousMemory(ptPdVa);
+            if (ptPtVa) MmFreeContiguousMemory(ptPtVa);
+
+            #undef BAR5_REG32
+            #undef GRBM_INDEX
+            #undef ME_CNTL
+            #undef HQD_ACTIVE
+            #undef HQD_VMID
+            #undef HQD_PERSISTENT
+            #undef HQD_PQ_BASE
+            #undef HQD_PQ_BASE_HI
+            #undef HQD_PQ_RPTR
+            #undef HQD_PQ_CONTROL
+            #undef HQD_PQ_WPTR_LO
+            #undef HQD_PQ_WPTR_HI
+            #undef HQD_PQ_WP_POLL
+            #undef HQD_PQ_DOORBELL
+            #undef HQD_EOP_BASE
+            #undef HQD_EOP_BASE_HI
+            #undef HQD_EOP_CNTL
+            #undef HQD_RPTR_RPT
+            #undef HQD_RPTR_RPT_HI
+            #undef HQD_WP_POLL_A
+            #undef HQD_WP_POLL_A_HI
+            #undef KIQ_BASE_LO
+            #undef KIQ_BASE_HI
+            #undef KIQ_RPTR
+            #undef KIQ_WPTR
+            #undef RLC_SCHEDULERS
+            #undef SCRATCH_OFF
+            #undef GCVM_CONTEXT0_CNTL_REG
+            #undef GCVM_CONTEXT0_PT_BASE_LO
+            #undef GCVM_CONTEXT0_PT_BASE_HI
+            #undef GCVM_L2_CNTL_REG
+
+            status = STATUS_SUCCESS;
+            bytesReturned = sizeof(*kiqTest);
+        } else {
+            status = STATUS_BUFFER_TOO_SMALL;
+        }
+        break;
+    }
+
+    /* --- Direct CP firmware load via MMIO (bypasses PSP entirely) --- */
+    case IOCTL_AMDBC250_LOAD_CP_FW: {
+        PDREAM_V3_DEVICE_EXTENSION ext = (PDREAM_V3_DEVICE_EXTENSION)g_ControlDevice->DeviceExtension;
+
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+            "AMDBC250-DREAM-V4.3: LOAD_CP_FW entered, inputLen=%u outputLen=%u\n",
+            inputLen, outputLen));
+
+        if (!ext || !ext->MmioVirtualBase) {
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
+                "AMDBC250-DREAM-V4.3: LOAD_CP_FW - no BAR5 mapping\n"));
+            status = STATUS_DEVICE_NOT_READY;
+            break;
+        }
+
+        if (inputLen < sizeof(AMDBC250_IOCTL_LOAD_CP_FW)) {
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
+                "AMDBC250-DREAM-V4.3: LOAD_CP_FW - input too small (%u < %u)\n",
+                inputLen, (UINT32)sizeof(AMDBC250_IOCTL_LOAD_CP_FW)));
+            status = STATUS_BUFFER_TOO_SMALL;
+            break;
+        }
+
+        if (outputLen < sizeof(AMDBC250_IOCTL_LOAD_CP_FW)) {
+            status = STATUS_BUFFER_TOO_SMALL;
+            break;
+        }
+
+        PAMDBC250_IOCTL_LOAD_CP_FW req = (PAMDBC250_IOCTL_LOAD_CP_FW)inputBuffer;
+        PAMDBC250_IOCTL_LOAD_CP_FW resp = (PAMDBC250_IOCTL_LOAD_CP_FW)outputBuffer;
+
+        UINT32 fwType = req->FwType;
+        UINT32 fwSize = req->FwSize;
+
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+            "AMDBC250-DREAM-V4.3: LOAD_CP_FW type=%u size=%u\n", fwType, fwSize));
+
+        resp->Result = 0;
+        resp->UcodeVersion = 0;
+
+        if (fwType < 1 || fwType > 3) {
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
+                "AMDBC250-DREAM-V4.3: LOAD_CP_FW - invalid type %u (must be 1=ME, 2=PFP, 3=CE)\n", fwType));
+            resp->Result = 0xDEAD0010;  /* invalid type */
+            status = STATUS_SUCCESS;
+            bytesReturned = sizeof(*resp);
+            break;
+        }
+
+        if (fwSize < 64 || fwSize > 4 * 1024 * 1024) {
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
+                "AMDBC250-DREAM-V4.3: LOAD_CP_FW - invalid size %u\n", fwSize));
+            resp->Result = 0xDEAD0011;  /* invalid size */
+            status = STATUS_SUCCESS;
+            bytesReturned = sizeof(*resp);
+            break;
+        }
+
+        /* Firmware data follows immediately after the struct header */
+        const UINT8 *fwBlob = (const UINT8 *)(req + 1);
+        UINT32 blobAvailable = inputLen - sizeof(AMDBC250_IOCTL_LOAD_CP_FW);
+
+        if (blobAvailable < fwSize) {
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
+                "AMDBC250-DREAM-V4.3: LOAD_CP_FW - blob truncated (%u < %u)\n",
+                blobAvailable, fwSize));
+            resp->Result = 0xDEAD0012;  /* blob truncated */
+            status = STATUS_SUCCESS;
+            bytesReturned = sizeof(*resp);
+            break;
+        }
+
+        /* Parse firmware header.
+         * Cyan Skillfish firmware layout (44-byte header):
+         *   [0] total_size, [1] header_size_bytes, [2] version_major, [3] version_minor
+         *   [4] ucode_version, [5] ucode_size_bytes, [6] ucode_offset_bytes
+         *   [7] checksum/hash, [8] data_offset, [9] jt_offset(DWORDs), [10] jt_size(DWORDs)
+         */
+        if (fwSize < 44) {
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
+                "AMDBC250-DREAM-V4.3: LOAD_CP_FW - firmware too small for header (%u)\n", fwSize));
+            resp->Result = 0xDEAD0013;
+            status = STATUS_SUCCESS;
+            bytesReturned = sizeof(*resp);
+            break;
+        }
+
+        const UINT32 *hdr = (const UINT32 *)fwBlob;
+        UINT32 totalSize    = hdr[0];
+        UINT32 hdrSizeBytes = hdr[1];
+        UINT32 ucodeVersion = hdr[4];
+        UINT32 ucodeSize    = hdr[5];
+        UINT32 ucodeOffset  = hdr[6];
+        UINT32 jtOffsetDw   = hdr[9];  /* DWORD offset from ucode start */
+        UINT32 jtSizeDw     = hdr[10]; /* size in DWORDs */
+
+        resp->UcodeVersion = ucodeVersion;
+
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+            "AMDBC250-DREAM-V4.3: LOAD_CP_FW header: total=%u hdrSize=%u ver=%u ucodeSize=%u ucodeOff=%u jtOffDw=%u jtSizeDw=%u\n",
+            totalSize, hdrSizeBytes, ucodeVersion, ucodeSize, ucodeOffset, jtOffsetDw, jtSizeDw));
+
+        /* Validate header fields */
+        if (ucodeSize == 0 || ucodeOffset < hdrSizeBytes || (ucodeOffset + ucodeSize) > fwSize) {
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
+                "AMDBC250-DREAM-V4.3: LOAD_CP_FW - invalid header fields\n"));
+            resp->Result = 0xDEAD0014;
+            status = STATUS_SUCCESS;
+            bytesReturned = sizeof(*resp);
+            break;
+        }
+
+        /* Allocate contiguous physical memory for the full firmware blob */
+        PHYSICAL_ADDRESS low = {0}, high = {0}, boundary = {0};
+        high.QuadPart = 0xFFFFFFFFULL;  /* below 4GB */
+        PVOID fwVa = MmAllocateContiguousMemorySpecifyCache(
+            fwSize, low, high, boundary, MmNonCached);
+
+        if (!fwVa) {
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
+                "AMDBC250-DREAM-V4.3: LOAD_CP_FW - alloc %u bytes failed\n", fwSize));
+            resp->Result = 0xDEAD0015;  /* alloc failed */
+            status = STATUS_SUCCESS;
+            bytesReturned = sizeof(*resp);
+            break;
+        }
+
+        RtlCopyMemory(fwVa, fwBlob, fwSize);
+        PHYSICAL_ADDRESS fwPa = MmGetPhysicalAddress(fwVa);
+
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+            "AMDBC250-DREAM-V4.3: LOAD_CP_FW firmware PA=0x%llX size=%u\n",
+            fwPa.QuadPart, fwSize));
+
+        /* Define register addresses via BAR5 */
+        #define BAR5_U32(off) (*(volatile UINT32 *)((PUCHAR)ext->MmioVirtualBase + (off)))
+
+        /* Register offsets (GC_BASE-shifted byte offsets) */
+        #define REG_ME_CNTL        0x4A74
+        #define REG_SCRATCH        0x32D4
+        #define REG_GRBM_INDEX     0x34D0
+
+        /* HYP ucode upload registers */
+        #define REG_ME_UCODE_ADDR  0x172B8
+        #define REG_ME_UCODE_DATA  0x172BC
+        #define REG_PFP_UCODE_ADDR 0x172B0
+        #define REG_PFP_UCODE_DATA 0x172B4
+        #define REG_CE_UCODE_ADDR  0x172C0
+        #define REG_CE_UCODE_DATA  0x172C4
+
+        /* IC_BASE registers (firmware DMA target) */
+        #define REG_ME_IC_CNTL     0x17378
+        #define REG_ME_IC_LO       0x17370
+        #define REG_ME_IC_HI       0x17374
+        #define REG_PFP_IC_CNTL    0x17368
+        #define REG_PFP_IC_LO      0x17360
+        #define REG_PFP_IC_HI      0x17364
+        #define REG_CE_IC_CNTL     0x17388
+        #define REG_CE_IC_LO       0x17380
+        #define REG_CE_IC_HI       0x17384
+
+        __try {
+            /* Step 1: Halt ME + PFP + CE */
+            BAR5_U32(REG_ME_CNTL) = (1 << 28) | (1 << 30) | (1 << 29);  /* ME_HALT | PFP_HALT | CE_HALT */
+            KeStallExecutionProcessor(10);
+
+            /* Step 2: Read back ME_CNTL to confirm halt */
+            UINT32 meCntlRead = BAR5_U32(REG_ME_CNTL);
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                "AMDBC250-DREAM-V4.3: LOAD_CP_FW ME_CNTL after halt=0x%08X\n", meCntlRead));
+
+            /* Step 3: Set IC_BASE for target engine
+             * IC_BASE_CNTL: VMID=0, cache policy = uncached for DMA
+             * IC_BASE_LO/HI: physical address of firmware buffer
+             * GPU DMA engine will read firmware from this address
+             */
+            UINT32 icBaseLo = (UINT32)(fwPa.QuadPart & 0xFFFFFFFF);
+            UINT32 icBaseHi = (UINT32)(fwPa.QuadPart >> 32);
+
+            if (fwType == 1) {
+                /* ME firmware */
+                BAR5_U32(REG_ME_IC_CNTL) = 0x00000100;  /* VMID=0, enable IC */
+                BAR5_U32(REG_ME_IC_LO) = icBaseLo;
+                BAR5_U32(REG_ME_IC_HI) = icBaseHi;
+                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                    "AMDBC250-DREAM-V4.3: LOAD_CP_FW ME IC_BASE=0x%08X%08X\n", icBaseHi, icBaseLo));
+            } else if (fwType == 2) {
+                /* PFP firmware */
+                BAR5_U32(REG_PFP_IC_CNTL) = 0x00000100;
+                BAR5_U32(REG_PFP_IC_LO) = icBaseLo;
+                BAR5_U32(REG_PFP_IC_HI) = icBaseHi;
+                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                    "AMDBC250-DREAM-V4.3: LOAD_CP_FW PFP IC_BASE=0x%08X%08X\n", icBaseHi, icBaseLo));
+            } else {
+                /* CE firmware */
+                BAR5_U32(REG_CE_IC_CNTL) = 0x00000100;
+                BAR5_U32(REG_CE_IC_LO) = icBaseLo;
+                BAR5_U32(REG_CE_IC_HI) = icBaseHi;
+                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                    "AMDBC250-DREAM-V4.3: LOAD_CP_FW CE IC_BASE=0x%08X%08X\n", icBaseHi, icBaseLo));
+            }
+
+            /* Step 4: Upload Jump Table (JT) via UCODE_DATA
+             * The JT is a table of DWORDs at the end of the firmware ucode.
+             * GPU reads JT from the IC_BASE address, but we also need to
+             * "prime" it by writing the JT entries via the UCODE_DATA path.
+             * JT is at: ucode_start + jtOffsetDw, size = jtSizeDw DWORDs.
+             */
+            UINT32 ucodeStartOff = ucodeOffset;  /* byte offset from blob start */
+            UINT32 jtByteOff = ucodeStartOff + (jtOffsetDw * 4);
+            UINT32 jtSizeBytes = jtSizeDw * 4;
+
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                "AMDBC250-DREAM-V4.3: LOAD_CP_FW JT at blob offset %u, %u DWORDs (%u bytes)\n",
+                jtByteOff, jtSizeDw, jtSizeBytes));
+
+            if (jtSizeDw > 0 && (jtByteOff + jtSizeBytes) <= fwSize) {
+                const UINT32 *jtData = (const UINT32 *)(fwBlob + jtByteOff);
+
+                UINT32 ucodeAddrReg, ucodeDataReg;
+                if (fwType == 1) {
+                    ucodeAddrReg = REG_ME_UCODE_ADDR;
+                    ucodeDataReg = REG_ME_UCODE_DATA;
+                } else if (fwType == 2) {
+                    ucodeAddrReg = REG_PFP_UCODE_ADDR;
+                    ucodeDataReg = REG_PFP_UCODE_DATA;
+                } else {
+                    ucodeAddrReg = REG_CE_UCODE_ADDR;
+                    ucodeDataReg = REG_CE_UCODE_DATA;
+                }
+
+                /* Reset ucode address to 0 before uploading JT */
+                BAR5_U32(ucodeAddrReg) = 0;
+                KeStallExecutionProcessor(1);
+
+                /* Upload JT entries one DWORD at a time */
+                for (UINT32 i = 0; i < jtSizeDw; i++) {
+                    BAR5_U32(ucodeDataReg) = jtData[i];
+                    KeStallExecutionProcessor(1);
+                }
+
+                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                    "AMDBC250-DREAM-V4.3: LOAD_CP_FW uploaded %u JT DWORDs\n", jtSizeDw));
+
+                /* Step 5: Write ucode version to UCODE_ADDR to commit */
+                BAR5_U32(ucodeAddrReg) = ucodeVersion;
+                KeStallExecutionProcessor(10);
+
+                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                    "AMDBC250-DREAM-V4.3: LOAD_CP_FW wrote version 0x%X to UCODE_ADDR\n", ucodeVersion));
+            } else {
+                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+                    "AMDBC250-DREAM-V4.3: LOAD_CP_FW - no JT data (jtSizeDw=%u)\n", jtSizeDw));
+                /* Still write version even without JT */
+                UINT32 ucodeAddrReg;
+                if (fwType == 1) ucodeAddrReg = REG_ME_UCODE_ADDR;
+                else if (fwType == 2) ucodeAddrReg = REG_PFP_UCODE_ADDR;
+                else ucodeAddrReg = REG_CE_UCODE_ADDR;
+                BAR5_U32(ucodeAddrReg) = ucodeVersion;
+                KeStallExecutionProcessor(10);
+            }
+
+            /* Step 6: Unhalt the loaded engine */
+            if (fwType == 1) {
+                /* Unhalt ME only (keep PFP+CE halted) */
+                BAR5_U32(REG_ME_CNTL) = (1 << 30) | (1 << 29);  /* PFP_HALT | CE_HALT, ME clear */
+            } else if (fwType == 2) {
+                /* Unhalt PFP only */
+                BAR5_U32(REG_ME_CNTL) = (1 << 28) | (1 << 29);  /* ME_HALT | CE_HALT, PFP clear */
+            } else {
+                /* Unhalt CE only */
+                BAR5_U32(REG_ME_CNTL) = (1 << 28) | (1 << 30);  /* ME_HALT | PFP_HALT, CE clear */
+            }
+            KeStallExecutionProcessor(10);
+
+            UINT32 meCntlAfter = BAR5_U32(REG_ME_CNTL);
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                "AMDBC250-DREAM-V4.3: LOAD_CP_FW ME_CNTL after unhalt=0x%08X\n", meCntlAfter));
+
+            /* Read SCRATCH as sanity check */
+            UINT32 scratch = BAR5_U32(REG_SCRATCH);
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                "AMDBC250-DREAM-V4.3: LOAD_CP_FW SCRATCH=0x%08X\n", scratch));
+
+            resp->Result = 1;  /* success */
+
+            #undef BAR5_U32
+            #undef REG_ME_CNTL
+            #undef REG_SCRATCH
+            #undef REG_GRBM_INDEX
+            #undef REG_ME_UCODE_ADDR
+            #undef REG_ME_UCODE_DATA
+            #undef REG_PFP_UCODE_ADDR
+            #undef REG_PFP_UCODE_DATA
+            #undef REG_CE_UCODE_ADDR
+            #undef REG_CE_UCODE_DATA
+            #undef REG_ME_IC_CNTL
+            #undef REG_ME_IC_LO
+            #undef REG_ME_IC_HI
+            #undef REG_PFP_IC_CNTL
+            #undef REG_PFP_IC_LO
+            #undef REG_PFP_IC_HI
+            #undef REG_CE_IC_CNTL
+            #undef REG_CE_IC_LO
+            #undef REG_CE_IC_HI
+
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            UINT32 excCode = GetExceptionCode();
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
+                "AMDBC250-DREAM-V4.3: LOAD_CP_FW EXCEPTION 0x%08X\n", excCode));
+            resp->Result = 0xDEAD00FF;
+        }
+
+        /* Free the contiguous firmware buffer */
+        MmFreeContiguousMemory(fwVa);
+
+        status = STATUS_SUCCESS;
+        bytesReturned = sizeof(*resp);
         break;
     }
 

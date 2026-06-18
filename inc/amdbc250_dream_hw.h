@@ -213,6 +213,45 @@ Environment:
 #define AMDBC250_REG_CP_MEC_CNTL        0x0000C0E0  /* MEC (compute) control (NBIO)    */
 #define AMDBC250_REG_CP_MEC_STATUS      0x0000C0E4  /* MEC status (NBIO)               */
 
+/* --- CP Firmware Loading Registers (GC_BASE-shifted, bypasses NBIO firewall) ---
+ * These are the HYP (hypervisor) variants of the ucode upload registers.
+ * From Linux gc_10_1_0_offset.h: mm values are DWORD offsets, byte = mm*4.
+ * GC_BASE = 0x1260, so byte offset = GC_BASE + (mm * 4).
+ * CP_HYP_PFP_UCODE_ADDR: mm=0x5814, byte=0x16050, GC shifted=0x172B0
+ * CP_HYP_PFP_UCODE_DATA: mm=0x5815, byte=0x16054, GC shifted=0x172B4
+ * CP_HYP_ME_UCODE_ADDR:  mm=0x5816, byte=0x16058, GC shifted=0x172B8
+ * CP_HYP_ME_UCODE_DATA:  mm=0x5817, byte=0x1605C, GC shifted=0x172BC
+ * CP_HYP_CE_UCODE_ADDR:  mm=0x5818, byte=0x16060, GC shifted=0x172C0
+ * CP_HYP_CE_UCODE_DATA:  mm=0x5819, byte=0x16064, GC shifted=0x172C4
+ *
+ * IC_BASE registers (firmware DMA target):
+ * CP_PFP_IC_BASE_CNTL: mm=0x5842, byte=0x16108, GC shifted=0x17368
+ * CP_PFP_IC_BASE_LO:   mm=0x5840, byte=0x16100, GC shifted=0x17360
+ * CP_PFP_IC_BASE_HI:   mm=0x5841, byte=0x16104, GC shifted=0x17364
+ * CP_ME_IC_BASE_CNTL:  mm=0x5846, byte=0x16118, GC shifted=0x17378
+ * CP_ME_IC_BASE_LO:    mm=0x5844, byte=0x16110, GC shifted=0x17370
+ * CP_ME_IC_BASE_HI:    mm=0x5845, byte=0x16114, GC shifted=0x17374
+ * CP_CE_IC_BASE_CNTL:  mm=0x584A, byte=0x16128, GC shifted=0x17388
+ * CP_CE_IC_BASE_LO:    mm=0x5848, byte=0x16120, GC shifted=0x17380
+ * CP_CE_IC_BASE_HI:    mm=0x5849, byte=0x16124, GC shifted=0x17384
+ */
+#define AMDBC250_REG_CP_HYP_PFP_UCODE_ADDR  (AMDBC250_GC_BASE + 0x00016050)  /* 0x172B0 */
+#define AMDBC250_REG_CP_HYP_PFP_UCODE_DATA  (AMDBC250_GC_BASE + 0x00016054)  /* 0x172B4 */
+#define AMDBC250_REG_CP_HYP_ME_UCODE_ADDR   (AMDBC250_GC_BASE + 0x00016058)  /* 0x172B8 */
+#define AMDBC250_REG_CP_HYP_ME_UCODE_DATA   (AMDBC250_GC_BASE + 0x0001605C)  /* 0x172BC */
+#define AMDBC250_REG_CP_HYP_CE_UCODE_ADDR   (AMDBC250_GC_BASE + 0x00016060)  /* 0x172C0 */
+#define AMDBC250_REG_CP_HYP_CE_UCODE_DATA   (AMDBC250_GC_BASE + 0x00016064)  /* 0x172C4 */
+
+#define AMDBC250_REG_CP_PFP_IC_BASE_CNTL    (AMDBC250_GC_BASE + 0x00016108)  /* 0x17368 */
+#define AMDBC250_REG_CP_PFP_IC_BASE_LO      (AMDBC250_GC_BASE + 0x00016100)  /* 0x17360 */
+#define AMDBC250_REG_CP_PFP_IC_BASE_HI      (AMDBC250_GC_BASE + 0x00016104)  /* 0x17364 */
+#define AMDBC250_REG_CP_ME_IC_BASE_CNTL     (AMDBC250_GC_BASE + 0x00016118)  /* 0x17378 */
+#define AMDBC250_REG_CP_ME_IC_BASE_LO       (AMDBC250_GC_BASE + 0x00016110)  /* 0x17370 */
+#define AMDBC250_REG_CP_ME_IC_BASE_HI       (AMDBC250_GC_BASE + 0x00016114)  /* 0x17374 */
+#define AMDBC250_REG_CP_CE_IC_BASE_CNTL     (AMDBC250_GC_BASE + 0x00016128)  /* 0x17388 */
+#define AMDBC250_REG_CP_CE_IC_BASE_LO       (AMDBC250_GC_BASE + 0x00016120)  /* 0x17380 */
+#define AMDBC250_REG_CP_CE_IC_BASE_HI       (AMDBC250_GC_BASE + 0x00016124)  /* 0x17384 */
+
 /* --- GFX10 Ring Buffer (GFX10 style, BC-250: shift by GC_BASE=0x1260) --- */
 #define AMDBC250_REG_CP_GFX_RING0_BASE_LO   (AMDBC250_GC_BASE + 0x0000C800)  /* 0xDA60 */
 #define AMDBC250_REG_CP_GFX_RING0_BASE_HI   (AMDBC250_GC_BASE + 0x0000C804)  /* 0xDA64 */

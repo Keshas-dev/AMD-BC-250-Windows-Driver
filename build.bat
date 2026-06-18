@@ -9,8 +9,18 @@ set "OUTPUT_DIR=%PROJECT_DIR%output"
 set "CERT_FILE=%PROJECT_DIR%testcert.pfx"
 set "CERT_NAME=AMD-BC250-Signer"
 
-rem --- Detect Visual Studio on E: or C: drive ---
+rem --- Detect Visual Studio on D:, E:, or C: drive ---
 set "VSWHERE="
+if exist "D:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Auxiliary\Build\vcvars64.bat" (
+    set "VSWHERE=D:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Auxiliary\Build\vcvars64.bat"
+    echo Found Visual Studio 2022 Professional on D: drive
+    goto :SetupEnv
+)
+if exist "D:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat" (
+    set "VSWHERE=D:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
+    echo Found Visual Studio 2022 Community on D: drive
+    goto :SetupEnv
+)
 if exist "E:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat" (
     set "VSWHERE=E:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
     echo Found Visual Studio 2022 Community on E: drive
@@ -39,7 +49,9 @@ if errorlevel 1 (
 
 rem --- Detect Windows Kit ---
 set "WDK_ROOT="
-if exist "E:\Program Files (x86)\Windows Kits\10\Include" (
+if exist "D:\Program Files (x86)\Windows Kits\10\Include" (
+    set "WDK_ROOT=D:\Program Files (x86)\Windows Kits\10"
+) else if exist "E:\Program Files (x86)\Windows Kits\10\Include" (
     set "WDK_ROOT=E:\Program Files (x86)\Windows Kits\10"
 ) else if exist "C:\Program Files (x86)\Windows Kits\10\Include" (
     set "WDK_ROOT=C:\Program Files (x86)\Windows Kits\10"

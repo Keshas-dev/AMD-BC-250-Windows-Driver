@@ -79,6 +79,9 @@ queryex
 start
 stop
 compile-test.bat
+compile-gpu-test.bat
 vc140.pdb
 Vulkan/
 mesa-aco/
+delete
+disable.ps1
