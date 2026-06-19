@@ -55,6 +55,16 @@ static DRIVER_INITIALIZATION_DATA g_InitData = {0};
 static UNICODE_STRING g_DeviceName;
 static UNICODE_STRING g_SymlinkName;
 
+/* MDL tracking table — prevents memory leak in ALLOC_VIDMEM IOCTL */
+typedef struct _DREAM_V3_MDL_ENTRY {
+    PVOID Va;
+    PMDL Mdl;
+    SIZE_T Size;
+} DREAM_V3_MDL_ENTRY;
+
+static DREAM_V3_MDL_ENTRY g_MdlTable[64] = {0};
+static KSPIN_LOCK g_MdlTableLock;
+
 /* Forward declarations */
 NTSTATUS DreamV3DeviceControl(PDEVICE_OBJECT, PIRP);
 NTSTATUS DreamV3CreateClose(PDEVICE_OBJECT, PIRP);
@@ -564,6 +574,7 @@ DreamV3DdiAddDevice(
     ExInitializeFastMutex(&DevExt->DeviceMutex);
     KeInitializeSpinLock(&DevExt->FenceLock);
     KeInitializeSpinLock(&DevExt->AllocationListLock);
+    KeInitializeSpinLock(&g_MdlTableLock);
     InitializeListHead(&DevExt->AllocationList);
     KeInitializeEvent(&DevExt->DeviceRemoved, NotificationEvent, FALSE);
 
@@ -936,6 +947,20 @@ static VOID DreamV3WdmUnload(_In_ PDRIVER_OBJECT DriverObject)
     if (g_SharedBuffer != NULL) {
         ExFreePoolWithTag(g_SharedBuffer, 'cmhS');
         g_SharedBuffer = NULL;
+    }
+
+    /* Cleanup any remaining MDL allocations (prevent memory leak on unload) */
+    for (int m = 0; m < 64; m++) {
+        if (g_MdlTable[m].Va != NULL && g_MdlTable[m].Mdl != NULL) {
+            MmUnmapLockedPages(g_MdlTable[m].Va, g_MdlTable[m].Mdl);
+            MmFreePagesFromMdl(g_MdlTable[m].Mdl);
+            ExFreePoolWithTag(g_MdlTable[m].Mdl, 'MDL');
+            g_MdlTable[m].Va = NULL;
+            g_MdlTable[m].Mdl = NULL;
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+                       "AMDBC250-DREAM-V4.3: Leaked MDL freed on unload: %llu bytes\n",
+                       (ULONG64)g_MdlTable[m].Size));
+        }
     }
     
     if (g_ControlDevice != NULL) {
@@ -2666,6 +2691,20 @@ DreamV3DeviceControl(
                         OutData[0] = pa.QuadPart;
                         OutData[1] = (ULONG64)(UINT_PTR)va;
                         bytesReturned = sizeof(ULONG64) * 2;
+                        /* Store MDL for later cleanup — prevents memory leak */
+                        {
+                            KIRQL oldIrql;
+                            KeAcquireSpinLock(&g_MdlTableLock, &oldIrql);
+                            for (int m = 0; m < 64; m++) {
+                                if (g_MdlTable[m].Va == NULL) {
+                                    g_MdlTable[m].Va = va;
+                                    g_MdlTable[m].Mdl = mdl;
+                                    g_MdlTable[m].Size = allocSize;
+                                    break;
+                                }
+                            }
+                            KeReleaseSpinLock(&g_MdlTableLock, oldIrql);
+                        }
                         status = STATUS_SUCCESS;
                     } else {
                         MmFreePagesFromMdl(mdl);
@@ -2949,9 +2988,31 @@ DreamV3DeviceControl(
             PULONG64 InData = (PULONG64)inputBuffer;
             PVOID handle = (PVOID)(UINT_PTR)InData[0];
             if (handle != NULL) {
-                MmFreeContiguousMemory(handle);
+                /* Try MDL table first (for MDL allocations) */
+                KIRQL oldIrql;
+                BOOLEAN found = FALSE;
+                KeAcquireSpinLock(&g_MdlTableLock, &oldIrql);
+                for (int m = 0; m < 64; m++) {
+                    if (g_MdlTable[m].Va == handle) {
+                        MmUnmapLockedPages(handle, g_MdlTable[m].Mdl);
+                        MmFreePagesFromMdl(g_MdlTable[m].Mdl);
+                        ExFreePoolWithTag(g_MdlTable[m].Mdl, 'MDL');
+                        g_MdlTable[m].Va = NULL;
+                        g_MdlTable[m].Mdl = NULL;
+                        g_MdlTable[m].Size = 0;
+                        found = TRUE;
+                        break;
+                    }
+                }
+                KeReleaseSpinLock(&g_MdlTableLock, oldIrql);
+
+                if (!found) {
+                    /* Fallback: contiguous memory allocation */
+                    MmFreeContiguousMemory(handle);
+                }
                 KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-                    "AMDBC250-DREAM-V4.3: FreeVidMem OK\n"));
+                    "AMDBC250-DREAM-V4.3: FreeVidMem OK (MDL=%s)\n",
+                    found ? "freed" : "contiguous"));
             }
         }
         break;
