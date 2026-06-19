@@ -107,8 +107,7 @@ DreamV3ResolveDxgkInitialize(VOID)
     }
 
     status = ZwQuerySystemInformation(SystemModuleInformation, &needed, 0, &needed);
-    PSYSTEM_MODULE_INFORMATION pModInfo = (PSYSTEM_MODULE_INFORMATION)
-        ExAllocatePool2(POOL_FLAG_NON_PAGED, needed, 'xmGD');
+    PVOID pModInfo = ExAllocatePool2(POOL_FLAG_NON_PAGED, needed, 'xmGD');
     if (pModInfo == NULL) return STATUS_NO_MEMORY;
 
     status = ZwQuerySystemInformation(SystemModuleInformation, pModInfo, needed, &needed);
@@ -118,13 +117,32 @@ DreamV3ResolveDxgkInitialize(VOID)
     }
 
     PVOID modBase = NULL;
-    for (ULONG i = 0; i < pModInfo->NumberOfModules; i++) {
-        PUCHAR modPath = pModInfo->Modules[i].FullPathName;
-        /* FullPathName is 256 bytes, NOT null-terminated — use strnlen */
-        SIZE_T modPathLen = strnlen((PCHAR)modPath, sizeof(pModInfo->Modules[i].FullPathName));
-        if (modPathLen >= 10 &&
-            _strnicmp((PCHAR)modPath + modPathLen - 10, "dxgkrnl.sys", 10) == 0) {
-            modBase = pModInfo->Modules[i].ImageBase;
+    PUCHAR rawBuf = (PUCHAR)pModInfo;
+    ULONG numModules = *(ULONG *)rawBuf;
+    PUCHAR moduleStart = rawBuf + sizeof(ULONG);
+    /* Compute entry stride dynamically to avoid struct layout assumptions */
+    ULONG entrySize = (needed - sizeof(ULONG)) / numModules;
+
+    for (ULONG i = 0; i < numModules; i++) {
+        PUCHAR pEntry = moduleStart + (i * entrySize);
+        /* FullPathName is always the last 256 bytes of each module entry */
+        PUCHAR modPath = pEntry + entrySize - 256;
+
+        /* Compare last 11 bytes of FullPathName with "dxgkrnl.sys" byte-by-byte.
+           No CRT dependency — avoids strnlen/_strnicmp link issues. */
+        BOOLEAN match = FALSE;
+        for (int j = 255; j >= 10; j--) {
+            if (modPath[j] == 's' && modPath[j-1] == 'y' && modPath[j-2] == 's' &&
+                modPath[j-3] == '.' && modPath[j-4] == 'l' && modPath[j-5] == 'r' &&
+                modPath[j-6] == 'n' && modPath[j-7] == 'k' && modPath[j-8] == 'g' &&
+                modPath[j-9] == 'x' && modPath[j-10] == 'd') {
+                match = TRUE;
+                break;
+            }
+        }
+        if (match) {
+            /* ImageBase is always at offset 16: Section(8) + MappedBase(8) */
+            modBase = *(PVOID *)(pEntry + 16);
             KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                        "AMDBC250-DREAM-V4.3: dxgkrnl.sys base=%p\n", modBase));
             break;
@@ -159,7 +177,11 @@ DreamV3ResolveDxgkInitialize(VOID)
 
     for (ULONG i = 0; i < pExports->NumberOfNames; i++) {
         PCHAR name = (PCHAR)((PUCHAR)modBase + pNames[i]);
-        if (strcmp(name, "DxgkInitialize") == 0) {
+        /* Manual byte comparison — avoids CRT strcmp dependency */
+        if (name[0] == 'D' && name[1] == 'x' && name[2] == 'g' && name[3] == 'k' &&
+            name[4] == 'I' && name[5] == 'n' && name[6] == 'i' && name[7] == 't' &&
+            name[8] == 'i' && name[9] == 'a' && name[10] == 'l' && name[11] == 'i' &&
+            name[12] == 'z' && name[13] == 'e' && name[14] == '\0') {
             g_pfnDxgkInitialize = (PFN_DXGK_INITIALIZE)
                 ((PUCHAR)modBase + pFunctions[pOrdinals[i]]);
             KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
@@ -172,6 +194,20 @@ DreamV3ResolveDxgkInitialize(VOID)
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
                "AMDBC250-DREAM-V4.3: DxgkInitialize NOT found in dxgkrnl exports\n"));
     return STATUS_NOT_FOUND;
+}
+
+static VOID DreamV3WriteStep(ULONG step)
+{
+    UNICODE_STRING vp, vn;
+    OBJECT_ATTRIBUTES oa;
+    RtlInitUnicodeString(&vp, L"\\Registry\\Machine\\SYSTEM\\CurrentControlSet\\Services\\atikmdag");
+    InitializeObjectAttributes(&oa, &vp, OBJ_CASE_INSENSITIVE, NULL, NULL);
+    HANDLE hk = NULL;
+    if (NT_SUCCESS(ZwOpenKey(&hk, KEY_SET_VALUE, &oa))) {
+        RtlInitUnicodeString(&vn, L"Step_AfterDxgkInit");
+        ZwSetValueKey(hk, &vn, 0, REG_DWORD, &step, sizeof(step));
+        ZwClose(hk);
+    }
 }
 
 static NTSTATUS
@@ -189,7 +225,13 @@ DreamV3DxgkInitialize(
 
     RtlCopyMemory(&g_InitData, DriverInitializationData, sizeof(DRIVER_INITIALIZATION_DATA));
 
+    /* Step 20: entered function */
+    DreamV3WriteStep(20);
+
     Status = DreamV3ResolveDxgkInitialize();
+    /* Step 21: resolve done */
+    DreamV3WriteStep(NT_SUCCESS(Status) ? 21 : (0xC0000000 | (ULONG)Status));
+
     if (!NT_SUCCESS(Status)) {
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
                    "AMDBC250-DREAM-V4.3: Cannot resolve DxgkInitialize: 0x%08X\n", Status));
@@ -200,7 +242,13 @@ DreamV3DxgkInitialize(
                "AMDBC250-DREAM-V4.3: Calling DxgkInitialize=%p DDI=%u\n",
                g_pfnDxgkInitialize, DriverInitializationData->Version));
 
+    /* Step 22: about to call */
+    DreamV3WriteStep(22);
+
     Status = g_pfnDxgkInitialize(DriverObject, RegistryPath, DriverInitializationData);
+
+    /* Step 23: after call */
+    DreamV3WriteStep(NT_SUCCESS(Status) ? 23 : (0xC0000000 | (ULONG)Status));
 
     if (NT_SUCCESS(Status)) {
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
@@ -228,6 +276,22 @@ DriverEntry(
 {
     DRIVER_INITIALIZATION_DATA InitData = {0};
     NTSTATUS Status;
+
+    /* CRITICAL: Write DriverBuildId FIRST to confirm new binary is loaded */
+    if (RegistryPath != NULL && RegistryPath->Buffer != NULL) {
+        OBJECT_ATTRIBUTES objAttr;
+        UNICODE_STRING valName;
+        ULONG buildId = 0x00000002;
+
+        InitializeObjectAttributes(&objAttr, RegistryPath, OBJ_CASE_INSENSITIVE, NULL, NULL);
+
+        HANDLE hKey = NULL;
+        if (NT_SUCCESS(ZwOpenKey(&hKey, KEY_SET_VALUE, &objAttr))) {
+            RtlInitUnicodeString(&valName, L"DriverBuildId");
+            ZwSetValueKey(hKey, &valName, 0, REG_DWORD, &buildId, sizeof(buildId));
+            ZwClose(hKey);
+        }
+    }
 
     /* Write DriverEntryRan marker using the registry path passed by PnP */
     if (RegistryPath != NULL && RegistryPath->Buffer != NULL) {
@@ -351,6 +415,8 @@ DriverEntry(
         }
     }
     Status = DreamV3DxgkInitialize(DriverObject, RegistryPath, &InitData);
+    /* NOTE: DreamV3DxgkInitialize already wrote Step_AfterDxgkInit (steps 20-23).
+       Use Step_DriverEntryPost here to AVOID overwriting the inner step marker. */
     {
         UNICODE_STRING vp2, vn2;
         OBJECT_ATTRIBUTES oa2;
@@ -359,7 +425,7 @@ DriverEntry(
         HANDLE hk2 = NULL;
         if (NT_SUCCESS(ZwOpenKey(&hk2, KEY_SET_VALUE, &oa2))) {
             ULONG step = NT_SUCCESS(Status) ? 11 : 0xC0000000 | (ULONG)Status;
-            RtlInitUnicodeString(&vn2, L"Step_AfterDxgkInit");
+            RtlInitUnicodeString(&vn2, L"Step_DriverEntryPost");
             ZwSetValueKey(hk2, &vn2, 0, REG_DWORD, &step, sizeof(step));
             ZwClose(hk2);
         }

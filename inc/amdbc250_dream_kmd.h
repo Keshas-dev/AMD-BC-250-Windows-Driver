@@ -25,27 +25,13 @@ Environment:
 #include <dispmprt.h>
 #include <d3dkmddi.h>
 
-/* SystemModuleInformation for runtime DxgkInitialize resolution */
+/* SystemModuleInformation for runtime DxgkInitialize resolution.
+   Do NOT declare SYSTEM_MODULE_ENTRY/SYSTEM_MODULE_INFORMATION structs here —
+   the layout varies across Windows builds (especially Win11 26100).
+   Instead, use a two-pass ZwQuerySystemInformation approach with raw byte
+   walking and manual field extraction at known stable offsets. */
 #ifndef SystemModuleInformation
 #define SystemModuleInformation 11
-
-typedef struct _SYSTEM_MODULE_ENTRY {
-    HANDLE  Section;
-    PVOID   MappedBase;
-    PVOID   ImageBase;
-    ULONG   ImageSize;
-    ULONG   Flags;
-    USHORT  LoadOrderIndex;
-    USHORT  InitOrderIndex;
-    USHORT  LoadCount;
-    USHORT  OffsetToFileName;
-    UCHAR   FullPathName[256];
-} SYSTEM_MODULE_ENTRY, *PSYSTEM_MODULE_ENTRY;
-
-typedef struct _SYSTEM_MODULE_INFORMATION {
-    ULONG NumberOfModules;
-    SYSTEM_MODULE_ENTRY Modules[1];
-} SYSTEM_MODULE_INFORMATION, *PSYSTEM_MODULE_INFORMATION;
 
 NTSYSAPI NTSTATUS NTAPI ZwQuerySystemInformation(
     ULONG SystemInformationClass,
