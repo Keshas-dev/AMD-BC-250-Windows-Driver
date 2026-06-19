@@ -738,15 +738,15 @@ DreamV3VmInvalidateTLB(
     }
 
     /* Write invalidation request */
-    DreamV3WriteRegister(DevExt, 
-                         AMDBC250_REG_VM_INVALIDATE_ENG0_REQ + (VmId * 0x10),
+    DreamV3WriteRegister(DevExt,
+                         AMDBC250_REG_GCVM_INVALIDATE_ENG0_REQ + (VmId * 0x10),
                          1);
 
     /* Wait for acknowledgment */
     ULONG Timeout = 1000;
     while (Timeout-- > 0) {
-        VmCntl = DreamV3ReadRegister(DevExt, 
-                                     AMDBC250_REG_VM_INVALIDATE_ENG0_ACK + (VmId * 0x10));
+        VmCntl = DreamV3ReadRegister(DevExt,
+                                     AMDBC250_REG_GCVM_INVALIDATE_ENG0_ACK + (VmId * 0x10));
         if (VmCntl & 0x1) {
             return STATUS_SUCCESS;
         }
@@ -806,7 +806,7 @@ DreamV3VmConfigureSystemAperture(_In_ PDREAM_V3_DEVICE_EXTENSION DevExt)
     }
 
     /* Enable VM contexts */
-    DreamV3WriteRegister(DevExt, AMDBC250_REG_VM_CONTEXT0_CNTL, 0x1);
+    DreamV3WriteRegister(DevExt, AMDBC250_REG_GCVM_CONTEXT0_CNTL, 0x1);
 
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                "AMDBC250-DREAM-V4.3: System aperture configured\n"));
