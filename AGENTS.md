@@ -18,6 +18,8 @@
 
 ## Architecture
 - This is a WDM control/IOCTL driver, not a real WDDM miniport on Win11 26100; `DxgkInitialize` is not exported and the DDI path is stubbed.
+- **CONFIRMED**: `dxgkrnl.sys` on Win11 26100 has NO `DxgkInitialize` export (dumpbin /exports verified). Only `NtDxgk*` user-mode syscalls exported.
+- DriverBuildId registry marker confirms new binary loaded. Step markers: DriverEntryRan=1, Step_BeforeDxgkInit=10, Step_DriverEntryPost=11 (WDM fallback).
 - Main IOCTL device: `\\.\AMDBC250DreamV43`; primary GPU MMIO BAR5 is `0xFE800000` (512KB).
 - Do not map past BAR5 or probe random unknown offsets casually; hardware hangs require reboot.
 - READ_REG/WRITE_REG use direct GPU BAR5 (`DreamV3ReadRegister`/`DreamV3WriteRegister`) when `g_Bar5Mapping` is available.
