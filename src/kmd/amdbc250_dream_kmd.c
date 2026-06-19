@@ -217,48 +217,12 @@ DreamV3DxgkInitialize(
     _In_ PDRIVER_INITIALIZATION_DATA DriverInitializationData
     )
 {
-    NTSTATUS Status;
-
-    if (DriverInitializationData == NULL) {
-        return STATUS_INVALID_PARAMETER;
-    }
-
-    RtlCopyMemory(&g_InitData, DriverInitializationData, sizeof(DRIVER_INITIALIZATION_DATA));
-
-    /* Step 20: entered function */
-    DreamV3WriteStep(20);
-
-    Status = DreamV3ResolveDxgkInitialize();
-    /* Step 21: resolve done */
-    DreamV3WriteStep(NT_SUCCESS(Status) ? 21 : (0xC0000000 | (ULONG)Status));
-
-    if (!NT_SUCCESS(Status)) {
-        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
-                   "AMDBC250-DREAM-V4.3: Cannot resolve DxgkInitialize: 0x%08X\n", Status));
-        return Status;
-    }
-
-    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-               "AMDBC250-DREAM-V4.3: Calling DxgkInitialize=%p DDI=%u\n",
-               g_pfnDxgkInitialize, DriverInitializationData->Version));
-
-    /* Step 22: about to call */
-    DreamV3WriteStep(22);
-
-    Status = g_pfnDxgkInitialize(DriverObject, RegistryPath, DriverInitializationData);
-
-    /* Step 23: after call */
-    DreamV3WriteStep(NT_SUCCESS(Status) ? 23 : (0xC0000000 | (ULONG)Status));
-
-    if (NT_SUCCESS(Status)) {
-        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-                   "AMDBC250-DREAM-V4.3: DxgkInitialize SUCCESS\n"));
-    } else {
-        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
-                   "AMDBC250-DREAM-V4.3: DxgkInitialize FAILED: 0x%08X\n", Status));
-    }
-
-    return Status;
+    UNREFERENCED_PARAMETER(DriverObject);
+    UNREFERENCED_PARAMETER(RegistryPath);
+    UNREFERENCED_PARAMETER(DriverInitializationData);
+    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+               "AMDBC250-DREAM-V4.3: DxgkInitialize not available on Win11 26100\n"));
+    return STATUS_NOT_SUPPORTED;
 }
 
 /* Forward declaration */
@@ -414,9 +378,9 @@ DriverEntry(
             ZwClose(hk2);
         }
     }
-    Status = DreamV3DxgkInitialize(DriverObject, RegistryPath, &InitData);
-    /* NOTE: DreamV3DxgkInitialize already wrote Step_AfterDxgkInit (steps 20-23).
-       Use Step_DriverEntryPost here to AVOID overwriting the inner step marker. */
+    /* DxgkInitialize is NOT exported from dxgkrnl.sys on Win11 26100.
+       Skip it entirely and fall through to WDM IOCTL mode. */
+    Status = STATUS_NOT_SUPPORTED;
     {
         UNICODE_STRING vp2, vn2;
         OBJECT_ATTRIBUTES oa2;
@@ -424,7 +388,7 @@ DriverEntry(
         InitializeObjectAttributes(&oa2, &vp2, OBJ_CASE_INSENSITIVE, NULL, NULL);
         HANDLE hk2 = NULL;
         if (NT_SUCCESS(ZwOpenKey(&hk2, KEY_SET_VALUE, &oa2))) {
-            ULONG step = NT_SUCCESS(Status) ? 11 : 0xC0000000 | (ULONG)Status;
+            ULONG step = 11;
             RtlInitUnicodeString(&vn2, L"Step_DriverEntryPost");
             ZwSetValueKey(hk2, &vn2, 0, REG_DWORD, &step, sizeof(step));
             ZwClose(hk2);
@@ -432,12 +396,7 @@ DriverEntry(
     }
 
     if (NT_SUCCESS(Status)) {
-        g_DxgkInitialized = TRUE;
-        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-                   "AMDBC250-DREAM-V4.3: DxgkInitialize SUCCESS — dxgkrnl owns DriverObject\n"));
-        /* DxgkInitialize succeeded: dxgkrnl owns the DriverObject and MajorFunction table.
-           Do NOT create WDM control device or touch MajorFunction — dxgkrnl handles everything.
-           DxgkDdiAddDevice/StartDevice will be called by dxgkrnl. */
+        /* Never reached — DxgkInitialize always returns STATUS_NOT_SUPPORTED */
     } else {
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
                    "AMDBC250-DREAM-V4.3: DxgkInitialize FAILED: 0x%08X — falling back to WDM IOCTL mode\n", Status));
