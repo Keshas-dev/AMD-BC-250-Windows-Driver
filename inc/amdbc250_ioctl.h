@@ -282,8 +282,10 @@ typedef struct _AMDBC250_IOCTL_INIT_HARDWARE {
 typedef struct _AMDBC250_IOCTL_SEND_PM4 {
     UINT32 Commands[64];        /* Up to 64 DWORDs of PM4 commands */
     UINT32 CommandCount;        /* Number of DWORDs */
-    UINT32 FenceValue;          /* Fence to signal after execution */
+    UINT32 Padding;             /* alignment */
+    UINT64 FenceValue;          /* 64-bit fence to signal after execution */
     UINT32 QueueType;           /* 0=GFX, 1=Compute(broken), 2=SDMA */
+    UINT32 Padding2;            /* alignment */
 } AMDBC250_IOCTL_SEND_PM4, *PAMDBC250_IOCTL_SEND_PM4;
 
 /* --- Read/Write Register --- */
@@ -447,6 +449,98 @@ typedef struct _AMDBC250_IOCTL_LOAD_CP_FW {
     UINT32 UcodeVersion;            /* OUT: firmware version from header */
     /* Firmware data follows immediately after this struct */
 } AMDBC250_IOCTL_LOAD_CP_FW, *PAMDBC250_IOCTL_LOAD_CP_FW;
+
+/* --- GPU register state dump (read-only, safe) --- */
+#define IOCTL_AMDBC250_REG_DUMP     CTL_CODE_AMDBC250(0x86, METHOD_BUFFERED, FILE_ANY_ACCESS)
+
+typedef struct _AMDBC250_IOCTL_REG_DUMP {
+    UINT32 Result;                  /* OUT: 1=success */
+    /* GC registers (GC_BASE-shifted) */
+    UINT32 GpuId;                   /* OUT: GPU_ID */
+    UINT32 GrbmStatus;              /* OUT: GRBM_STATUS */
+    UINT32 GrbmStatusSe0;           /* OUT: GRBM_STATUS_SE0 */
+    UINT32 GrbmStatusSe1;           /* OUT: GRBM_STATUS_SE1 */
+    UINT32 CcShaderArrayConfig;     /* OUT: CC_GC_SHADER_ARRAY_CONFIG */
+    UINT32 Scratch;                 /* OUT: SCRATCH */
+    UINT32 SpiWgpMask;              /* OUT: SPI_WGP_MASK */
+    UINT32 GrbmGfxIndex;            /* OUT: GRBM_GFX_INDEX */
+    /* CP registers (BC-250 raw BAR5 offsets — NOT Navi10) */
+    UINT32 MeCntl;                  /* OUT: ME_CNTL (0x4A74) */
+    UINT32 PfpCntl;                 /* OUT: PFP_CNTL */
+    UINT32 CeCntl;                  /* OUT: CE_CNTL */
+    /* KIQ ring registers */
+    UINT32 KiqBaseLo;               /* OUT: KIQ_BASE_LO (0xE060) */
+    UINT32 KiqBaseHi;               /* OUT: KIQ_BASE_HI (0xE064) */
+    UINT32 KiqCntl;                 /* OUT: KIQ_CNTL (0xE068) */
+    UINT32 KiqRptr;                 /* OUT: KIQ_RPTR (0xE06C) */
+    UINT32 KiqWptr;                 /* OUT: KIQ_WPTR (0xE078) */
+    /* HQD KIQ queue registers */
+    UINT32 HqdActiveKiq;            /* OUT: HQD_ACTIVE KIQ (0xDAC0) */
+    UINT32 HqdPqBaseKiq;            /* OUT: HQD_PQ_BASE KIQ (0xDAD8) */
+    UINT32 HqdPqBaseHiKiq;          /* OUT: HQD_PQ_BASE_HI KIQ (0xDADC) */
+    UINT32 HqdPqRptrKiq;            /* OUT: HQD_PQ_RPTR KIQ (0xDAE0) */
+    UINT32 HqdPqWptrLoKiq;          /* OUT: HQD_PQ_WPTR_LO KIQ (0xDB90) */
+    UINT32 HqdVmidKiq;              /* OUT: HQD_VMID KIQ (0xDAC4) */
+    /* HQD compute/GFX ring registers */
+    UINT32 HqdActiveCmp;            /* OUT: HQD_ACTIVE compute (0xDCF4) */
+    UINT32 HqdPqBaseCmp;            /* OUT: HQD_PQ_BASE compute (0xDBC8) */
+    UINT32 HqdPqBaseHiCmp;          /* OUT: HQD_PQ_BASE_HI compute (0xDBCC) */
+    UINT32 HqdPqRptrCmp;            /* OUT: HQD_PQ_RPTR compute (0xDBD0) */
+    UINT32 HqdPqWptrCmp;            /* OUT: HQD_PQ_WPTR compute (0xDBD4) */
+    UINT32 HqdVmidCmp;              /* OUT: HQD_VMID compute (0xDCF0) */
+    UINT32 HqdAqCntlCmp;            /* OUT: HQD_AQ_CNTL compute (0xDBC0) */
+    /* GCVM registers */
+    UINT32 GcvmL2Cntl;              /* OUT: GCVM_L2_CNTL (0x0B360) */
+    UINT32 GcvmContext0Cntl;        /* OUT: GCVM_CONTEXT0_CNTL (0x0B460) */
+    UINT32 GcvmPtBaseLo;            /* OUT: GCVM_CONTEXT0_PT_BASE_LO (0x0B608) */
+    UINT32 GcvmPtBaseHi;            /* OUT: GCVM_CONTEXT0_PT_BASE_HI (0x0B60C) */
+    /* BIOS Context0 TLB entries (0x0B408-0x0B45C) */
+    UINT32 Ctx0[20];                /* OUT: 20 DWORDs from 0x0B408-0x0B454 */
+    /* RLC/SDMA */
+    UINT32 RlcCntl;                 /* OUT: RLC_CNTL */
+    UINT32 Sdma0Cntl;               /* OUT: SDMA0_CNTL */
+    /* Extra CP ring probes (raw BAR5 offsets) */
+    UINT32 CpRb0BaseProbe[4];       /* OUT: probe 0xDA60-0xDA6C */
+    UINT32 CpRb1BaseProbe[4];       /* OUT: probe 0xDA70-0xDA7C */
+} AMDBC250_IOCTL_REG_DUMP, *PAMDBC250_IOCTL_REG_DUMP;
+
+/* --- Clean KIQ NOP test (no BIOS state destruction) --- */
+#define IOCTL_AMDBC250_KIQ_NOP_TEST CTL_CODE_AMDBC250(0x87, METHOD_BUFFERED, FILE_ANY_ACCESS)
+
+typedef struct _AMDBC250_IOCTL_KIQ_NOP_TEST {
+    UINT32 Result;                  /* OUT: 0=fail, 1=RPTR advanced, 2=SCRATCH changed, else=error */
+    UINT32 ScratchBefore;           /* OUT: SCRATCH before */
+    UINT32 ScratchAfter;            /* OUT: SCRATCH after (should be 0xCAFEBABE if PM4 executed) */
+    UINT32 KiqRptrBefore;           /* OUT: KIQ_RPTR before */
+    UINT32 KiqRptrAfter;            /* OUT: KIQ_RPTR after */
+    UINT32 KiqWptrSet;              /* OUT: WPTR value we wrote */
+    UINT32 RingPaLo;                /* OUT: ring PA low 32 */
+    UINT32 RingPaHi;                /* OUT: ring PA high 32 */
+    UINT32 MeCntlBefore;            /* OUT: ME_CNTL before */
+    UINT32 MeCntlAfter;             /* OUT: ME_CNTL after */
+    UINT32 GcvmContext0CntlBefore;  /* OUT: GCVM_CONTEXT0_CNTL before */
+    UINT32 GcvmContext0CntlAfter;   /* OUT: GCVM_CONTEXT0_CNTL after */
+} AMDBC250_IOCTL_KIQ_NOP_TEST, *PAMDBC250_IOCTL_KIQ_NOP_TEST;
+
+/* --- KIQ BIOS ring submit: map BIOS ring PA, write PM4, check execution --- */
+#define IOCTL_AMDBC250_KIQ_BIOS_RING_SUBMIT CTL_CODE_AMDBC250(0x88, METHOD_BUFFERED, FILE_ANY_ACCESS)
+
+typedef struct _AMDBC250_IOCTL_KIQ_BIOS_RING_SUBMIT {
+    UINT32 Result;                  /* OUT: 0=fail, 2=SCRATCH changed, else=error code */
+    UINT32 ScratchBefore;           /* OUT: SCRATCH before */
+    UINT32 ScratchAfter;            /* OUT: SCRATCH after */
+    UINT32 KiqBaseLo;               /* IN/OUT: ring PA low (0=read from regs) */
+    UINT32 KiqBaseHi;               /* IN/OUT: ring PA high */
+    UINT32 KiqRptrBefore;           /* OUT: KIQ_RPTR before */
+    UINT32 KiqRptrAfter;            /* OUT: KIQ_RPTR after */
+    UINT32 KiqWptrSet;              /* OUT: WPTR value written */
+    UINT32 MeCntlBefore;            /* OUT: ME_CNTL before */
+    UINT32 MeCntlAfter;             /* OUT: ME_CNTL after */
+    UINT32 RingDword0;              /* OUT: first DWORD of ring after write */
+    UINT32 RingDword1;              /* OUT: second DWORD */
+    UINT32 RingDword2;              /* OUT: third DWORD */
+    UINT32 RingDword3;              /* OUT: fourth DWORD */
+} AMDBC250_IOCTL_KIQ_BIOS_RING_SUBMIT, *PAMDBC250_IOCTL_KIQ_BIOS_RING_SUBMIT;
 
 #pragma pack(pop)
 

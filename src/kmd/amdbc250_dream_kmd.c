@@ -3622,8 +3622,8 @@ DreamV3DeviceControl(
                 status = Amdbc250PspKiqSubmit(Pm4Buffer, Pm4Count);
                 if (NT_SUCCESS(status)) {
                     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_TRACE_LEVEL,
-                        "AMDBC250-DREAM-V4.3: SEND_PM4 via PSP KIQ: %lu DWORDs, fence=%u\n",
-                        Pm4Count, SendPm4->FenceValue));
+                        "AMDBC250-DREAM-V4.3: SEND_PM4 via PSP KIQ: %lu DWORDs, fence=%llu\n",
+                        Pm4Count, (ULONG64)SendPm4->FenceValue));
                 } else {
                     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
                         "AMDBC250-DREAM-V4.3: PSP KIQ submit failed: 0x%08X\n", status));
@@ -5241,6 +5241,399 @@ DreamV3DeviceControl(
 
         status = STATUS_SUCCESS;
         bytesReturned = sizeof(*resp);
+        break;
+    }
+
+    /* --- Register state dump (read-only, safe — no state modification) --- */
+    case IOCTL_AMDBC250_REG_DUMP: {
+        if (outputLen >= sizeof(AMDBC250_IOCTL_REG_DUMP) && DevExt && DevExt->MmioVirtualBase) {
+            PAMDBC250_IOCTL_REG_DUMP dump = (PAMDBC250_IOCTL_REG_DUMP)outputBuffer;
+            PUCHAR mmio = (PUCHAR)DevExt->MmioVirtualBase;
+            RtlZeroMemory(dump, sizeof(*dump));
+
+            #define DUMP_REG32(off) (*(volatile PULONG)(mmio + (off)))
+
+            /* GC registers (verified BAR5 byte offsets) */
+            dump->GpuId               = DUMP_REG32(0x3840);
+            dump->GrbmStatus          = DUMP_REG32(0x3260);
+            dump->GrbmStatusSe0       = DUMP_REG32(0x3268);
+            dump->GrbmStatusSe1       = DUMP_REG32(0x326C);
+            dump->CcShaderArrayConfig = DUMP_REG32(0x3264);
+            dump->Scratch             = DUMP_REG32(0x32D4);
+            dump->SpiWgpMask          = DUMP_REG32(0x34FC);
+            dump->GrbmGfxIndex        = DUMP_REG32(0x33C4);
+
+            /* CP registers — BOTH sets of offsets to compare:
+             * The fresh boot dump used Navi10+GC_BASE and got 0xFFFFFFFF for CP.
+             * The GPU_KIQ_TEST uses raw BAR5 offsets that work.
+             * Let's dump BOTH and see. */
+            dump->MeCntl              = DUMP_REG32(0x4A74);  /* GPU_KIQ_TEST offset */
+            dump->PfpCntl             = DUMP_REG32(0x4A78);
+            dump->CeCntl              = DUMP_REG32(0x4A7C);
+
+            /* KIQ ring registers (GPU_KIQ_TEST verified offsets) */
+            dump->KiqBaseLo           = DUMP_REG32(0xE060);
+            dump->KiqBaseHi           = DUMP_REG32(0xE064);
+            dump->KiqCntl             = DUMP_REG32(0xE068);
+            dump->KiqRptr             = DUMP_REG32(0xE06C);
+            dump->KiqWptr             = DUMP_REG32(0xE078);
+
+            /* HQD KIQ queue (GPU_KIQ_TEST offsets) */
+            dump->HqdActiveKiq        = DUMP_REG32(0xDAC0);
+            dump->HqdPqBaseKiq        = DUMP_REG32(0xDAD8);
+            dump->HqdPqBaseHiKiq      = DUMP_REG32(0xDADC);
+            dump->HqdPqRptrKiq        = DUMP_REG32(0xDAE0);
+            dump->HqdPqWptrLoKiq      = DUMP_REG32(0xDB90);
+            dump->HqdVmidKiq          = DUMP_REG32(0xDAC4);
+
+            /* HQD compute/GFX ring (fresh boot verified offsets) */
+            dump->HqdActiveCmp        = DUMP_REG32(0xDCF4);
+            dump->HqdPqBaseCmp        = DUMP_REG32(0xDBC8);
+            dump->HqdPqBaseHiCmp      = DUMP_REG32(0xDBCC);
+            dump->HqdPqRptrCmp        = DUMP_REG32(0xDBD0);
+            dump->HqdPqWptrCmp        = DUMP_REG32(0xDBD4);
+            dump->HqdVmidCmp          = DUMP_REG32(0xDCF0);
+            dump->HqdAqCntlCmp        = DUMP_REG32(0xDBC0);
+
+            /* GCVM registers */
+            dump->GcvmL2Cntl          = DUMP_REG32(0x0B360);
+            dump->GcvmContext0Cntl    = DUMP_REG32(0x0B460);
+            dump->GcvmPtBaseLo        = DUMP_REG32(0x0B608);
+            dump->GcvmPtBaseHi        = DUMP_REG32(0x0B60C);
+
+            /* BIOS Context0 TLB entries (0x0B408-0x0B454, 20 DWORDs) */
+            {
+                int i;
+                for (i = 0; i < 20; i++) {
+                    dump->Ctx0[i] = DUMP_REG32(0x0B408 + i * 4);
+                }
+            }
+
+            /* RLC/SDMA */
+            dump->RlcCntl             = DUMP_REG32(0xECA1);
+            dump->Sdma0Cntl           = DUMP_REG32(0x10040);
+
+            /* CP ring probe at raw BAR5 0xDA60 range — what IS this? */
+            dump->CpRb0BaseProbe[0]   = DUMP_REG32(0xDA60);
+            dump->CpRb0BaseProbe[1]   = DUMP_REG32(0xDA64);
+            dump->CpRb0BaseProbe[2]   = DUMP_REG32(0xDA68);
+            dump->CpRb0BaseProbe[3]   = DUMP_REG32(0xDA6C);
+            dump->CpRb1BaseProbe[0]   = DUMP_REG32(0xDA70);
+            dump->CpRb1BaseProbe[1]   = DUMP_REG32(0xDA74);
+            dump->CpRb1BaseProbe[2]   = DUMP_REG32(0xDA78);
+            dump->CpRb1BaseProbe[3]   = DUMP_REG32(0xDA7C);
+
+            dump->Result = 1;
+            status = STATUS_SUCCESS;
+            bytesReturned = sizeof(*dump);
+        } else {
+            status = STATUS_BUFFER_TOO_SMALL;
+        }
+        break;
+    }
+
+    /* --- Clean KIQ NOP test: submit PM4 NOP+WRITE_REG without destroying BIOS state --- */
+    case IOCTL_AMDBC250_KIQ_NOP_TEST: {
+        if (outputLen >= sizeof(AMDBC250_IOCTL_KIQ_NOP_TEST) && DevExt && DevExt->MmioVirtualBase) {
+            PAMDBC250_IOCTL_KIQ_NOP_TEST kt = (PAMDBC250_IOCTL_KIQ_NOP_TEST)outputBuffer;
+            PUCHAR mmio = (PUCHAR)DevExt->MmioVirtualBase;
+            RtlZeroMemory(kt, sizeof(*kt));
+
+            #define KIQ_REG32(off) (*(volatile PULONG)(mmio + (off)))
+            #define KIQ_SCRATCH_OFF     0x32D4
+            #define KIQ_ME_CNTL_OFF     0x4A74
+            #define KIQ_BASE_LO_OFF     0xE060
+            #define KIQ_BASE_HI_OFF     0xE064
+            #define KIQ_CNTL_OFF        0xE068
+            #define KIQ_RPTR_OFF        0xE06C
+            #define KIQ_WPTR_OFF        0xE078
+            #define KIQ_GCVM_CTX0_CNTL  0x0B460
+
+            /* Step 0: Save BIOS state */
+            kt->ScratchBefore           = KIQ_REG32(KIQ_SCRATCH_OFF);
+            kt->KiqRptrBefore           = KIQ_REG32(KIQ_RPTR_OFF);
+            kt->MeCntlBefore            = KIQ_REG32(KIQ_ME_CNTL_OFF);
+            kt->GcvmContext0CntlBefore  = KIQ_REG32(KIQ_GCVM_CTX0_CNTL);
+
+            KdPrint(("AMDBC250-DREAM-V4.3: KIQ_NOP_TEST enter: SCRATCH=0x%08X KIQ_RPTR=0x%08X KIQ_WPTR=0x%08X\n",
+                kt->ScratchBefore, kt->KiqRptrBefore, KIQ_REG32(KIQ_WPTR_OFF)));
+
+            /* Step 1: Allocate 4KB ring buffer below 4GB */
+            PVOID ringVa = NULL;
+            PHYSICAL_ADDRESS ringPa = {0};
+            {
+                PHYSICAL_ADDRESS low = {0}, high = {0}, boundary = {0};
+                high.QuadPart = 0xFFFFFFFFULL;
+                ringVa = MmAllocateContiguousMemorySpecifyCache(
+                    0x1000, low, high, boundary, MmNonCached);
+                if (!ringVa) {
+                    kt->Result = 0;
+                    status = STATUS_SUCCESS;
+                    bytesReturned = sizeof(*kt);
+                    break;
+                }
+                RtlZeroMemory(ringVa, 0x1000);
+                ringPa = MmGetPhysicalAddress(ringVa);
+            }
+            kt->RingPaLo = (ULONG)(ringPa.QuadPart & 0xFFFFFFFF);
+            kt->RingPaHi = (ULONG)(ringPa.QuadPart >> 32);
+
+            KdPrint(("AMDBC250-DREAM-V4.3: KIQ_NOP_TEST ring PA=0x%llX\n", ringPa.QuadPart));
+
+            /* Step 2: Read current KIQ_BASE — if non-zero, BIOS configured KIQ */
+            {
+                ULONG kBaseLo = KIQ_REG32(KIQ_BASE_LO_OFF);
+                ULONG kBaseHi = KIQ_REG32(KIQ_BASE_HI_OFF);
+                KdPrint(("AMDBC250-DREAM-V4.3: KIQ_NOP_TEST KIQ_BASE before: 0x%08X%08X\n", kBaseHi, kBaseLo));
+
+                if (kBaseLo != 0 || kBaseHi != 0) {
+                    KdPrint(("AMDBC250-DREAM-V4.3: KIQ_NOP_TEST WARNING: KIQ_BASE already set by BIOS!\n"));
+                }
+            }
+
+            /* Step 3: Halt ME+PFP (set halt bits only — preserve other bits) */
+            {
+                ULONG meVal = KIQ_REG32(KIQ_ME_CNTL_OFF);
+                KIQ_REG32(KIQ_ME_CNTL_OFF) = meVal | (1 << 28) | (1 << 30);  /* ME_HALT | PFP_HALT */
+            }
+            KeStallExecutionProcessor(10);
+
+            /* Step 4: Program KIQ ring base */
+            KIQ_REG32(KIQ_BASE_LO_OFF) = (ULONG)(ringPa.QuadPart & 0xFFFFFFFF);
+            KIQ_REG32(KIQ_BASE_HI_OFF) = (ULONG)(ringPa.QuadPart >> 32);
+
+            /* Step 5: Reset RPTR and WPTR */
+            KIQ_REG32(KIQ_RPTR_OFF) = 0;
+            KIQ_REG32(KIQ_WPTR_OFF) = 0;
+            KeStallExecutionProcessor(1);
+
+            /* Step 6: Write PM4 packets to ring
+             * PM4 Type 3 IT_WRITE_REG: header=0xC0021200, reg=SCRATCH, val=0xCAFEBABE
+             * PM4 Type 3 IT_NOP: header=0xC0001000 */
+            {
+                volatile PULONG ring = (volatile PULONG)ringVa;
+                ring[0] = 0xC0021200;   /* PM4: WRITE_REG (count=2, opcode=0x12) */
+                ring[1] = 0x000032D4;   /* SCRATCH register offset */
+                ring[2] = 0xCAFEBABE;   /* value to write */
+                ring[3] = 0xC0001000;   /* PM4: NOP (count=0) */
+            }
+
+            /* Step 7: Set WPTR = 4 DWORDs (16 bytes) */
+            KIQ_REG32(KIQ_WPTR_OFF) = 4;
+            kt->KiqWptrSet = 4;
+
+            /* Step 8: Resume ME+PFP (clear halt bits) */
+            {
+                ULONG meVal = KIQ_REG32(KIQ_ME_CNTL_OFF);
+                KIQ_REG32(KIQ_ME_CNTL_OFF) = meVal & ~((1 << 28) | (1 << 30));
+            }
+
+            /* Step 9: Wait for processing */
+            KeStallExecutionProcessor(10000);  /* 10ms */
+
+            /* Step 10: Read results */
+            kt->KiqRptrAfter          = KIQ_REG32(KIQ_RPTR_OFF);
+            kt->ScratchAfter          = KIQ_REG32(KIQ_SCRATCH_OFF);
+            kt->MeCntlAfter           = KIQ_REG32(KIQ_ME_CNTL_OFF);
+            kt->GcvmContext0CntlAfter = KIQ_REG32(KIQ_GCVM_CTX0_CNTL);
+
+            KdPrint(("AMDBC250-DREAM-V4.3: KIQ_NOP_TEST result: SCRATCH=0x%08X KIQ_RPTR=0x%08X\n",
+                kt->ScratchAfter, kt->KiqRptrAfter));
+
+            /* Determine result */
+            if (kt->ScratchAfter == 0xCAFEBABE) {
+                kt->Result = 2;  /* PM4 executed — SCRATCH changed! */
+                KdPrint(("AMDBC250-DREAM-V4.3: KIQ_NOP_TEST SUCCESS! PM4 executed, SCRATCH=0xCAFEBABE\n"));
+            } else if (kt->KiqRptrAfter != kt->KiqRptrBefore) {
+                kt->Result = 1;  /* RPTR advanced but PM4 didn't fully execute */
+                KdPrint(("AMDBC250-DREAM-V4.3: KIQ_NOP_TEST: RPTR advanced but SCRATCH unchanged\n"));
+            } else {
+                kt->Result = 0;  /* Nothing happened */
+                KdPrint(("AMDBC250-DREAM-V4.3: KIQ_NOP_TEST: no progress — GCVM may not have flat mapping\n"));
+            }
+
+            /* Cleanup: halt ME, clear KIQ ring, restore original ME_CNTL */
+            {
+                ULONG meVal = KIQ_REG32(KIQ_ME_CNTL_OFF);
+                KIQ_REG32(KIQ_ME_CNTL_OFF) = meVal | (1 << 28) | (1 << 30);
+            }
+            KeStallExecutionProcessor(10);
+            KIQ_REG32(KIQ_BASE_LO_OFF) = 0;
+            KIQ_REG32(KIQ_BASE_HI_OFF) = 0;
+            KIQ_REG32(KIQ_RPTR_OFF) = 0;
+            KIQ_REG32(KIQ_WPTR_OFF) = 0;
+            KIQ_REG32(KIQ_ME_CNTL_OFF) = kt->MeCntlBefore;  /* restore original */
+
+            MmFreeContiguousMemory(ringVa);
+            status = STATUS_SUCCESS;
+            bytesReturned = sizeof(*kt);
+        } else {
+            status = STATUS_BUFFER_TOO_SMALL;
+        }
+        break;
+    }
+
+    /* --- KIQ BIOS ring submit: map the BIOS ring PA, write PM4, check execution --- */
+    case IOCTL_AMDBC250_KIQ_BIOS_RING_SUBMIT: {
+        if (outputLen >= sizeof(AMDBC250_IOCTL_KIQ_BIOS_RING_SUBMIT) && DevExt && DevExt->MmioVirtualBase) {
+            PAMDBC250_IOCTL_KIQ_BIOS_RING_SUBMIT resp = (PAMDBC250_IOCTL_KIQ_BIOS_RING_SUBMIT)outputBuffer;
+            PUCHAR mmio = (PUCHAR)DevExt->MmioVirtualBase;
+
+            #define BIOS_REG32(off) (*(volatile PULONG)(mmio + (off)))
+            #define BIOS_SCRATCH_OFF  0x32D4
+            #define BIOS_ME_CNTL_OFF  0x4A74
+            #define BIOS_KIQ_BASE_LO  0xE060
+            #define BIOS_KIQ_BASE_HI  0xE064
+            #define BIOS_KIQ_RPTR_OFF 0xE06C
+            #define BIOS_KIQ_WPTR_OFF 0xE078
+
+            /* Step 1: Determine ring PA — read input BEFORE zeroing (METHOD_BUFFERED shares buffer) */
+            PHYSICAL_ADDRESS ringPa = {0};
+            if (inputLen >= sizeof(AMDBC250_IOCTL_KIQ_BIOS_RING_SUBMIT)) {
+                PAMDBC250_IOCTL_KIQ_BIOS_RING_SUBMIT inp = (PAMDBC250_IOCTL_KIQ_BIOS_RING_SUBMIT)inputBuffer;
+                ringPa.LowPart = inp->KiqBaseLo;
+                ringPa.HighPart = inp->KiqBaseHi;
+            }
+
+            /* Now safe to zero output */
+            RtlZeroMemory(resp, sizeof(*resp));
+
+            if (ringPa.LowPart == 0 && ringPa.HighPart == 0) {
+                ringPa.LowPart = BIOS_REG32(BIOS_KIQ_BASE_LO);
+                ringPa.HighPart = BIOS_REG32(BIOS_KIQ_BASE_HI);
+                KdPrint(("AMDBC250-DREAM-V4.3: KIQ_BIOS_RING read KIQ_BASE from HW: 0x%08X%08X\n",
+                    ringPa.HighPart, ringPa.LowPart));
+            }
+
+            resp->KiqBaseLo = ringPa.LowPart;
+            resp->KiqBaseHi = ringPa.HighPart;
+
+            if (ringPa.LowPart == 0 && ringPa.HighPart == 0) {
+                KdPrint(("AMDBC250-DREAM-V4.3: KIQ_BIOS_RING: KIQ_BASE is 0\n"));
+                resp->Result = 0xDEAD0001;
+                status = STATUS_SUCCESS;
+                bytesReturned = sizeof(*resp);
+                break;
+            }
+
+            /* Step 2: Save BIOS state */
+            resp->ScratchBefore = BIOS_REG32(BIOS_SCRATCH_OFF);
+            resp->KiqRptrBefore = BIOS_REG32(BIOS_KIQ_RPTR_OFF);
+            resp->MeCntlBefore  = BIOS_REG32(BIOS_ME_CNTL_OFF);
+
+            KdPrint(("AMDBC250-DREAM-V4.3: KIQ_BIOS_RING SCRATCH=0x%08X KIQ_RPTR=0x%08X ME=0x%08X\n",
+                resp->ScratchBefore, resp->KiqRptrBefore, resp->MeCntlBefore));
+
+            /* Step 3: Map ring via MmMapIoSpace */
+            PVOID ringVa = NULL;
+            PMDL ringMdl = NULL;
+            {
+                SIZE_T mapSize = 0x1000;
+                ringVa = MmMapIoSpace(ringPa, mapSize, MmNonCached);
+                if (!ringVa) {
+                    KdPrint(("AMDBC250-DREAM-V4.3: KIQ_BIOS_RING MmMapIoSpace FAILED PA=0x%llX\n", ringPa.QuadPart));
+                    resp->Result = 0xDEAD0002;
+                    status = STATUS_SUCCESS;
+                    bytesReturned = sizeof(*resp);
+                    break;
+                }
+                KdPrint(("AMDBC250-DREAM-V4.3: KIQ_BIOS_RING MmMapIoSpace OK VA=%p\n", ringVa));
+            }
+
+            /* Step 4: Read current ring contents */
+            {
+                volatile PULONG ring = (volatile PULONG)ringVa;
+                resp->RingDword0 = ring[0];
+                resp->RingDword1 = ring[1];
+                resp->RingDword2 = ring[2];
+                resp->RingDword3 = ring[3];
+                KdPrint(("AMDBC250-DREAM-V4.3: KIQ_BIOS_RING ring[0..3] = 0x%08X 0x%08X 0x%08X 0x%08X\n",
+                    resp->RingDword0, resp->RingDword1, resp->RingDword2, resp->RingDword3));
+            }
+
+            /* Step 5: Halt ME+PFP */
+            {
+                ULONG meVal = BIOS_REG32(BIOS_ME_CNTL_OFF);
+                BIOS_REG32(BIOS_ME_CNTL_OFF) = meVal | (1 << 28) | (1 << 30);
+            }
+            KeStallExecutionProcessor(10);
+
+            /* Step 6: Reset RPTR/WPTR */
+            BIOS_REG32(BIOS_KIQ_RPTR_OFF) = 0;
+            BIOS_REG32(BIOS_KIQ_WPTR_OFF) = 0;
+            KeStallExecutionProcessor(1);
+
+            /* Step 7: Write PM4 to ring */
+            {
+                PULONG ring = (PULONG)ringVa;
+                ring[0] = 0xC0021200;   /* PM4: WRITE_REG (count=2, opcode=0x12) */
+                ring[1] = 0x000032D4;   /* SCRATCH register offset */
+                ring[2] = 0xCAFEBABE;   /* value to write */
+                ring[3] = 0xC0001000;   /* PM4: NOP */
+            }
+
+            /* Step 7.5: CRITICAL — flush CPU stores before WPTR update */
+            KeMemoryBarrier();
+
+            /* Step 8: Set WPTR = 4 DWORDs */
+            BIOS_REG32(BIOS_KIQ_WPTR_OFF) = 4;
+            resp->KiqWptrSet = 4;
+
+            /* Step 9: Resume ME+PFP */
+            {
+                ULONG meVal = BIOS_REG32(BIOS_ME_CNTL_OFF);
+                BIOS_REG32(BIOS_ME_CNTL_OFF) = meVal & ~((1 << 28) | (1 << 30));
+            }
+
+            /* Step 10: Wait */
+            KeStallExecutionProcessor(10000);
+
+            /* Step 11: Read results */
+            resp->KiqRptrAfter = BIOS_REG32(BIOS_KIQ_RPTR_OFF);
+            resp->ScratchAfter = BIOS_REG32(BIOS_SCRATCH_OFF);
+            resp->MeCntlAfter  = BIOS_REG32(BIOS_ME_CNTL_OFF);
+            {
+                volatile PULONG ring = (volatile PULONG)ringVa;
+                resp->RingDword0 = ring[0];
+                resp->RingDword1 = ring[1];
+                resp->RingDword2 = ring[2];
+                resp->RingDword3 = ring[3];
+            }
+
+            KdPrint(("AMDBC250-DREAM-V4.3: KIQ_BIOS_RING result SCRATCH=0x%08X RPTR=0x%08X ME=0x%08X\n",
+                resp->ScratchAfter, resp->KiqRptrAfter, resp->MeCntlAfter));
+
+            if (resp->ScratchAfter == 0xCAFEBABE) {
+                resp->Result = 2;
+            } else if (resp->KiqRptrAfter != resp->KiqRptrBefore) {
+                resp->Result = 1;
+            } else {
+                resp->Result = 0;
+            }
+
+            /* Cleanup: halt, clear ring, reset, restore original ME_CNTL */
+            {
+                ULONG meVal = BIOS_REG32(BIOS_ME_CNTL_OFF);
+                BIOS_REG32(BIOS_ME_CNTL_OFF) = meVal | (1 << 28) | (1 << 30);
+            }
+            KeStallExecutionProcessor(10);
+            {
+                PULONG ring = (PULONG)ringVa;
+                ring[0] = 0; ring[1] = 0; ring[2] = 0; ring[3] = 0;
+            }
+            KeMemoryBarrier();
+            BIOS_REG32(BIOS_KIQ_RPTR_OFF) = 0;
+            BIOS_REG32(BIOS_KIQ_WPTR_OFF) = 0;
+            BIOS_REG32(BIOS_ME_CNTL_OFF) = resp->MeCntlBefore;  /* restore original */
+
+            /* Unmap ring */
+            MmUnmapIoSpace(ringVa, 0x1000);
+
+            status = STATUS_SUCCESS;
+            bytesReturned = sizeof(*resp);
+        } else {
+            status = STATUS_BUFFER_TOO_SMALL;
+        }
         break;
     }
 

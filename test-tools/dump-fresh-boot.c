@@ -74,26 +74,35 @@ int main(void) {
     R("GRBM_GFX_INDEX (0x33C4)", GC + 0x33C4);
     printf("\n");
 
-    /* ---- CP: ME, ring, fence ---- */
+    /* ---- CP: ME, ring, fence (Navi10 offsets + GC_BASE) ---- */
     printf("[CP: Command Processor]\n");
-    R("ME_CNTL (0xE040)",        GC + 0xE040);
-    R("CP_ME_CNTL (0xE040)",     GC + 0xE040);
-    R("PFP_CNTL (0xE044)",       GC + 0xE044);
-    R("CE_CNTL (0xE048)",        GC + 0xE048);
-    R("CP_RB0_BASE_LO (0xDA60)", GC + 0xDA60);
-    R("CP_RB0_BASE_HI (0xDA64)", GC + 0xDA64);
-    R("CP_RB0_CNTL (0xDA68)",    GC + 0xDA68);
-    R("CP_RB0_RPTR (0xDA6C)",    GC + 0xDA6C);
-    R("CP_RB0_WPTR (0xDA70)",    GC + 0xDA70);
+    R("ME_CNTL (0x1E00)",           GC + 0x1E00);
+    R("PFP_CNTL (0x1E04)",          GC + 0x1E04);
+    R("CE_CNTL (0x1E08)",           GC + 0x1E08);
+    R("CP_RB0_BASE (0x1A60)",       GC + 0x1A60);
+    R("CP_RB0_CNTL (0x1A64)",       GC + 0x1A64);
+    R("CP_RB0_RPTR (0x1A68)",       GC + 0x1A68);
+    R("CP_RB0_WPTR (0x1A6C)",       GC + 0x1A6C);
+    R("CP_RB1_BASE (0x1A70)",       GC + 0x1A70);
+    R("CP_RB1_CNTL (0x1A74)",       GC + 0x1A74);
+    R("CP_RB1_RPTR (0x1A78)",       GC + 0x1A78);
+    R("CP_RB1_WPTR (0x1A7C)",       GC + 0x1A7C);
     printf("\n");
 
     /* ---- KIQ ---- */
     printf("[CP: KIQ Ring]\n");
-    R("KIQ_BASE_LO (0xE060)",    GC + 0xE060);
-    R("KIQ_BASE_HI (0xE064)",    GC + 0xE064);
-    R("KIQ_CNTL (0xE068)",       GC + 0xE068);
-    R("KIQ_RPTR (0xE06C)",       GC + 0xE06C);
-    R("KIQ_WPTR (0xE070)",       GC + 0xE070);
+    R("KIQ_BASE (0x1E60)",          GC + 0x1E60);
+    R("KIQ_CNTL (0x1E68)",          GC + 0x1E68);
+    R("KIQ_RPTR (0x1E6C)",          GC + 0x1E6C);
+    R("KIQ_WPTR (0x1E70)",          GC + 0x1E70);
+    printf("\n");
+
+    /* ---- GCVM (BAR5 offsets, known from previous sessions) ---- */
+    printf("[GCVM: Virtual Memory]\n");
+    R("GCVM_L2_CNTL (0x0B360)",          0x0B360);
+    R("GCVM_CONTEXT0_CNTL (0x0B460)",    0x0B460);
+    R("GCVM_CONTEXT0_PT_BASE_LO (0x0B608)", 0x0B608);
+    R("GCVM_CONTEXT0_PT_BASE_HI (0x0B60C)", 0x0B60C);
     printf("\n");
 
     /* ---- GCVM: Context0, L2 TLB, PT_BASE ---- */
