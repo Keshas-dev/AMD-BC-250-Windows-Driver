@@ -2637,9 +2637,14 @@ DreamV3DeviceControl(
     }
 
     if (DevExt == NULL) {
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
+            "DEVEXT_NULL: DevExt is NULL\n"));
         status = STATUS_DEVICE_NOT_READY;
         goto Cleanup;
     }
+
+    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+        "IOCTL_CODE=%08X HW_INIT=%d\n", ioctlCode, DevExt->HardwareInitialized));
 
     /* If hardware not initialized, return safe dummy data */
     if (!DevExt->HardwareInitialized) {
@@ -3541,10 +3546,59 @@ DreamV3DeviceControl(
                     DevExt->FbVirtualBase, InitHw->FbPhysicalBase, InitHw->FbSize));
             }
 
-            /* If NBIO_MAP flag set, skip GPU alive test and GPU init (just map memory) */
+            /* If NBIO_MAP flag set, skip GPU alive test but still enable PCI memory space */
             if (InitHw->Flags & AMDBC250_INIT_FLAG_NBIO_MAP) {
                 KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                     "AMDBC250-DREAM-V4.3: NBIO_MAP flag set - skipping GPU alive test + GPU init\n"));
+                
+                /* Enable PCI memory space for the GPU to respond to MMIO */
+                {
+                    BOOLEAN foundPci = FALSE;
+                    for (ULONG bus = 0; bus < 256 && !foundPci; bus++) {
+                        for (ULONG dev = 0; dev < 32 && !foundPci; dev++) {
+                            for (ULONG func = 0; func < 8 && !foundPci; func++) {
+                                WRITE_PORT_ULONG((PULONG)(UINT_PTR)0xCF8,
+                                    0x80000000 | (bus << 16) | (dev << 11) | (func << 8) | 0);
+                                ULONG id = READ_PORT_ULONG((PULONG)(UINT_PTR)0xCFC);
+                                if ((id & 0xFFFF) == 0x1002 && ((id >> 16) & 0xFFFF) == 0x13FE) {
+                                    foundPci = TRUE;
+                                    WRITE_PORT_ULONG((PULONG)(UINT_PTR)0xCF8,
+                                        0x80000000 | (bus << 16) | (dev << 11) | (func << 8) | 4);
+                                    KeMemoryBarrier();
+                                    WRITE_PORT_ULONG((PULONG)(UINT_PTR)0xCFC, 0x0007);
+                                    KeMemoryBarrier();
+                                    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                                        "AMDBC250-DREAM-V4.3: PCI enable at B%lu:D%lu:F%lu (NBIO_MAP)\n", bus, dev, func));
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                /* Verify GPU responds */
+                ULONG gpuId = DreamV3ReadRegister(DevExt, 0x0000);
+                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                    "AMDBC250-DREAM-V4.3: GPU reg[0x0000] = 0x%08X (NBIO_MAP test)\n", gpuId));
+                
+                /* Write 40 CU unlock registers (GC_BASE = 0x1260) */
+                /* CC_GC_SHADER_ARRAY_CONFIG at 0x1260 + 0x3264 = 0x44C4 */
+                /* SPI_PG_ENABLE_STATIC_WGP_MASK at 0x1260 + 0x34FC = 0x475C */
+                /* RLC_PG_ALWAYS_ON_WGP_MASK at 0x1260 + 0x?? = need to find */
+                
+                ULONG ccConfig = DreamV3ReadRegister(DevExt, 0x3264);
+                ULONG spiMask = DreamV3ReadRegister(DevExt, 0x34FC);
+                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                    "AMDBC250-DREAM-V4.3: CC=0x%08X SPI=0x%08X (before unlock)\n", ccConfig, spiMask));
+                
+                /* Write 40 CU unlock values */
+                DreamV3WriteRegister(DevExt, 0x3264, 0xffe00000);  /* CC_GC_SHADER_ARRAY_CONFIG */
+                DreamV3WriteRegister(DevExt, 0x34FC, 0x1f);         /* SPI_PG_ENABLE_STATIC_WGP_MASK */
+                
+                ccConfig = DreamV3ReadRegister(DevExt, 0x3264);
+                spiMask = DreamV3ReadRegister(DevExt, 0x34FC);
+                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                    "AMDBC250-DREAM-V4.3: CC=0x%08X SPI=0x%08X (after unlock)\n", ccConfig, spiMask));
+                
                 DevExt->HardwareInitialized = TRUE;
                 DevExt->GpuClockMhz = AMDBC250_BOOST_CLOCK_MHZ;
                 DevExt->MemoryClockMhz = AMDBC250_MEMORY_CLOCK_MHZ;
@@ -4600,6 +4654,9 @@ DreamV3DeviceControl(
 
     /* --- BAR5 Proxy Read (for PSP driver mailbox access) --- */
     case 0x900: { /* IOCTL_AMDBC250_BAR5_READ_PROXY */
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+            "BAR5_PROXY_READ: inputLen=%lu outputLen=%lu DevExt=%p Mmio=%p\n",
+            inputLen, outputLen, DevExt, DevExt ? DevExt->MmioVirtualBase : NULL));
         if (inputLen >= sizeof(ULONG) && outputLen >= sizeof(ULONG)) {
             PULONG inOffset = (PULONG)inputBuffer;
             PULONG outValue = (PULONG)outputBuffer;
@@ -5545,6 +5602,9 @@ DreamV3DeviceControl(
 
     /* --- KIQ BIOS ring submit: map the BIOS ring PA, write PM4, check execution --- */
     case IOCTL_AMDBC250_KIQ_BIOS_RING_SUBMIT: {
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+            "KIQ_BIOS_RING_SUBMIT: code=%08X outputLen=%lu DevExt=%p HW=%d\n",
+            ioctlCode, outputLen, DevExt, DevExt ? DevExt->HardwareInitialized : -1));
         if (outputLen >= sizeof(AMDBC250_IOCTL_KIQ_BIOS_RING_SUBMIT) && DevExt && DevExt->MmioVirtualBase) {
             PAMDBC250_IOCTL_KIQ_BIOS_RING_SUBMIT resp = (PAMDBC250_IOCTL_KIQ_BIOS_RING_SUBMIT)outputBuffer;
             PUCHAR mmio = (PUCHAR)DevExt->MmioVirtualBase;

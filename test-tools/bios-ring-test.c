@@ -13,7 +13,7 @@
 #define IOCTL_AMDBC250_INIT_HARDWARE  CTL_CODE_AMDBC250(0x70, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #define IOCTL_AMDBC250_KIQ_BIOS_RING_SUBMIT CTL_CODE_AMDBC250(0x88, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
-#pragma pack(push, 1)
+#pragma pack(push, 8)
 typedef struct {
     UINT32 Result;
     UINT32 ScratchBefore;
@@ -53,29 +53,33 @@ int main(void) {
     BOOL ok;
     printf("\n--- INIT_HARDWARE (NBIO_MAP) ---\n");
     {
-        UCHAR initIn[32] = {0};
-        UCHAR initOut[32] = {0};
-        *(UINT64*)(initIn + 0)  = 0xFE800000ULL;  /* BAR5 physical */
+        UCHAR initIn[64] = {0};
+        UCHAR initOut[64] = {0};
+        /* INIT_HARDWARE struct: MmioPhysicalBase(8) + MmioSize(4) + Flags(4) + FbPhysicalBase(8) + FbSize(4) = 28 bytes, padded to 32 */
+        /* Note: driver expects inputLen >= 16 && inputLen <= 40 */
+        *(UINT64*)(initIn + 0)  = 0xFE800000ULL;  /* BAR5 physical (0xFE800000) */
         *(UINT32*)(initIn + 8)  = 0x00080000;      /* BAR5 size (512KB) */
         *(UINT32*)(initIn + 12) = 1;               /* Flags=1: NBIO_MAP */
         *(UINT64*)(initIn + 16) = 0xC0000000ULL;   /* BAR0 physical */
         *(UINT32*)(initIn + 24) = 0x10000000;      /* BAR0 size (256MB) */
-        ok = DeviceIoControl(hDevice, 0x80000B80, initIn, sizeof(initIn),
-                                  initOut, sizeof(initOut), &bytesReturned, NULL);
+        /* Use NULL output buffer since INIT_HARDWARE doesn't write output in NBIO_MAP mode */
+        ok = DeviceIoControl(hDevice, 0x80000B80, initIn, 32,
+                             NULL, 0, &bytesReturned, NULL);
         printf("INIT_HARDWARE: %s\n", ok ? "OK" : "FAILED");
     }
 
-    /* Step 2: KIQ_BIOS_RING_SUBMIT - input: actual KIQ ring PA */
-    printf("\n--- KIQ_BIOS_RING_SUBMIT ---\n");
+    /* Step 2: KIQ_BIOS_RING_SUBMIT - use 0 to let driver auto-detect BIOS ring */
+    printf("\n--- KIQ_BIOS_RING_SUBMIT (auto-detect BIOS ring) ---\n");
     KIQ_BIOS_RING_RESULT result = {0};
-    ULONG kiqRingPa = 0x7E508000;  /* ACTUAL BIOS KIQ_BASE (not 0x7E522000) */
     {
-        UCHAR ioctlIn[8] = {0};
-        *(UINT32*)ioctlIn = kiqRingPa;     /* KiqBaseLo */
-        *(UINT32*)(ioctlIn + 4) = 0;       /* KiqBaseHi */
-        ok = DeviceIoControl(hDevice, IOCTL_AMDBC250_KIQ_BIOS_RING_SUBMIT,
-                             ioctlIn, sizeof(ioctlIn),
-                             &result, sizeof(result), &bytesReturned, NULL);
+        /* METHOD_BUFFERED: input and output use same buffer */
+        UCHAR ioctlBuf[64] = {0};
+        /* Input: KiqBaseLo = 0, KiqBaseHi = 0 -> driver reads from HW */
+        DWORD bytesReturned = 0;
+        BOOL ok = DeviceIoControl(hDevice, IOCTL_AMDBC250_KIQ_BIOS_RING_SUBMIT,
+                                  ioctlBuf, sizeof(ioctlBuf),
+                                  ioctlBuf, sizeof(ioctlBuf), &bytesReturned, NULL);
+        memcpy(&result, ioctlBuf, sizeof(result));
     }
 
     if (!ok) {
@@ -93,14 +97,12 @@ int main(void) {
     }
 
     printf("KIQ_BASE:           0x%08X%08X", result.KiqBaseHi, result.KiqBaseLo);
-    if (result.KiqBaseLo == kiqRingPa)
-        printf(" (= TEST RING)\n");
-    else if (result.KiqBaseLo == 0x7E522000)
+    if (result.KiqBaseLo == 0x7E522000)
         printf(" (= BIOS ring)\n");
     else if (result.KiqBaseLo == 0 && result.KiqBaseHi == 0)
         printf(" (= ZERO — HW not readable?)\n");
     else
-        printf("\n");
+        printf(" (user-specified)\n");
 
     printf("SCRATCH before:     0x%08X", result.ScratchBefore);
     if (result.ScratchBefore == 0x4D585042) printf(" (MXPB OK)\n");

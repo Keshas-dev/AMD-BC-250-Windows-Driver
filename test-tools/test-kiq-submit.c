@@ -1,4 +1,4 @@
-/* test-kiq-submit.c — KIQ ring: unhalt ME + activate HQD + submit NOP PM4 */
+/* test-kiq-submit.c — SAFE: read-only register dump, NO HQD_ACTIVE writes */
 #include <windows.h>
 #include <stdio.h>
 #include <stdarg.h>
@@ -95,60 +95,26 @@ int main(void) {
     ReadReg(h, 0x3260, &val);
     Log("  GRBM after unhalt: 0x%08X\n", val);
 
-    /* === Phase 3: Write/readback test all KIQ HQD registers === */
-    Log("\n--- Phase 3: KIQ HQD write test ---\n");
+    /* === Phase 3: Safe KIQ register test (NO HQD_ACTIVE!) === */
+    Log("\n--- Phase 3: Safe KIQ HQD register test ---\n");
     RwTest(h, 0xE068, 0x00000007, "KIQ_CNTL (bufsz=8DW)");
     RwTest(h, 0xE06C, 0x00000000, "KIQ_RPTR = 0");
-    RwTest(h, 0xDAC0, 0x00000001, "HQD_ACTIVE = 1");
+    /* HQD_ACTIVE=1 DANGEROUS — SKIP */
+    Log("  [SKIP] HQD_ACTIVE = 1 (causes hang)\n");
     RwTest(h, 0xDAC4, 0x00000000, "HQD_VMID = 0");
     RwTest(h, 0xDAD0, 0x00000000, "HQD_PQ_RPTR = 0");
-    RwTest(h, 0xDAD4, 0x00000008, "HQD_PQ_WPTR = 8");
-    RwTest(h, 0xDAE0, 0x00000002, "HQD_PQ_CNTL");
+    /* HQD_PQ_WPTR dangerous without ring — SKIP */
+    Log("  [SKIP] HQD_PQ_WPTR (no ring allocated)\n");
     RwTest(h, 0xDAE4, 0x00000000, "HQD_IB_RPTR = 0");
     RwTest(h, 0xDAE8, 0x00000000, "HQD_IB_WPTR = 0");
 
-    /* === Phase 4: Write KIQ WPTR to trigger processing === */
-    Log("\n--- Phase 4: KIQ WPTR trigger ---\n");
-    RwTest(h, 0xE078, 0x00000008, "KIQ_WPTR = 8");
-
-    /* Wait 100ms */
+    /* === Phase 4: READ-ONLY dump after 100ms === */
+    Log("\n--- Phase 4: State after 100ms ---\n");
     Sleep(100);
-
-    /* Check for changes */
-    Log("\n  After 100ms:\n");
     for (int i = 0; i < sizeof(regs)/sizeof(regs[0]); i++) {
         ReadReg(h, regs[i].off, &val);
         Log("  %s [0x%04X] = 0x%08X\n", regs[i].name, regs[i].off, val);
     }
-
-    /* === Phase 5: Try GFX ring path too === */
-    Log("\n--- Phase 5: GFX ring write test ---\n");
-    RwTest(h, 0xDA68, 0x00000707, "GFX_CNTL (bufsz=4KB)");
-    RwTest(h, 0xDA6C, 0x00000000, "GFX_RPTR = 0");
-    RwTest(h, 0xDA78, 0x00000010, "GFX_WPTR = 16");
-
-    Sleep(100);
-    ReadReg(h, 0x3260, &val);
-    Log("  GRBM after GFX WPTR: 0x%08X\n", val);
-    ReadReg(h, 0x32D4, &val);
-    Log("  SCRATCH[0] = 0x%08X\n", val);
-
-    /* === Phase 6: Sweep all writable GC registers 0x3800-0x4B00 === */
-    Log("\n--- Phase 6: Sweep for writable CP engine regs ---\n");
-    unsigned wr = 0;
-    for (unsigned off = 0x3800; off < 0x4C00; off += 4) {
-        unsigned before, after;
-        ReadReg(h, off, &before);
-        if (before == 0xFFFFFFFF) continue;
-        WriteReg(h, off, before ^ 0x00000001);
-        ReadReg(h, off, &after);
-        if (after != before) {
-            Log("  [0x%04X]: 0x%08X -> 0x%08X\n", off, before, after);
-            WriteReg(h, off, before);
-            wr++;
-        }
-    }
-    Log("  Writable in 0x3800-0x4B00: %u\n", wr);
 
     CloseHandle(h);
     Log("\n=== Done ===\n");

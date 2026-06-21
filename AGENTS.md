@@ -13,6 +13,7 @@
 ## Install and runtime
 - Test signing (`bcdedit /set testsigning on`) plus reboot is required; Secure Boot must be OFF.
 - Before installing a new driver: Device Manager uninstall with "Delete driver" -> reboot -> install from `output\` -> reboot.
+- Helper script: `reinstall-both-drivers.bat` (run as Admin) uninstalls both old drivers, reboots, then auto-installs the new GPU + PSP drivers and reboots again.
 - **Windows 11 26100**: Install GPU driver first (maps BAR5), then PSP driver (uses GPU proxy for mailbox access).
 - **Older Windows**: PSP driver can map BAR5 directly; PSP driver can be installed before or after GPU driver.
 
