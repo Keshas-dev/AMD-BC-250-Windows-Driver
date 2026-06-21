@@ -3,8 +3,11 @@
 #include <windows.h>
 #include <stdio.h>
 #include <stdarg.h>
+#include <string.h>
 
 static FILE *g = NULL;
+static BOOL g_UnsafeWrites = FALSE;
+static BOOL g_DeepReads = FALSE;
 static void Log(const char *fmt, ...) {
     va_list a; va_start(a, fmt);
     vfprintf(stdout, fmt, a); va_end(a); fflush(stdout);
@@ -20,7 +23,7 @@ static BOOL ReadReg(HANDLE h, UINT32 offset, UINT32 *val) {
     UINT32 ra[2] = {offset, 0xDEADBEEF};
     DWORD br = 0;
     BOOL ok = DeviceIoControl(h, 0x80000B88, ra, sizeof(ra), ra, sizeof(ra), &br, NULL);
-    *val = ra[1];
+    if (ok && val) *val = ra[1];
     return ok;
 }
 
@@ -83,10 +86,25 @@ static const char *RegName(UINT32 off) {
     }
 }
 
-int main(void) {
+int main(int argc, char **argv) {
+    for (int i = 1; i < argc; i++) {
+        if (_stricmp(argv[i], "--unsafe-writes") == 0) {
+            g_UnsafeWrites = TRUE;
+        } else if (_stricmp(argv[i], "--deep-unsafe-reads") == 0) {
+            g_DeepReads = TRUE;
+        }
+    }
+
     g = fopen("C:\\AMD-BC-250\\AMD-BC-250-Windows-Driver-main\\output\\gpu-mmio-test.log", "w");
     if (!g) { printf("Cannot open log\n"); return 1; }
-    Log("=== Safe GPU MMIO Test (NBIO_MAP only) ===\n\n");
+    Log("=== GPU MMIO Test (READ-ONLY by default) ===\n\n");
+    if (!g_UnsafeWrites && !g_DeepReads) {
+        Log("Mode: safe read-only. Pass --unsafe-writes to enable writes, or --deep-unsafe-reads for RSMU/MMHUB/DF ranges.\n\n");
+    } else if (g_UnsafeWrites) {
+        Log("Mode: UNSAFE write/readback tests enabled.\n\n");
+    } else {
+        Log("Mode: deep unsafe read ranges enabled.\n\n");
+    }
 
     HANDLE h = OpenKmd();
     if (h == INVALID_HANDLE_VALUE) {
@@ -131,7 +149,10 @@ int main(void) {
 
     /* ===== PHASE 2: SPI/WGP/THM range (0x3400+) ===== */
     Log("\n=== PHASE 2: SPI/WGP/THM (0x3400-0x8100) ===\n");
-    {
+    if (!g_DeepReads) {
+        Log("  SKIPPED: THM/MMHUB/DF read ranges are disabled by default.\n");
+    } else {
+        Log("  WARNING: deep read range enabled.\n");
         UINT32 regs[] = {
             0x3400, 0x3404, 0x3408, 0x340C,
             0x34F0, 0x34F4, 0x34F8, 0x34FC,
@@ -168,7 +189,10 @@ int main(void) {
 
     /* ===== PHASE 4: RSMU/DF range (0xA000+) ===== */
     Log("\n=== PHASE 4: RSMU/DF (0xA000-0x1B000) ===\n");
-    {
+    if (!g_DeepReads) {
+        Log("  SKIPPED: RSMU/DF read ranges are disabled by default.\n");
+    } else {
+        Log("  WARNING: RSMU/DF deep read range enabled.\n");
         UINT32 regs[] = {
             0xA000, 0xA004, 0xA008, 0xA00C,
             0xA200, 0xA204, 0xA208, 0xA20C,
@@ -181,28 +205,71 @@ int main(void) {
         }
     }
 
-    /* ===== PHASE 5: SCRATCH write/readback test ===== */
+    /* ===== PHASE 5: Optional SCRATCH write/readback test ===== */
     Log("\n=== PHASE 5: SCRATCH write/readback ===\n");
-    {
-        UINT32 testVals[] = { 0xDEADBEEF, 0x4D585042, 0x00000000, 0xFFFFFFFF, 0xAAAAAAAA, 0x55555555 };
-        for (int i = 0; i < 6; i++) {
-            WriteReg(h, 0x32D4, testVals[i]);
-            ReadReg(h, 0x32D4, &v);
-            Log("  SCRATCH[0x32D4]: write=0x%08X read=0x%08X %s\n",
-                testVals[i], v, (v == testVals[i]) ? "OK" : "MISMATCH");
+    if (!g_UnsafeWrites) {
+        Log("  SKIPPED: write tests are disabled by default.\n");
+    } else {
+        UINT32 scratchBefore = 0, scratchAfter = 0;
+        UINT32 testVals[] = { 0x11111111, 0x00000000, 0x55555555 };
+        if (!ReadReg(h, 0x32D4, &scratchBefore)) {
+            Log("  SCRATCH read failed before write test\n");
+        } else {
+            for (int i = 0; i < sizeof(testVals)/sizeof(testVals[0]); i++) {
+                if (!WriteReg(h, 0x32D4, testVals[i])) {
+                    Log("  SCRATCH[0x32D4]: write=0x%08X IOCTL failed\n", testVals[i]);
+                    continue;
+                }
+                if (!ReadReg(h, 0x32D4, &scratchAfter)) {
+                    Log("  SCRATCH[0x32D4]: write=0x%08X read IOCTL failed\n", testVals[i]);
+                    continue;
+                }
+                Log("  SCRATCH[0x32D4]: write=0x%08X read=0x%08X %s\n",
+                    testVals[i], scratchAfter, (scratchAfter == testVals[i]) ? "OK" : "MISMATCH");
+            }
+            if (!WriteReg(h, 0x32D4, scratchBefore)) {
+                Log("  SCRATCH restore failed: could not write 0x%08X\n", scratchBefore);
+            } else if (!ReadReg(h, 0x32D4, &scratchAfter)) {
+                Log("  SCRATCH restore readback failed\n");
+            } else {
+                Log("  SCRATCH restored to 0x%08X %s\n",
+                    scratchAfter, (scratchAfter == scratchBefore) ? "OK" : "MISMATCH");
+            }
         }
     }
 
-    /* ===== PHASE 6: GRBM_CNTL unlock attempt ===== */
+    /* ===== PHASE 6: Optional GRBM_CNTL unlock attempt ===== */
     Log("\n=== PHASE 6: GRBM_CNTL unlock (0x326C) ===\n");
-    {
-        ReadReg(h, 0x326C, &v);
-        Log("  GRBM_CNTL before: 0x%08X\n", v);
-        WriteReg(h, 0x326C, 0x00000000);
-        ReadReg(h, 0x326C, &v);
-        Log("  GRBM_CNTL after write 0: 0x%08X\n", v);
-        ReadReg(h, 0x3260, &v);
-        Log("  GRBM_STATUS after: 0x%08X\n", v);
+    if (!g_UnsafeWrites) {
+        Log("  SKIPPED: GRBM_CNTL writes are disabled by default.\n");
+    } else {
+        UINT32 grbmCntlBefore = 0, grbmCntlAfter = 0;
+        if (!ReadReg(h, 0x326C, &grbmCntlBefore)) {
+            Log("  GRBM_CNTL read failed before write test\n");
+        } else {
+            Log("  GRBM_CNTL before: 0x%08X\n", grbmCntlBefore);
+            if (!WriteReg(h, 0x326C, 0x00000000)) {
+                Log("  GRBM_CNTL write 0 IOCTL failed\n");
+            } else if (!ReadReg(h, 0x326C, &grbmCntlAfter)) {
+                Log("  GRBM_CNTL read IOCTL failed after write 0\n");
+            } else {
+                Log("  GRBM_CNTL after write 0: 0x%08X\n", grbmCntlAfter);
+            }
+
+            if (!WriteReg(h, 0x326C, grbmCntlBefore)) {
+                Log("  GRBM_CNTL restore failed: could not write 0x%08X\n", grbmCntlBefore);
+            } else if (!ReadReg(h, 0x326C, &grbmCntlAfter)) {
+                Log("  GRBM_CNTL restore readback IOCTL failed\n");
+            } else {
+                Log("  GRBM_CNTL restored to 0x%08X %s\n",
+                    grbmCntlAfter, (grbmCntlAfter == grbmCntlBefore) ? "OK" : "MISMATCH");
+            }
+            if (!ReadReg(h, 0x3260, &v)) {
+                Log("  GRBM_STATUS read IOCTL failed\n");
+            } else {
+                Log("  GRBM_STATUS after: 0x%08X\n", v);
+            }
+        }
     }
 
     CloseHandle(h);

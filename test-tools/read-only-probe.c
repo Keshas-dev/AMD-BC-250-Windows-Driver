@@ -62,6 +62,10 @@ int main() {
     rreg(0xDADC, "CP_HQD_PQ_BASE_HI");
     rreg(0xDAE0, "CP_HQD_PQ_RPTR");
     rreg(0xDAFC, "CP_HQD_PQ_CONTROL");
+    rreg(0xDAE4, "CP_HQD_PQ_RPTR_REPORT_ADDR");
+    rreg(0xDAE8, "CP_HQD_PQ_RPTR_REPORT_ADDR_HI");
+    rreg(0xDAEC, "CP_HQD_PQ_WPTR_POLL_ADDR");
+    rreg(0xDAF0, "CP_HQD_PQ_WPTR_POLL_ADDR_HI");
     rreg(0xDB90, "CP_HQD_PQ_WPTR_LO");
     rreg(0xDB94, "CP_HQD_PQ_WPTR_HI");
     rreg(0xDB4C, "CP_HQD_EOP_BASE_ADDR");

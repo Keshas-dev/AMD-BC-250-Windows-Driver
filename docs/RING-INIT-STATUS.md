@@ -1,8 +1,8 @@
 # Ring Initialization Status — BC-250 (Cyan Skillfish)
 
 **BIOS:** BC250_5.00_clv.bin  
-**Date:** 2026-06-12  
-**Status:** BLOCKED — GFX ring BASE_LO read-only, KIQ path identified
+**Date:** 2026-06-22  
+**Status:** ANALYSIS — HQD polling not configured, memory injection blocked
 
 ---
 
@@ -123,10 +123,53 @@ GRBM_SOFT_RESET at 0x326C was also read-only. We can't reset the GC block to pot
    - Write WPTR to KIQ_WPTR
    - Poll for completion (fence or RPTR advance)
 4. Test:
-   - NOP submission → WPTR advances?
-   - WRITE_DATA to scratch → value changes?
-   - DISPATCH_DIRECT → compute shader runs?
+    - NOP submission → WPTR advances?
+    - WRITE_DATA to scratch → value changes?
+    - DISPATCH_DIRECT → compute shader runs?
 ```
+
+## Recent Findings (2026-06-22)
+
+### HQD Polling Configuration
+
+| Register | Offset | Value | Meaning |
+|----------|--------|-------|---------|
+| CP_HQD_PQ_WPTR_POLL_ADDR_LO | 0xDAEC | 0x00000000 | **Poll address = 0** |
+| CP_HQD_PQ_WPTR_POLL_ADDR_HI | 0xDAF0 | 0x00000000 | Poll address high |
+| CP_HQD_PQ_RPTR_REPORT_ADDR_LO | 0xDAE4 | 0x00000000 | RPTR report disabled |
+| CP_HQD_PQ_RPTR_REPORT_ADDR_HI | 0xDAE8 | 0xFFFFFFFF | Reserved |
+| CP_PQ_WPTR_POLL_CNTL | 0xDB6C | 0x000003FF | Default poll count |
+
+**Conclusion:** BIOS did NOT configure memory polling. The GPU will NOT auto-detect PM4 packets written to system memory.
+
+### GFX Ring vs MMHUB Overlap
+
+| Register | Value | Original Assumption | Actual Meaning |
+|----------|-------|---------------------|----------------|
+| CP_GFX_RING0_RPTR | 0x01200000 | GFX ring RPTR | MMHUB FLAT base |
+| CP_GFX_RING0_RPTR_ADDR_LO | 0x00006000 | GFX RPTR_ADDR | Page size config |
+| CP_GFX_RING0_WPTR | 0x00100010 | GFX ring WPTR | Polling counter |
+
+**Conclusion:** GFX ring registers repurpose as MMHUB configuration. GFX ring is inactive.
+
+### Why PM4 Tests Failed
+
+1. `HQD_PQ_BASE = 0` → GPU has no ring buffer address
+2. `POLL_ADDR = 0` → GPU doesn't know where to look for commands
+3. `WPTR_POLL_CNTL = 0x3FF` → GPU will poll, but at address 0 (invalid)
+
+### Implication
+
+Memory injection at `0x7E508000/0x7E522000` will NOT work because:
+- GPU doesn't read from that address
+- No valid poll address configured
+- HQD_BASE is zeroed
+
+### Next Steps
+
+1. **Option A:** Configure HQD manually via KIQ (requires PSP KIQ working)
+2. **Option B:** Re-init GPU through SOS firmware (requires PSP alive)
+3. **Option C:** Use PSP to program HQD registers and trigger via doorbell
 
 ## References
 
