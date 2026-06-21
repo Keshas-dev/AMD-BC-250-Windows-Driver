@@ -18,7 +18,6 @@
 
 ## Architecture
 - This is a WDM control/IOCTL driver, not a real WDDM miniport on Win11 26100; `DxgkInitialize` is not exported and the DDI path is stubbed.
-- **CONFIRMED**: `dxgkrnl.sys` on Win11 26100 has NO `DxgkInitialize` export (dumpbin /exports verified). Only `NtDxgk*` user-mode syscalls exported.
 - DriverBuildId registry marker confirms new binary loaded. Step markers: DriverEntryRan=1, Step_BeforeDxgkInit=10, Step_DriverEntryPost=11 (WDM fallback).
 - Main IOCTL device: `\\.\AMDBC250DreamV43`; primary GPU MMIO BAR5 is `0xFE800000` (512KB).
 - Do not map past BAR5 or probe random unknown offsets casually; hardware hangs require reboot.
@@ -49,197 +48,54 @@
 - CP registers at GC_BASE-shifted 0x3AD8-0x3AEC contain fence/doorbell addresses (0x02A8xxxx range).
 - NBIO_ID at 0xC100 = 0xFEDCBAEF confirms NBIO accessible.
 - SCRATCH (0x32D4) bit 31 is write-masked by hardware (W1C or read-only).
-- **SCRATCH test**: W=0xDEADBEEF reads 0x5EADBEEF (bit 31 cleared), W=0x12345678 reads 0x12345678 OK.
 
-## Progress
-### Done
-- ✅ GPU driver: BAR5 proxy IOCTLs (0x900 read, 0x901 write)
-- ✅ PSP driver: GPU proxy fallback when `MmMapIoSpace` fails
-- ✅ PSP mailbox working: `C2PMSG_81=0xF0000010`
-- ✅ Firmware loading working: `LOAD_EMBEDDED_FW` succeeds
-- ✅ KIQ submit working: `wptr` increments
-- ✅ NBIO unlock working: `BOOT_SEQUENCE` sends SYSDRV/SOS
-- ✅ All tests pass on Windows 11 26100
-- ✅ v3 firmware (navi10_sos.bin) loaded via GPU proxy
-- ✅ GRBM_STATUS accessible with v3 firmware (0x00000000)
-- ✅ CREATE_RING implemented (allocates ring buffer, programs regs)
-- ✅ NBIO_VIA_RING implemented (mailbox-based fallback) — **GRBM UNLOCKED via this path**
-- ✅ INIT_HARDWARE NBIO_MAP fix: driver no longer hangs on init (moved GPU alive test after NBIO_MAP break)
-- ✅ GC_BASE-shifted registers fully accessible: GPU_ID, GRBM_STATUS, CC_CONFIG, SCRATCH, SPI_WGP
-
-### Blocked
-- ❌ GPCOM ring: TOS protocol not in SOS firmware (`C2PMSG_64` bit 31 never sets)
-- ❌ SDMA ring: Same ring protocol issue
-- ❌ 3D rendering: No working command submission path
-- ❌ GPU firmware: CP_ME/PFP/RLC not loaded — HQD queue can't activate without firmware running
-- ❌ **PM4 submission**: GPU VM dead → GPU CP cannot access ring buffer memory
-- ❌ **GPU VM (GCVM)**: All registers 0xFFFFFFFF (power-gated), cannot configure page tables
-- ❌ **GRBM_GFX_INDEX queue select**: All 16 queues return identical values on BC-250
-- ❌ **KIQ_CNTL (0xE068)**: Not writable through user-mode proxy
-
-## GCVM (GPU VM) — ALIVE at corrected offsets (2026-06-18)
-
-### Correct GCVM register offsets (BAR5 byte offsets)
+## GCVM (GPU VM) — Corrected offsets (verified 2026-06-18)
 Formula: `BAR5_offset = GC_BASE(0x1260) + Linux_DWORD_offset * 4`
-- **GCVM_CONTEXT0_CNTL = 0x0B460** — ALIVE! value=0x010CA88D, WRITABLE (w=1 reads back 1)
-- **GCVM_CONTEXT0_PT_BASE_LO = 0x0B608** — ALIVE! (was 0, writable)
-- **GCVM_CONTEXT0_PT_BASE_HI = 0x0B60C** — ALIVE! (was 0, writable)
-- **GCVM_L2_CNTL = 0x0B360** — ALIVE! value=0x013C67B8
+- **GCVM_CONTEXT0_CNTL = 0x0B460** — alive, writable (bit0=enable, bit1=DEFAULT_PAGE)
+- **GCVM_CONTEXT0_PT_BASE_LO = 0x0B608** — alive but **HARDWARE LOCKED** (always reads 0)
+- **GCVM_L2_CNTL = 0x0B360** — alive, value=0x013C67B8
+- **DO NOT USE** 0x2840-0x2987 range or 0x1A00 range (all 0xFFFFFFFF, dead)
 
-### Previous WRONG offsets (DO NOT USE)
-- 0x2840-0x2987 range = WRONG (all 0xFFFFFFFF)
-- 0x1A00 range = WRONG (all dead)
-- hw_extra 0x9B00-0x9B90 = readable as 0 but NOT writable
+### PTE format (RDNA2/GFX10)
+- PDE: bit0=VALID, bit1=SYSTEM → `0x03`
+- PTE: bit0=VALID, bit1=SYSTEM, bit5=READABLE, bit6=WRITABLE → `0x63` (not 0x61!)
+- Format from Linux `amdgpu_vm.h`: VALID=bit0, SYSTEM=bit1, SNOOPED=bit2, READABLE=bit5, WRITEABLE=bit6
 
-### GCVM page table setup (identity mapping)
-- GPU_KIQ_TEST allocates PML4/PDP/PD/PT pages below 4GB
-- Sets up identity mapping (VA=PA) for ring buffer page
-- Programs GCVM_CONTEXT0_PT_BASE to PML4 physical address
-- Enables GCVM context 0 (bit 0 of GCVM_CONTEXT0_CNTL)
+### GCVM register writability map
+**WARNING**: Writing 0xDEADBEEF to FULL_WRITABLE registers DESTROYS BIOS config! Always save/restore.
+- **WRITABLE**: L2 TLB data 1-2 (0x0B320-0x0B324), Context0 regs (0x0B408-0x0B4AC), Context0 config (0x0B4C0-0x0B4D4 bits 0-7), GCVM_CONTEXT0_CNTL (0x0B460)
+- **READ-ONLY**: L2 TLB tag (0x0B31C), L2 TLB data 3-15 (0x0B328-0x0B35C), L2_CNTL (0x0B360), Context0 base (0x0B404), PT_BASE (0x0B608-0x0B60C)
+- **HARDWARE LOCKED**: PT_BASE_LO/HI (0x0B608-0x0B60C) — always 0, cannot configure page tables from OS
+- BIOS config varies per boot; warm reboot doesn't fully reset GPU state.
 
-### PTE format (RDNA2/GFX10) — CRITICAL FIX
-- **PDE flags**: bit0=VALID, bit1=SYSTEM → `0x03` (correct)
-- **PTE flags (FIXED)**: bit0=VALID, bit1=SYSTEM, bit5=READABLE, bit6=WRITABLE → `0x63`
-- **OLD WRONG PTE**: `0x61` (missing SYSTEM bit!) → GPU tried to access system RAM as VRAM
-- PTE format from Linux `amdgpu_vm.h`:
-  ```
-  AMDGPU_PTE_VALID    = bit 0
-  AMDGPU_PTE_SYSTEM   = bit 1  (system memory, not VRAM)
-  AMDGPU_PTE_SNOOPED  = bit 2  (CPU coherent)
-  AMDGPU_PTE_READABLE = bit 5
-  AMDGPU_PTE_WRITEABLE = bit 6
-  ```
-
-## HDP block alive (0x0500-0x05FF)
-- 61 writable registers found
-- MC_VM_FB_LOC_TOP (0x0524) and MC_VM_AGP_BASE (0x0528) writable
-
-## CP Ring: RING0_BASE_LO is READONLY
-- **GFX RING0_BASE_LO (0xDA60)**: readonly, value=0 → **BIOS sets ring base**
-- **COMPUTE_BASE_LO (0xDB60)**: readonly, value=0 → same
-- **KIQ_BASE_LO (0xE060)**: writable (0x46E00000) → KIQ works
+## CP Ring registers
+- **GFX RING0_BASE_LO (0xDA60)**: read-only (BIOS sets ring base)
+- **COMPUTE_BASE_LO (0xDB60)**: read-only (same)
+- **KIQ_BASE_LO (0xE060)**: writable → KIQ works
 - All other ring registers (CNTL, RPTR, WPTR, DOORBELL) writable
 
-## CP Firmware — Direct MMIO Load (2026-06-18)
-### LOAD_CP_FW IOCTL (0x80000BD4)
-- Parses 44-byte firmware header: total_size, hdr_size, ucode_version, ucode_size, ucode_offset, jt_offset_dws, jt_size_dws
-- Uploads Jump Table via UCODE_DATA registers (ME: 0x172B8/0x172BC, PFP: 0x172B0/0x172B4)
+## CP Firmware — Direct MMIO Load
+- `LOAD_CP_FW` IOCTL (`0x80000BD4`): parses 44-byte firmware header, uploads Jump Table via UCODE_DATA registers.
 - IC_BASE registers: ME_IC=0x17370-0x17378, PFP_IC=0x17360-0x17368, CE_IC=0x17380-0x17388
 - Halt bits: ME_HALT=bit28, PFP_HALT=bit30, CE_HALT=bit29
+- Firmware files in `firmware/` directory (cyan_skillfish2_me.bin, pfp.bin, ce.bin, mec.bin, rlc.bin, sdma.bin)
+- IC_BASE DMA bypasses GCVM — firmware loads successfully via MMIO, but ring buffer access uses GCVM translation (which fails)
 
-### Cyan Skillfish2 firmware files (from `firmware/` directory)
-- `cyan_skillfish2_me.bin` (263,424 bytes) — ME ucode version=99, ucode_size=263168, JT=65536+128 DWs
-- `cyan_skillfish2_pfp.bin` (263,424 bytes) — PFP ucode
-- `cyan_skillfish2_ce.bin` (263,296 bytes) — CE ucode
-- `cyan_skillfish2_mec.bin` (268,592 bytes) — MEC ucode
-- `cyan_skillfish2_rlc.bin` (25,344 bytes) — RLC ucode
-- `cyan_skillfish2_sdma.bin` (33,792 bytes) — SDMA ucode
+## PM4 submission — current blocker
+- GPU CP cannot access ring buffer memory via GCVM translation.
+- IC_BASE DMA works (firmware loads) → GPU CAN read system RAM for DMA, but ring buffer access uses different GCVM path.
+- DEFAULT_PAGE bit (CONTEXT0_CNTL bit1) does not provide flat/physical addressing.
+- Context0 TLB entries (0x0B408-0x0B4AC) are writable but format is unknown.
 
-## PM4 Submission Status (2026-06-18)
-- GPU_KIQ_TEST programs KIQ/HQD, allocates ring buffer, sets up GCVM page tables
-- **SCRATCH unchanged (0x4D585042)** — PM4 did not execute
-- Root causes investigated:
-  1. ~~GCVM dead~~ → FIXED: GCVM alive at corrected offsets
-  2. ~~PTE flags wrong~~ → FIXED: 0x61→0x63 (added SYSTEM bit)
-  3. **CP firmware not loaded** → NEXT: use LOAD_CP_FW to load ME+PFP before PM4
-- HQD_ACTIVE was 0xFFF0 at boot (12 BIOS queues), GPU_KIQ_TEST cleanup destroys this
-- **GRBM_GFX_INDEX queue select does not work** — all 16 queues return identical values
+## PSP Proxy IOCTLs
+- GPU driver exposes: `IOCTL_AMDBC250_BAR5_READ_PROXY` (0x900) and `IOCTL_AMDBC250_BAR5_WRITE_PROXY` (0x901) — these are **raw values**, not CTL_CODE-packed.
+- PSP driver must use `#define IOCTL_AMDBC250_BAR5_READ_PROXY 0x900` (raw), NOT `CTL_CODE(FILE_DEVICE_UNKNOWN, 0x900, ...)` — different numbers cause silent rejection.
 
-## PSP KIQ Path Status
-- PSP driver `PspKiqCreateRing` allocates ring buffer
-- `KIQ_SUBMIT` reports success (wptr increments) but GPU registers stay 0
-- PSP proxy works for reads but GPU driver needs MMIO mapping
-
-## GCVM Register Writability Map (2026-06-18)
-**WARNING**: Writing 0xDEADBEEF to FULL_WRITABLE registers DESTROYS BIOS config! Always save/restore.
-| Region | Offsets | Status | Notes |
-|--------|---------|--------|-------|
-| L2 TLB tag | 0x0B31C | **RO** | BIOS-cached tag data |
-| L2 TLB data 1-2 | 0x0B320-0x0B324 | **WRITABLE** | Were BIOS values; destroyed by test |
-| L2 TLB data 3-15 | 0x0B328-0x0B35C | **RO** | BIOS page translations |
-| L2_CNTL | 0x0B360 | **RO** | Value 0x013C67B8→0x013C7798 (varies per boot) |
-| L2 config 1-3 | 0x0B364-0x0B36C | **RO** | Additional L2 config |
-| Context0 base | 0x0B404 | **MASKED** | 0x00000CC5 (low bits writable) |
-| Context0 regs | 0x0B408-0x0B4AC | **WRITABLE** | 39 regs, BIOS state — need save/restore |
-| Context0 config | 0x0B4C0-0x0B4D4 | **MASKED** | Bits 0-7 writable |
-| Invalidate tag | 0x0B51C | **RO** | |
-| Invalidate data | 0x0B520-0x0B524 | **WRITABLE** | |
-| Invalidate rest | 0x0B528-0x0B56C | **RO** | 17 DWORDs |
-| PT_BASE_LO/HI | 0x0B608-0x0B60C | **RO** | HARDWARE LOCKED, always 0 |
-| GCVM_CONTEXT0_CNTL | 0x0B460 | **WRITABLE** | bit0=1 enables context, bit1=DEFAULT_PAGE |
-
-### Context0 BIOS State (fresh boot, safe read 2026-06-18)
-- **0x0B404**: 0x00000CC5 (MASKED — partial write protection)
-- **0x0B408**: 0x007ECCC4
-- **0x0B40C**: 0x7D9AB14E
-- **0x0B41C**: 0xC4121908
-- **0x0B420**: 0x8DCFBF89 (VALID bit set)
-- **0x0B424**: 0x6F8C79EE
-- **0x0B428**: 0x5E6DADDB (VALID + SYSTEM bits set)
-- **0x0B42C**: 0xEFF50989 (VALID)
-- **0x0B430**: 0x0BC0DB40
-- **0x0B434-0x0B45C**: various (see safe-read dump)
-- **0x0B460**: 0x010CA88D (CONTEXT0_CNTL — bits 0,2,3,7,11,13,15,18,19,24)
-- **0x0B4C0**: 0x000F0D8F (MASKED)
-- **0x0B4C8**: 0x00000075 (MASKED)
-- **0x0B4CC**: 0x0000000F (MASKED)
-- **0x0B4D0**: 0x0000007D (MASKED)
-- **0x0B4D4**: 0x0000005F (MASKED)
-
-## GCVM DEFAULT_PAGE Discovery (2026-06-18)
-- **CONTEXT0_CNTL bit1 = ENABLE_DEFAULT_PAGE** (Linux sets this, BIOS does NOT)
-- BIOS value: 0x010CA88D (bit1=0, DEFAULT_PAGE disabled)
-- Setting bit1: 0x010CA88F — **WRITABLE, survives GPU_KIQ_TEST**
-- **Effect: NONE** — PM4 still doesn't execute with DEFAULT_PAGE enabled
-- Tested: CONTEXT0_CNTL = 0x00, 0x02, 0x03, 0x010CA88F — all fail
-- Conclusion: DEFAULT_PAGE does not provide flat/physical addressing for ring buffer access
-
-## BIOS Configuration Varies Per Boot (2026-06-18)
-- **Boot 1**: CONTEXT0_CNTL = 0x010CA88D, 15+ Context0 regs non-zero
-- **Boot 2**: CONTEXT0_CNTL = 0x00000001, ALL Context0 regs 0x0
-- L2 TLB entries (0x0B31C-0x0B36C) populated on both boots (different values)
-- **Hypothesis**: Warm reboot doesn't fully reset GPU; BIOS config depends on GPU state
-- **Need cold boot** to get consistent BIOS GCVM configuration
-
-## Firmware Loading Status (2026-06-18)
-- **LOAD_CP_FW works via MMIO** — IC_BASE DMA bypasses GCVM
-- ME: Result=1 (success), UcodeVer=0x63 (99)
-- PFP: Result=1 (success), UcodeVer=0x94 (148)
-- ME_CNTL after FW: 0x30000000 (ME_HALT+CE_HALT, PFP running)
-- **Key insight**: IC_BASE DMA reads firmware from system RAM successfully, but GPU CP ring buffer access uses different GCVM path
-
-## PM4 Submission Root Cause (2026-06-18)
-- **GPU CP cannot access ring buffer memory via GCVM**
-- IC_BASE DMA works (firmware loads) → GPU CAN read system RAM for DMA
-- Ring buffer access goes through GCVM translation → FAILS
-- PT_BASE locked at 0 → no page tables
-- DEFAULT_PAGE doesn't help → no flat mapping
-- Context0 TLB entries (0x0B408-0x0B4AC) — UNKNOWN format, need decode
-- **NEXT**: Try injecting PTE-format entries into empty Context0 slots (0x0B408-0x0B4AC bit0=0 entries)
-
-## Key Next Steps
-1. **PT_BASE is NOT writable** — BIOS hardware-locks GCVM_CONTEXT0_PT_BASE (0x0B608/0x0B60C). Cannot configure page tables from OS.
-2. **GCVM L2 TLB has BIOS-cached translations** (0x0B31C-0x0B35C, 0x0B364-0x0B36C) — 19 DWORDs of encrypted/hardware-format entries. BIOS configures VM through L2 cache, not PT_BASE.
-3. **MMHUB VM registers all ZERO** (0x1B400-0x1B600) — no MMHUB VM config
-4. **BIOS doesn't use KIQ** (KIQ_BASE=0), uses GFX ring (RPTR=0x01200000, WPTR=0x00100010)
-5. **CP firmware loads successfully** via LOAD_CP_FW ME ucode=0x63, PFP ucode=0x94
-6. **ME_CNTL = 0xFFFBD9FB** on fresh boot — ME running, PFP halted
-7. **Context0 regs (0x0B408-0x0B4AC) are WRITABLE** — decode format, try to configure identity mapping or add entries for ring buffer
-8. **L2_CNTL bit0=0** — L2 cache may be disabled; enabling it might help
-
-## PSP Proxy IOCTL Fix (2026-06-16)
-- **ROOT CAUSE found**: PSP driver defined proxy IOCTLs as `CTL_CODE(FILE_DEVICE_UNKNOWN, 0x900/0x901, ...)` = 0x00222400/0x00222405. GPU driver switch cases check raw values `case 0x900:` / `case 0x901:`. Different numbers → all proxy writes silently rejected.
-- **FIX**: PSP driver `PspCore.c` now uses `#define IOCTL_AMDBC250_BAR5_READ_PROXY 0x900` / `#define IOCTL_AMDBC250_BAR5_WRITE_PROXY 0x901` (raw values).
-- **Result**: PSP proxy writes now reach GPU hardware. GRBM_GFX_INDEX, CP_ME_CNTL, PERSISTENT_STATE writes confirmed working.
-- **HQD registers**: Some are write-only (PQ_BASE, VMID, PQ_CONTROL) — can't read back. ACTIVE reads 0 even after writing 1 — queue won't activate because GPU ME/PFP firmware is not running.
-- **Current blocker**: GPU firmware not loaded. KIQ queue activation requires ME/PFP microcode running. Need firmware load mechanism that doesn't depend on ring protocol.
-
-## Windows 11 26100 BAR5 Proxy Support
-- GPU driver maps BAR5 at `0xFE800000` via `INIT_HARDWARE` IOCTL
-- PSP driver uses GPU proxy for mailbox access when `MmMapIoSpace` fails:
-  - `IOCTL_AMDBC250_BAR5_READ_PROXY` (0x900): Read BAR5 via GPU driver
-  - `IOCTL_AMDBC250_BAR5_WRITE_PROXY` (0x901): Write BAR5 via GPU driver
-- Required: Install GPU driver first, then PSP driver
+## Memory and context
+- **ALWAYS use memory tool** to save progress, decisions, and key findings between sessions.
+- Before ending a session, save: current state, blockers, next steps, file changes, and hardware discoveries.
+- On session start, search memory for prior context before exploring files.
+- Memory tags: `BC-250`, `IOMMU`, `GPU driver`, `GCVM`, `compile`, `PSP driver`, `hardware`.
 
 ## Source and docs to trust
 - Prefer `build.bat`, `src/kmd/amdbc250_dream_kmd.c`, `src/kmd/amdbc250_dream_hw_init.c`, `src/kmd/amdbc250_psp.c`, and `inc/amdbc250_dream_hw.h` over historical docs.

@@ -707,14 +707,14 @@ Environment:
 #define AMDBC250_MAX_VMIDS                        16      /* VMID 0-15         */
 #define AMDBC250_MAX_VM_CONTEXTS                  16      /* Max VM contexts   */
 
-/* PTE flags */
+/* PTE flags — MUST match Linux amdgpu_vm.h GFX10 format */
 #define AMDBC250_PTE_VALID                         (1ULL << 0)
-#define AMDBC250_PTE_READABLE                      (1ULL << 1)
-#define AMDBC250_PTE_WRITABLE                      (1ULL << 2)
-#define AMDBC250_PTE_EXECUTABLE                    (1ULL << 3)
-#define AMDBC250_PTE_SNOOP                         (1ULL << 4)
-#define AMDBC250_PTE_SYSTEM                        (1ULL << 5)
-#define AMDBC250_PTE_VRAM                          (1ULL << 6)
+#define AMDBC250_PTE_SYSTEM                        (1ULL << 1)
+#define AMDBC250_PTE_SNOOP                         (1ULL << 2)
+#define AMDBC250_PTE_READABLE                      (1ULL << 5)
+#define AMDBC250_PTE_WRITABLE                      (1ULL << 6)
+#define AMDBC250_PTE_EXECUTABLE                    (1ULL << 3)  /* non-standard */
+#define AMDBC250_PTE_VRAM                          (1ULL << 7)  /* non-standard, moved from bit6 */
 
 /* VM access flags */
 #define AMDBC250_VM_READ                           0x1

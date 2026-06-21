@@ -58,6 +58,10 @@ static NTSTATUS DreamV3VmInvalidateTLB(
     _In_ ULONG VmId
     );
 
+static ULONG64 DreamV3VmEncodePde(
+    _In_ PHYSICAL_ADDRESS PhysicalAddr
+    );
+
 static ULONG64 DreamV3VmEncodePte(
     _In_ PHYSICAL_ADDRESS PhysicalAddr,
     _In_ ULONG Flags
@@ -633,7 +637,7 @@ DreamV3VmInsertMapping(
         }
 
         PdPhys = NewPd->PhysicalAddress;
-        Pml4[Pml4Index] = DreamV3VmEncodePte(PdPhys, AMDBC250_PTE_VALID);
+        Pml4[Pml4Index] = DreamV3VmEncodePde(PdPhys);
     }
 
     /* Get PD entry */
@@ -650,7 +654,7 @@ DreamV3VmInsertMapping(
         }
 
         PtPhys = NewPt->PhysicalAddress;
-        Pd[PdIndex] = DreamV3VmEncodePte(PtPhys, AMDBC250_PTE_VALID);
+        Pd[PdIndex] = DreamV3VmEncodePde(PtPhys);
     }
 
     /* Get PT entry and write mapping */
@@ -861,6 +865,23 @@ DreamV3VmEncodePte(
     }
 
     return Pte;
+}
+
+/*===========================================================================
+  DreamV3VmEncodePde — Encode a PDE (page directory) entry
+  PDE format (GFX10): bit0=VALID, bit1=SYSTEM(1=system,0=VRAM)
+  For PDE: always set VALID|SYSTEM (0x03) since all memory is system memory
+===========================================================================*/
+static ULONG64
+DreamV3VmEncodePde(
+    _In_ PHYSICAL_ADDRESS PhysicalAddr
+    )
+{
+    ULONG64 Pde = 0;
+    Pde |= (PhysicalAddr.QuadPart & 0x000FFFFFFFFFF000ULL);
+    Pde |= AMDBC250_PTE_VALID;   /* bit 0 */
+    Pde |= AMDBC250_PTE_SYSTEM;  /* bit 1 = system memory */
+    return Pde;
 }
 
 /*===========================================================================
