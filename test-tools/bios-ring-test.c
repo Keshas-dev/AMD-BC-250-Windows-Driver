@@ -108,13 +108,16 @@ int main(void) {
     else printf("\n");
 
     printf("SCRATCH after:      0x%08X", result.ScratchAfter);
-    if (result.ScratchAfter == 0xCAFEBABE) printf(" *** PM4 EXECUTED! ***\n");
+    if (result.ScratchAfter == 0xCAFEBABE) printf(" *** WRITE_DATA EXECUTED! ***\n");
+    else if (result.ScratchAfter == 0xDEADBEEF) printf(" *** NOP PATTERN WRITTEN BACK! ***\n");
     else if (result.ScratchAfter == result.ScratchBefore) printf(" (unchanged)\n");
-    else printf(" (changed!)\n");
+    else printf(" (changed to 0x%08X)\n", result.ScratchAfter);
 
     printf("KIQ_RPTR before:    %lu\n", result.KiqRptrBefore);
     printf("KIQ_RPTR after:     %lu", result.KiqRptrAfter);
-    if (result.KiqRptrAfter != result.KiqRptrBefore)
+    if (result.KiqRptrAfter == 4)
+        printf(" *** GPU PROCESSED NOP PACKETS! ***\n");
+    else if (result.KiqRptrAfter != result.KiqRptrBefore)
         printf(" (GPU advanced RPTR!)\n");
     else printf("\n");
 
@@ -136,9 +139,11 @@ int main(void) {
     CloseHandle(hDevice);
 
     printf("\n");
-    if (result.Result == 2)
-        printf("*** PM4 EXECUTED SUCCESSFULLY! SCRATCH = 0xCAFEBABE ***\n");
-    else if (result.Result == 1)
+    if (result.KiqRptrAfter == 4)
+        printf("*** GPU PROCESSED NOP PACKETS - RPTR = 4! ***\n");
+    else if (result.ScratchAfter == 0xCAFEBABE)
+        printf("*** PM4 EXECUTEd SUCCESSFULLY! SCRATCH = 0xCAFEBABE ***\n");
+    else if (result.KiqRptrAfter != result.KiqRptrBefore)
         printf("Partial: RPTR moved but SCRATCH not written. Check PM4 format.\n");
     else
         printf("FAIL: GPU did not process ring. Check KdPrint logs with DbgView.\n");

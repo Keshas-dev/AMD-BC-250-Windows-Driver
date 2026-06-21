@@ -5674,9 +5674,7 @@ DreamV3DeviceControl(
                     BIOS_WRITE(0x6C90, (ULONG)(pml4Pa.QuadPart >> 32));
                     BIOS_WRITE(0x0B460, 1);
                     KdPrint(("KIQ_BIOS_RING GCVM setup: PT_BASE=0x%llX (4-level)\n", pml4Pa.QuadPart));
-                    MmFreeContiguousMemory(pdpVa);
-                    MmFreeContiguousMemory(pdVa);
-                    MmFreeContiguousMemory(ptVa);
+                    /* Keep pages allocated - GPU needs them for translation */
                 }
             } else if (pgVa && ringPa.QuadPart >= 0x100000ULL) {
                 /* 3-level tables for addresses 1MB - 4GB */
@@ -5696,8 +5694,7 @@ DreamV3DeviceControl(
                     BIOS_WRITE(0x6C90, (ULONG)(pml3Pa.QuadPart >> 32));
                     BIOS_WRITE(0x0B460, 1);
                     KdPrint(("KIQ_BIOS_RING GCVM setup: PT_BASE=0x%llX (3-level)\n", pml3Pa.QuadPart));
-                    MmFreeContiguousMemory(pdVa);
-                    MmFreeContiguousMemory(ptVa);
+                    /* Keep pages allocated - GPU needs them for translation */
                 }
             } else {
                 KdPrint(("KIQ_BIOS_RING: GCVM setup skipped - PA too low or alloc failed\n"));
@@ -5742,13 +5739,14 @@ DreamV3DeviceControl(
             BIOS_WRITE(BIOS_KIQ_WPTR_OFF, 0);
             KeStallExecutionProcessor(1);
 
-            /* Step 7: Write PM4 to ring */
+            /* Step 7: Write PM4 to ring - use simple NOP packets */
             {
                 PULONG ring = (PULONG)ringVa;
-                ring[0] = 0xC0023700;   /* PM4: IT_WRITE_DATA (count=2, opcode=0x37) */
-                ring[1] = 0x000032D4;   /* SCRATCH register offset */
-                ring[2] = 0xCAFEBABE;   /* value to write */
-                ring[3] = 0xC0001000;   /* PM4: NOP */
+                /* Type 3 NOP packets - simpler format that GPU should definitely accept */
+                ring[0] = (3U << 30) | (2U << 16) | (0x10U << 8) | 3U;  /* Type3 NOP, Count=2 */
+                ring[1] = 0xDEADBEEF;
+                ring[2] = 0xDEADBEEF;
+                ring[3] = 0xDEADBEEF;
             }
 
             /* Step 7.5: CRITICAL � flush CPU stores before WPTR update */
