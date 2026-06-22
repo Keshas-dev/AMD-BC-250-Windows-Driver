@@ -8,6 +8,7 @@
 static FILE *g = NULL;
 static BOOL g_UnsafeWrites = FALSE;
 static BOOL g_DeepReads = FALSE;
+static BOOL g_KiqTest = FALSE;
 static void Log(const char *fmt, ...) {
     va_list a; va_start(a, fmt);
     vfprintf(stdout, fmt, a); va_end(a); fflush(stdout);
@@ -92,6 +93,8 @@ int main(int argc, char **argv) {
             g_UnsafeWrites = TRUE;
         } else if (_stricmp(argv[i], "--deep-unsafe-reads") == 0) {
             g_DeepReads = TRUE;
+        } else if (_stricmp(argv[i], "--kiq-test") == 0) {
+            g_KiqTest = TRUE;
         }
     }
 
@@ -269,6 +272,60 @@ int main(int argc, char **argv) {
             } else {
                 Log("  GRBM_STATUS after: 0x%08X\n", v);
             }
+        }
+    }
+
+    /* ===== HQD Registers ===== */
+    Log("\n=== HQD Registers (BAR5-relative) ===\n");
+    UINT32 hqdRegs[] = {0xDAD8, 0xDADC, 0xDAE0, 0xDAE4, 0xDAE8, 0xDAEC, 0xDAF0, 0xDAF4, 0xDAFC, 0xDB00, 0xDB90, 0xDB94, 0xE060, 0xE064, 0xE06C, 0xE078};
+    const char* hqdNames[] = {
+        "HQD_PQ_BASE", "HQD_PQ_BASE_HI", "HQD_PQ_RPTR", "HQD_PQ_RPTR_REPORT_ADDR",
+        "HQD_PQ_RPTR_REPORT_ADDR_HI", "HQD_PQ_WPTR_POLL_ADDR", "HQD_PQ_WPTR_POLL_ADDR_HI",
+        "HQD_PQ_DOORBELL_CONTROL", "HQD_PQ_CONTROL", "HQD_PQ_WPTR_POLL_CNTL",
+        "HQD_PQ_WPTR_LO", "HQD_PQ_WPTR_HI", "KIQ_BASE_LO", "KIQ_BASE_HI", "KIQ_RPTR", "KIQ_WPTR"
+    };
+    for (int i = 0; i < sizeof(hqdRegs)/sizeof(hqdRegs[0]); i++) {
+        if (ReadReg(h, hqdRegs[i], &v)) {
+            Log("  [0x%04X] %-30s = 0x%08X\n", hqdRegs[i], hqdNames[i], v);
+        }
+    }
+
+    if (g_KiqTest) {
+        Log("\n=== KIQ Test via GPU Driver ===\n");
+        typedef struct {
+            UINT32 Result;
+            UINT32 ScratchBefore;
+            UINT32 ScratchAfter;
+            UINT32 KiqBaseLo;
+            UINT32 KiqBaseHi;
+            UINT32 KiqRptrBefore;
+            UINT32 KiqRptrAfter;
+            UINT32 KiqWptrSet;
+            UINT32 MeCntlBefore;
+            UINT32 MeCntlAfter;
+            UINT32 RingDword0;
+            UINT32 RingDword1;
+            UINT32 RingDword2;
+            UINT32 RingDword3;
+        } KIQ_RESULT;
+        KIQ_RESULT kiq = {0};
+        UCHAR kiqBuf[64] = {0};
+        DWORD br = 0;
+        BOOL kiqOk = DeviceIoControl(h, 0x80000BD0, kiqBuf, sizeof(kiqBuf), kiqBuf, sizeof(kiqBuf), &br, NULL);
+        if (kiqOk) {
+            memcpy(&kiq, kiqBuf, sizeof(kiq));
+            Log("Result:         %lu\n", kiq.Result);
+            Log("SCRATCH before: 0x%08X\n", kiq.ScratchBefore);
+            Log("SCRATCH after:  0x%08X\n", kiq.ScratchAfter);
+            Log("KIQ_BASE:       0x%08X%08X\n", kiq.KiqBaseHi, kiq.KiqBaseLo);
+            Log("KIQ_RPTR:       before=%lu after=%lu\n", kiq.KiqRptrBefore, kiq.KiqRptrAfter);
+            Log("KIQ_WPTR:       %lu\n", kiq.KiqWptrSet);
+            Log("ME_CNTL:        before=0x%08X after=0x%08X\n", kiq.MeCntlBefore, kiq.MeCntlAfter);
+            Log("Ring[0..3]:     0x%08X 0x%08X 0x%08X 0x%08X\n", kiq.RingDword0, kiq.RingDword1, kiq.RingDword2, kiq.RingDword3);
+            if (kiq.ScratchAfter == 0xCAFEBABE) Log("\n*** PM4 EXECUTED - SCRATCH = 0xCAFEBABE ***\n");
+            if (kiq.KiqRptrAfter == 4) Log("\n*** GPU PROCESSED NOP PACKETS - RPTR = 4 ***\n");
+        } else {
+            Log("KIQ test IOCTL failed: err=%lu\n", GetLastError());
         }
     }
 

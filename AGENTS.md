@@ -102,3 +102,44 @@ Formula: `BAR5_offset = GC_BASE(0x1260) + Linux_DWORD_offset * 4`
 - Prefer `build.bat`, `src/kmd/amdbc250_dream_kmd.c`, `src/kmd/amdbc250_dream_hw_init.c`, `src/kmd/amdbc250_psp.c`, and `inc/amdbc250_dream_hw.h` over historical docs.
 - Useful but potentially stale docs: `docs\REGISTER-MAP-BC250.md`, `docs\PSP-PROXY-BYPASS.md`, and `docs\RING-INIT-STATUS.md`.
 - Trust: `docs\BC250-LINUX-IP-MAP.md` (Linux kernel source-verified IP base addresses).
+
+## Progress Summary (2026-06-22)
+
+### COMPLETED
+- GPU driver rebuilt with `DreamV3WriteRegister` for BAR5 writes
+- Fixed `KIQ_BIOS_RING_SUBMIT` input/output buffer sharing bug
+- Added GCVM page table setup for 3-level and 4-level mappings
+- PSP driver uses `AMD-BC-250-Signer`
+- `bios-ring-test.exe` compiled and used for KIQ testing
+- Verified register offsets: PT_BASE at Linux `0x6C8C` writable; `CTX0_CNTL` at `0x0B460` writable
+- PSP driver has GPU BAR5 proxy support via raw IOCTLs `0x900` / `0x901`
+- GPU driver accepts both raw `0x900` and CTL_CODE `0x0022020C` BAR5 proxy handlers
+- `gpu-mmio-test` made safe by default with `--unsafe-writes` and `--deep-unsafe-reads` flags
+- Updated `read-only-probe` with HQD poll address registers
+- `RING-INIT-STATUS.md` updated with 2026-06-22 findings
+- PSP driver rebuilt with KIQ HQD programming support
+- PSP can read/write BAR5 directly (SCRATCH works, GRBM_STATUS=0)
+- NBIO unlocked via boot sequence
+- SOS firmware loaded via PSP mailbox
+- CP firmware loading test tool created (`load-cp-fw.exe`)
+- All three firmware types (ME, PFP, CE) load successfully
+
+### KEY FINDINGS
+- **GCVM PT_BASE (0x6C8C) is hardware-locked** - always reads 0, cannot configure page tables
+- **HQD registers (0xC000+ range) are NBIO-blocked** - cannot program HQD via BAR5
+- **HQD_PQ_WPTR_HI = 0x55555555** is stuck - test pattern, not writable
+- **HQD_PQ_WPTR_POLL_ADDR = 0** - BIOS did NOT configure memory polling
+- **KIQ_BASE reads 0x7E512000** (not expected 0x7E522000)
+- **SCRATCH bit 31 is write-masked** - 0xDEADBEEF reads back as 0x5EADBEEF
+- **SOS firmware doesn't support ring protocol** - C2PMSG_64 bit 31 never sets
+
+### FUNDAMENTAL BLOCKERS
+1. **Cannot set up GCVM page tables** - PT_BASE is hardware locked
+2. **Cannot program HQD registers** - NBIO blocks 0xC000+ range
+3. **No flat/physical addressing** - DEFAULT_PAGE doesn't help without working PT
+4. **BIOS ring address mismatch** - KIQ_BASE reads wrong value
+
+### FILES MODIFIED
+- `test-tools/gpu-mmio-test.c` - Added KIQ test support
+- `test-tools/load-cp-fw.c` - Created firmware loader test
+- `AGENTS.md` - Updated with findings

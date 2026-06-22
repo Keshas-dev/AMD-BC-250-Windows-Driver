@@ -105,17 +105,23 @@ int main(int argc, char *argv[]) {
     /* Step 1: Load ME firmware */
     printf("\n--- Load ME firmware (type=1) ---\n");
     BOOL meOk = LoadFirmware(h,
-        "C:\\AMD-BC-250\\AMD-BC-250-PSP-Windows-Driver\\output\\cyan_skillfish2_me.bin",
+        "C:\\AMD-BC-250\\AMD-BC-250-Windows-Driver-main\\firmware\\cyan_skillfish2_me.bin",
         1, "ME");
 
     /* Step 2: Load PFP firmware */
     printf("\n--- Load PFP firmware (type=2) ---\n");
     BOOL pfpOk = LoadFirmware(h,
-        "C:\\AMD-BC-250\\AMD-BC-250-PSP-Windows-Driver\\output\\cyan_skillfish2_pfp.bin",
+        "C:\\AMD-BC-250\\AMD-BC-250-Windows-Driver-main\\firmware\\cyan_skillfish2_pfp.bin",
         2, "PFP");
 
-    printf("\nFirmware load results: ME=%s PFP=%s\n",
-        meOk ? "OK" : "FAIL", pfpOk ? "OK" : "FAIL");
+    /* Step 2b: Load CE firmware */
+    printf("\n--- Load CE firmware (type=3) ---\n");
+    BOOL ceOk = LoadFirmware(h,
+        "C:\\AMD-BC-250\\AMD-BC-250-Windows-Driver-main\\firmware\\cyan_skillfish2_ce.bin",
+        3, "CE");
+
+    printf("\nFirmware load results: ME=%s PFP=%s CE=%s\n",
+        meOk ? "OK" : "FAIL", pfpOk ? "OK" : "FAIL", ceOk ? "OK" : "FAIL");
 
     /* Step 3: Try GPU KIQ Test */
     printf("\n--- GPU KIQ Test (PM4 with firmware loaded) ---\n");
