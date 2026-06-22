@@ -108,17 +108,22 @@ DreamV3HwInitialize(
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                "AMDBC250-DREAM-V4.3: [STEP 3/8] IH ring OK\n"));
 
-    /* Step 4: GFX command processor (RDNA2 style) */
+    /* Step 4: GFX command processor (RDNA2 style) — skip if already initialized */
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                "AMDBC250-DREAM-V4.3: [STEP 4/8] GFX ring\n"));
-    Status = DreamV3HwInitGfxRing(DevExt);
-    if (!NT_SUCCESS(Status)) {
-        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
-                   "AMDBC250-DREAM-V4.3: *** FAILED: GFX ring: 0x%08X\n", Status));
-        return Status;
+    if (DevExt->GfxRing.VirtualAddress == NULL) {
+        Status = DreamV3HwInitGfxRing(DevExt);
+        if (!NT_SUCCESS(Status)) {
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
+                       "AMDBC250-DREAM-V4.3: *** FAILED: GFX ring: 0x%08X\n", Status));
+            return Status;
+        }
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                   "AMDBC250-DREAM-V4.3: [STEP 4/8] GFX ring OK\n"));
+    } else {
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                   "AMDBC250-DREAM-V4.3: [STEP 4/8] GFX ring already initialized\n"));
     }
-    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-               "AMDBC250-DREAM-V4.3: [STEP 4/8] GFX ring OK\n"));
 
     /* Step 5: SDMA engine */
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
@@ -242,9 +247,9 @@ DreamV3HwReset(_In_ PDREAM_V3_DEVICE_EXTENSION DevExt)
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
                "AMDBC250-DREAM-V4.3: GPU reset initiated\n"));
 
-    /* Halt CP */
+    /* Halt CP (ME + PFP + CE) */
     CpCntl = DreamV3ReadRegister(DevExt, AMDBC250_REG_CP_ME_CNTL);
-    CpCntl |= CP_ME_CNTL__ME_HALT | CP_ME_CNTL__PFP_HALT;
+    CpCntl |= CP_ME_CNTL__ME_HALT | CP_ME_CNTL__PFP_HALT | CP_ME_CNTL__CE_HALT;
     DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_ME_CNTL, CpCntl);
     KeStallExecutionProcessor(100);
 
@@ -451,7 +456,7 @@ DreamV3HwInitGfxRing(
     }
 
     /* Try GFX ring first (BASE_LO is typically read-only on BC-250) */
-    ULONG BaseLoVal = (ULONG)(RingPhys.QuadPart & 0xFFFFFF00);
+    ULONG BaseLoVal = (ULONG)(RingPhys.QuadPart & 0xFFFFF000);
     ULONG BaseHiVal = (ULONG)(RingPhys.QuadPart >> 32);
 
     DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_GFX_RING0_BASE_LO, BaseLoVal);
@@ -637,7 +642,15 @@ DreamV3HwInitIhRing(_In_ PDREAM_V3_DEVICE_EXTENSION DevExt)
     /* Program ring base (GFX10: 4 KB aligned, 256-byte units) */
     DreamV3WriteRegister(DevExt, AMDBC250_REG_IH_RB_BASE_LO,
                          (ULONG)(IhPhys.QuadPart >> 8));
-    DreamV3WriteRegister(DevExt, AMDBC250_REG_IH_RB_CNTL, 0);
+    DreamV3WriteRegister(DevExt, AMDBC250_REG_IH_RB_BASE_HI,
+                         (ULONG)(IhPhys.QuadPart >> 40));
+    /* IH_RB_CNTL: ring size log2-1 (256KB=64K DWORDs -> 15), WPTR writeback enable */
+    {
+        ULONG IhRbCntl = (15 & 0x3);            /* bits [1:0] = ring size log2 - 1 */
+        IhRbCntl |= ((12 << 4) & 0xFF0);        /* bits [11:4] = WB writeback timer */
+        IhRbCntl |= (1 << 22);                  /* bit 22 = WPTR writeback enable */
+        DreamV3WriteRegister(DevExt, AMDBC250_REG_IH_RB_CNTL, IhRbCntl);
+    }
 
     /* Initialize read pointer */
     DreamV3WriteRegister(DevExt, AMDBC250_REG_IH_RB_RPTR, 0);
@@ -686,9 +699,9 @@ DreamV3HwInitSdmaRing(_In_ PDREAM_V3_DEVICE_EXTENSION DevExt)
 
     /* Program ring */
     DreamV3WriteRegister(DevExt, AMDBC250_REG_SDMA0_GFX_RB_BASE_LO,
-                         (ULONG)(SdmaPhys.QuadPart & 0xFFFFFF00));
+                         (ULONG)((SdmaPhys.QuadPart >> 8) & 0xFFFFFFFF));
     DreamV3WriteRegister(DevExt, AMDBC250_REG_SDMA0_GFX_RB_BASE_HI,
-                         (ULONG)(SdmaPhys.QuadPart >> 40));
+                         (ULONG)(SdmaPhys.QuadPart >> 32));
     DreamV3WriteRegister(DevExt, AMDBC250_REG_SDMA0_GFX_RB_CNTL, 0x0000001F); /* 512KB */
     DreamV3WriteRegister(DevExt, AMDBC250_REG_SDMA0_GFX_RB_RPTR, 0);
     DreamV3WriteRegister(DevExt, AMDBC250_REG_SDMA0_GFX_RB_WPTR, 0);

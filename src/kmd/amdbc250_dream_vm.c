@@ -143,6 +143,10 @@ DreamV3GartMapPage(
         return STATUS_INVALID_PARAMETER;
     }
 
+    if (DevExt->Memory.GartTable.PageTable.VirtualAddress == NULL) {
+        return STATUS_DEVICE_NOT_READY;
+    }
+
     /* Check if entry is already allocated */
     if (RtlTestBit(&DevExt->Memory.GartTable.AllocationBitmap, GartIndex)) {
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
@@ -156,10 +160,10 @@ DreamV3GartMapPage(
     /* Encode PTE */
     PteValue = DreamV3VmEncodePte(PhysicalAddr, Flags);
 
-    /* Write to GART table */
+    /* Write to GART table (each entry is 8 bytes = 2 DWORDs) */
     GartEntry = (PULONG)DevExt->Memory.GartTable.PageTable.VirtualAddress;
-    GartEntry[GartIndex] = (ULONG)(PteValue & 0xFFFFFFFF);
-    GartEntry[GartIndex + 1] = (ULONG)(PteValue >> 32);
+    GartEntry[GartIndex * 2]     = (ULONG)(PteValue & 0xFFFFFFFF);
+    GartEntry[GartIndex * 2 + 1] = (ULONG)(PteValue >> 32);
 
     DevExt->Memory.GartTable.NumAllocated++;
 
@@ -178,15 +182,19 @@ DreamV3GartUnmapPage(
         return STATUS_INVALID_PARAMETER;
     }
 
+    if (DevExt->Memory.GartTable.PageTable.VirtualAddress == NULL) {
+        return STATUS_DEVICE_NOT_READY;
+    }
+
     /* Check if entry is allocated */
     if (!RtlTestBit(&DevExt->Memory.GartTable.AllocationBitmap, GartIndex)) {
         return STATUS_INVALID_PARAMETER;
     }
 
-    /* Clear entry */
+    /* Clear entry (each entry is 8 bytes = 2 DWORDs) */
     GartEntry = (PULONG)DevExt->Memory.GartTable.PageTable.VirtualAddress;
-    GartEntry[GartIndex] = 0;
-    GartEntry[GartIndex + 1] = 0;
+    GartEntry[GartIndex * 2]     = 0;
+    GartEntry[GartIndex * 2 + 1] = 0;
 
     /* Mark as free */
     RtlClearBit(&DevExt->Memory.GartTable.AllocationBitmap, GartIndex);
@@ -325,13 +333,13 @@ DreamV3VmAllocatePageTable(
     HighAddress.QuadPart = -1;  /* Any address */
     BoundaryMultiple.QuadPart = 0;  /* No boundary constraint */
 
-    /* Allocate 4KB aligned page */
+    /* Allocate 4KB aligned page (MmNonCached: GPU reads page tables via DMA, must see CPU writes immediately) */
     VirtAddr = MmAllocateContiguousMemorySpecifyCache(
         Size,
         LowAddress,
         HighAddress,
         BoundaryMultiple,
-        MmCached
+        MmNonCached
         );
 
     if (VirtAddr == NULL) {
@@ -478,7 +486,7 @@ DreamV3VmDestroyContext(
     }
 
     /* Free all allocations in this VM */
-    KeAcquireSpinLockAtDpcLevel(&VmCtx->VmLock);
+    KIRQL OldIrql = KeAcquireSpinLock(&VmCtx->VmLock);
     
     while (!IsListEmpty(&VmCtx->AllocationList)) {
         Entry = RemoveHeadList(&VmCtx->AllocationList);
@@ -490,7 +498,7 @@ DreamV3VmDestroyContext(
         ExFreePoolWithTag(Alloc, DREAM_V3_TAG_ALLOCATION);
     }
 
-    KeReleaseSpinLockFromDpcLevel(&VmCtx->VmLock);
+    KeReleaseSpinLock(&VmCtx->VmLock, OldIrql);
 
     /* Free all page tables (PML4 -> PD -> PT) */
     if (VmCtx->PageTables != NULL) {
@@ -824,11 +832,10 @@ DreamV3VmConfigureSystemAperture(_In_ PDREAM_V3_DEVICE_EXTENSION DevExt)
   GFX10 PTE format (64-bit):
   - Bits 63-12: Physical address (4KB aligned)
   - Bit 0: Valid
-  - Bit 1: Readable
-  - Bit 2: Writable
-  - Bit 3: Executable
-  - Bit 4: Snoop (CPU cache coherency)
-  - Bit 5: System (system memory vs VRAM)
+  - Bit 1: System (1=system memory, 0=VRAM)
+  - Bit 2: Snoop (CPU cache coherency)
+  - Bit 5: Readable
+  - Bit 6: Writable
   
   Linux equivalent: amdgpu_vm_pte_to_gfx10()
 ===========================================================================*/

@@ -519,7 +519,7 @@ Environment:
  */
 #define AMDBC250_REG_THM_THERMAL_CTRL             0x00008000  /* THM control (writable, verified) */
 #define AMDBC250_REG_THM_CURRENT_TEMP             0x00008008  /* THM current temp (read-only) */
-#define AMDBC250_REG_THM_THERMAL_INT_ENA          0x00008000  /* Same as THM_CTRL */
+#define AMDBC250_REG_THM_THERMAL_INT_ENA          0x00008050  /* THM interrupt enable (separate from CTRL, Linux offset 0x14*4) */
 
 /* --- GB (Graphics Backend) Address Config — GFX10 --- */
 #define AMDBC250_REG_GB_ADDR_CONFIG               0x00009800  /* Addr config   */
