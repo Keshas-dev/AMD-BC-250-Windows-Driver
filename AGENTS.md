@@ -139,7 +139,76 @@ Formula: `BAR5_offset = GC_BASE(0x1260) + Linux_DWORD_offset * 4`
 3. **No flat/physical addressing** - DEFAULT_PAGE doesn't help without working PT
 4. **BIOS ring address mismatch** - KIQ_BASE reads wrong value
 
+## Safety: register writes that HANG the GPU
+- **DO NOT WRITE** `GRBM_GFX_INDEX` (0x34D0) — switching to non-existent ME/PIPE/QUEUE instance causes instant black screen (GPU TDR hang, reboot required).
+- **DO NOT WRITE** unknown or unverified GCVM context registers — can corrupt BIOS GPU state config (some context regs destroy config if 0xDEADBEEF is written; always save/restore).
+- **SAFE to write**: SCRATCH (0x32D4) — bit 31 is W1C/hardware-masked; lower 31 bits writable. Always test write patterns without bit 31 set first.
+- **SAFE to read**: All register ranges mapped in BAR5. Reading `0xFFFFFFFF` means the offset is unmapped (dead region), not NBIO-blocked.
+
+## Progress Summary (2026-06-23)
+
+### COMPLETED
+- First session end - detailed memory record saved
+- comprehensive-pm4-test.exe verified stable - runs without hangs
+- Confirmed: NBIO_MAP init (flag=1) works, full init (flag=0) HANGS (DreamV3HwInitialize)
+- Confirmed: GRBM_GFX_INDEX (0x34D0) writes cause black screen hang
+- Safe register scan created but NOT run (all 3 new tests hung system)
+- ME_CNTL (0x4A74) goes from 0xFFFBD9FB (halted) to 0x00000000 (unhalted) after PSP KIQ operations
+- KIQ_WPTR advances to 0x11 after submits, KIQ_RPTR stays at 0x00 (GCVM broken)
+- PSP proxy reads low offsets OK (0x0000, 0x32D4, 0x4A74) but fails for high offsets (0xE060+)
+
+### KEY FINDINGS
+- Write to GRBM_GFX_INDEX = INSTANT BLACK SCREEN (confirmed 3x)
+- DreamV3HwInitialize (12-step init) causes hang when called from user test (flag=0 path)
+- NBIO_MAP init (flag=1) is the only safe init path - skips DreamV3HwInitialize
+- ME_CNTL change is suspicious - PSP KIQ init/submit clears halt bits
+- SCRATCH write bit 31 is hardware-masked (W1C) - safe to write lower 31 bits
+
 ### FILES MODIFIED
 - `test-tools/gpu-mmio-test.c` - Added KIQ test support
 - `test-tools/load-cp-fw.c` - Created firmware loader test
+- `test-tools/comprehensive-pm4-test.c` - Main test suite (stable)
+- `test-tools/safe-reg-scan.c` - Created but hung (NEVER RUN SAFELY)
+- `test-tools/alt-path-test.c` - Created but hung (GRBM_GFX_INDEX write)
+- `test-tools/safe-init-test.c` - Created but hung (flag=0, DreamV3HwInitialize)
+- `test-tools/minimal-open-test.c` - Works, but IOCTL read fails without init
+- `test-tools/gcvm-check-test.c` - GCVM config scanner (stable, detailed output)
+- `test-tools/comprehensive-pm4-test.c` - Updated with PSP proxy test
+- `C:\AMD-BC-250\AMD-BC-250-PSP-Windows-Driver\src\driver\PspDriver.c` - Fixed NBIO range check (narrowed 0xC000-0xFFFF -> 0xC000-0xC1FF)
 - `AGENTS.md` - Updated with findings
+
+## Session 2026-06-23 - PSP Proxy Fix + GCVM Analysis
+
+### FIXED: PSP Proxy NBIO Range Check
+**Bug**: PSP driver's `IOCTL_PSP_READ_REG` and `IOCTL_PSP_WRITE_REG` used `offset >= 0xC000 && offset < 0x10000` as NBIO range check. This caught ALL GPU ring/KIQ/HQD registers (0xDA60+, 0xE060+, 0xDAC0+) and redirected reads to PSP BAR0, which returned 0xFFFFFFFF for these non-NBIO registers.
+**Fix**: Changed to `offset >= 0xC000 && offset < 0xC200` (PspDriver.c lines 395, 460). Verified: PSP proxy now returns correct values for all tested offsets.
+
+### GCVM Analysis (from gcvm-check-test)
+- **CONTEXT0_CNTL (0x0B460)** = 0x010CA88D: ENABLE=1, DEFAULT_PAGE=0, RETRY_FAULT=1
+- **PT_BASE (0x0B608)** = 0x00000000 (hardware locked)
+- **CTX0_PT_BASE0 (0x0B408)** = 0x7D9AB14E_017CCCC4 (non-zero but garbage/uninitialized)
+- **System Aperture all zeros**: LOW=0, HIGH=0, DEFAULT=0
+- **L2_CNTL (0x0B360)** = 0x013C7798: ENABLE_SYS_APERTURE bit=0 (read-only), MODE=3
+- **TLB data**: All entries look like random/uninitialized data
+- **Protection fault status**: Clean (no faults recorded)
+- **L2_CNTL4 (0x0B36C)** = 0x6EB9E656 - garbage?
+
+### KEY INSIGHT: GCVM Blocker is FUNDAMENTAL
+- PT_BASE locked → cannot set up page tables
+- System aperture disabled in read-only L2_CNTL → cannot enable identity mapping
+- DEFAULT_PAGE=1 would help only if system aperture were enabled
+- **TLB entries are garbage** → not even initialized by BIOS
+- **KIQ ring access via CP uses GCVM translation** → cannot work without page tables
+
+### KIQ Status After Fix
+- PSP KIQ submit writes PM4 to ring buffer
+- WPTR advances (0x00 → 0x11)  
+- RPTR stays at 0 → GPU CP does NOT read from ring
+- CP firmware IS loaded (ME, PFP, CE via IC_BASE DMA - uses physical addresses)
+- But ring buffer access uses GCVM (broken)
+- ME_CNTL change (halted → unhalted) comes from PSP KIQ init (step 16)
+
+### Next Investigation Targets
+1. **SDMA engine** - may use physical addresses directly (bypasses GCVM)
+2. **CP direct MMIO commands** - write PM4 via CP_ME_RAM_DATA registers
+3. **IC_BASE approach** - can IC_BASE be used to execute command buffers?
