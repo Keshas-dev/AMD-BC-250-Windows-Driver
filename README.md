@@ -24,35 +24,54 @@ AMD BC-250 Windows driver project by Keshas. Goal: fully working GPU driver for 
 - ✅ BAR5 MMIO via `DreamV3WriteRegister` (`WRITE_REGISTER_ULONG`)
 - ✅ PSP proxy driver — firmware loading, NBIO unlock, KIQ submit
 - ✅ CP firmware loads via MMIO IC_BASE DMA (bypasses GCVM)
-- ✅ Build + sign pipeline (`build.bat`)
+- ✅ Build + sign pipeline (`build.bat`) with prebuild validation
 - ✅ Vulkan ICD, D3D9 UMD stubs
+- ✅ **GCVM page table setup** — first successful PT_BASE0 (0x0B408) write on BC-250!
+  - `GCVM_PT_SETUP` IOCTL: allocates 3-level (depth=2) page table
+  - Fills PDEs/PTEs for KIQ ring identity mapping
+  - Triggers TLB invalidation via 0x6C0C/0x6C10 protocol
+  - Returns 0xCAFEBABE on success
+- ✅ **PSP KIQ_BASE programmed** via GPU proxy on Windows 11 26100
+- ✅ Pre-build validation script (`prebuild-check.ps1`): IOCTL uniqueness, memory leak patterns, BSOD patterns
 
-### Current Blocker — PM4 Execution
-GPU CP cannot process PM4 commands from ring buffer because:
-1. **GCVM page table translation fails** — GPU can't access system RAM via GCVM
-2. **BIOS configures GCVM** — 12 compute queues active at boot, ring at 0x7E522000
-3. **PT_BASE is hardware-locked** at old offset 0x0B608; writable at Linux offset 0x6C8C
-4. **Direct BAR5 MMIO writes silently dropped on Win11 26100** — must use `DreamV3WriteRegister`
+### Current Blocker — CP Ring Processing
+GPU CP still not reading from KIQ ring (RPTR=0) after PT_SETUP:
+1. **CP may need queue activation** — HQD_ACTIVE write (0xDAC0) may be NBIO-blocked
+2. **ME_CNTL halt bits** — CP firmware might still be halted
+3. **Known crash**: rapid KIQ submits after PT_SETUP causes PSP driver 0x50 (page fault)
 
 ### Critical Discoveries
 
-**Register Offset Map (BC-250 ≠ Navi10):**
-| Register | OLD Offset | Linux Offset | Writable At |
-|----------|-----------|-------------|-------------|
-| GCVM_CONTEXT0_CNTL | 0x0B460 | 0x6AE0 | **OLD 0x0B460** |
-| GCVM_CONTEXT0_PT_BASE | 0x0B608 (locked) | 0x6C8C | **Linux 0x6C8C** |
-| GCVM_L2_CNTL | 0x0B360 | 0x69E0 | **OLD 0x0B360** |
+**Correct GCVM Page Table Register:**
+- **PT_BASE0 (0x0B408)** = the real page table base register — writable, used by GPU MMU
+- **PT_BASE (0x0B608/0x6C8C)** = HW-locked to 0 — NOT used for translation
+
+**TLB Invalidation Protocol (verified working):**
+1. Write 1 to 0x6C10 (clear ACK)
+2. Write 1 to 0x6C0C (request invalidation)
+3. Poll 0x6C10 bit 0 until 1 (ACK received)
+
+**Page Table Format (RDNA2/GFX10):**
+- PDE: VALID|SYSTEM = `0x03`
+- PTE: VALID|SYSTEM|READABLE|WRITABLE = `0x63`
+- CONTEXT0_CNTL (0x0B460): bit 0=ENABLE, bits 2:1=depth (10b=3-level)
 
 **Win11 26100 MMIO Issue:**
 - `*(volatile PULONG)(mmio + off) = val` → silently dropped
 - `DreamV3WriteRegister` (= `WRITE_REGISTER_ULONG`) → works
 - `DeviceIoControl(WRITE_REG)` → works
+- PSP driver cannot map GPU BAR5 directly (different PCI device) → falls back to GPU proxy IOCTLs
 
-**BIOS GCVM Configuration (verified):**
-- KIQ ring PA = 0x7E522000, WPTR=8 already kicked
-- PML4 = 0x7E511000
-- HQD_ACTIVE = 0x0000FFF0 (12 compute queues active)
-- ME_CNTL = 0xFFFBD9FB (halted)
+**PSP KIQ Proxy Path Fix:**
+On Windows 11 26100, PSP's `MmMapIoSpace` for GPU BAR5 fails. The PSP falls back to `PspGpuProxyInit` which opens `g_GpuDriverHandle` and routes all BAR5 access via IOCTLs to the GPU driver. Two guard checks in PspKiq.c were fixed to allow this proxy path:
+- `PspKiqInit` line 163: `!devExt->MmioBase` → added `g_GpuDriverHandle == NULL`
+- `PspKiqProgramHwRegisters` line 64: `!g_Bar5Mapping && !devExt->GpuMmioBase` → added `g_GpuDriverHandle == NULL`
+
+**BIOS GCVM Configuration (varies per boot):**
+- PT_BASE0 (0x0B408) = 0x017CCCC4_7D9AB14E (garbage/uninitialized, not valid page table)
+- CONTEXT0_CNTL (0x0B460) = 0x0104A88D (ENABLE=1, depth=2=3-level)
+- L2_CNTL (0x0B360) = 0x013C7798 (system aperture DISABLED, read-only)
+- System aperture enabled via write: possible? Read-only bits block it
 
 ---
 
@@ -90,8 +109,7 @@ This is a **WDM control/IOCTL driver**, not a real WDDM miniport. `DxgkInitializ
 ### Prerequisites
 - Visual Studio 2022 (Professional) — auto-detected on D: or E: drive
 - Windows WDK 10.0.26100.0
-- Test signing: `bcdedit /set testsigning on` (Admin)
-- **IOMMU must be DISABLED in BIOS** (zeros all GCVM registers)
+- Test signing: `bcdedit /set testsigning on` (Admin), Secure Boot OFF
 
 ### Build
 ```cmd
@@ -107,6 +125,7 @@ build.bat
 
 ### Test
 ```cmd
+output\gcvm-pt-test.exe       # GCVM page table setup + KIQ test (0xCAFEBABE on success)
 output\gpu-kiq-test.exe       # PM4 ring execution test
 output\safe-test.exe          # Safe read-only register test
 output\iommu-gcvm-check.exe   # IOMMU + GCVM register scan
@@ -138,6 +157,8 @@ output\kiq-diag.exe           # Full KIQ diagnostic
 ├── output/                         # Build output (signed drivers)
 ├── docs/                           # Technical documentation
 ├── build.bat                       # Build + sign driver
+├── prebuild-check.ps1               # Pre-build validation
+├── reinstall-both-drivers.bat       # Reinstall GPU + PSP drivers
 └── .gitignore
 ```
 
