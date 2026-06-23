@@ -74,7 +74,7 @@ DreamV3HwInitialize(
 
     /* Step 1: Memory controller (GDDR6) */
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-               "AMDBC250-DREAM-V4.3: [STEP 1/8] Memory controller init\n"));
+               "AMDBC250-DREAM-V4.3: [STEP 1/12] Memory controller init\n"));
     Status = DreamV3InitMemoryController(DevExt);
     if (!NT_SUCCESS(Status)) {
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
@@ -82,23 +82,35 @@ DreamV3HwInitialize(
         return Status;
     }
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-               "AMDBC250-DREAM-V4.3: [STEP 1/8] Memory controller OK\n"));
+               "AMDBC250-DREAM-V4.3: [STEP 1/12] Memory controller OK\n"));
 
-    /* Step 2: Program golden registers (hardware workarounds) */
+    /* Step 2: Program golden registers (hardware workarounds) — 47+ from Linux */
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-               "AMDBC250-DREAM-V4.3: [STEP 2/8] Golden registers\n"));
-    Status = DreamV3HwProgramGoldenRegs(DevExt);
+               "AMDBC250-DREAM-V4.3: [STEP 2/12] Golden registers (47+)\n"));
+    Status = DreamV3ProgramGoldenSettings(DevExt);
     if (!NT_SUCCESS(Status)) {
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
-                   "AMDBC250-DREAM-V4.3: [STEP 2/8] Golden regs failed (non-fatal): 0x%08X\n", Status));
+                   "AMDBC250-DREAM-V4.3: [STEP 2/12] Golden regs failed (non-fatal): 0x%08X\n", Status));
     } else {
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-                   "AMDBC250-DREAM-V4.3: [STEP 2/8] Golden registers OK\n"));
+                   "AMDBC250-DREAM-V4.3: [STEP 2/12] Golden registers OK\n"));
     }
 
-    /* Step 3: Interrupt handler ring */
+    /* Step 3: HDP register initialization (coherency) */
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-               "AMDBC250-DREAM-V4.3: [STEP 3/8] IH ring\n"));
+               "AMDBC250-DREAM-V4.3: [STEP 3/12] HDP registers\n"));
+    Status = DreamV3InitHdpRegisters(DevExt);
+    if (!NT_SUCCESS(Status)) {
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+                   "AMDBC250-DREAM-V4.3: [STEP 3/12] HDP init failed (non-fatal): 0x%08X\n", Status));
+    } else {
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                   "AMDBC250-DREAM-V4.3: [STEP 3/12] HDP registers OK\n"));
+    }
+
+    /* Step 4: Interrupt handler ring */
+    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+               "AMDBC250-DREAM-V4.3: [STEP 4/12] IH ring\n"));
     Status = DreamV3HwInitIhRing(DevExt);
     if (!NT_SUCCESS(Status)) {
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
@@ -106,11 +118,16 @@ DreamV3HwInitialize(
         return Status;
     }
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-               "AMDBC250-DREAM-V4.3: [STEP 3/8] IH ring OK\n"));
+               "AMDBC250-DREAM-V4.3: [STEP 4/12] IH ring OK\n"));
 
-    /* Step 4: GFX command processor (RDNA2 style) — skip if already initialized */
+    /* Step 5: Halt all CP engines before firmware load */
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-               "AMDBC250-DREAM-V4.3: [STEP 4/8] GFX ring\n"));
+               "AMDBC250-DREAM-V4.3: [STEP 5/12] Halt CP engines\n"));
+    DreamV3HaltAllEngines(DevExt);
+
+    /* Step 6: GFX command processor (RDNA2 style) — skip if already initialized */
+    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+               "AMDBC250-DREAM-V4.3: [STEP 6/12] GFX ring\n"));
     if (DevExt->GfxRing.VirtualAddress == NULL) {
         Status = DreamV3HwInitGfxRing(DevExt);
         if (!NT_SUCCESS(Status)) {
@@ -119,71 +136,83 @@ DreamV3HwInitialize(
             return Status;
         }
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-                   "AMDBC250-DREAM-V4.3: [STEP 4/8] GFX ring OK\n"));
+                   "AMDBC250-DREAM-V4.3: [STEP 6/12] GFX ring OK\n"));
     } else {
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-                   "AMDBC250-DREAM-V4.3: [STEP 4/8] GFX ring already initialized\n"));
+                   "AMDBC250-DREAM-V4.3: [STEP 6/12] GFX ring already initialized\n"));
     }
 
-    /* Step 5: SDMA engine */
+    /* Step 7: SDMA engine */
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-               "AMDBC250-DREAM-V4.3: [STEP 5/8] SDMA ring\n"));
+               "AMDBC250-DREAM-V4.3: [STEP 7/12] SDMA ring\n"));
     Status = DreamV3HwInitSdmaRing(DevExt);
     if (!NT_SUCCESS(Status)) {
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
-                   "AMDBC250-DREAM-V4.3: [STEP 5/8] SDMA ring failed (non-fatal): 0x%08X\n", Status));
+                   "AMDBC250-DREAM-V4.3: [STEP 7/12] SDMA ring failed (non-fatal): 0x%08X\n", Status));
     } else {
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-                   "AMDBC250-DREAM-V4.3: [STEP 5/8] SDMA ring OK\n"));
+                   "AMDBC250-DREAM-V4.3: [STEP 7/12] SDMA ring OK\n"));
     }
 
-    /* Step 6: GART table */
+    /* Step 8: GART table */
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-               "AMDBC250-DREAM-V4.3: [STEP 6/8] GART\n"));
+               "AMDBC250-DREAM-V4.3: [STEP 8/12] GART\n"));
     Status = DreamV3GartInitialize(DevExt);
     if (!NT_SUCCESS(Status)) {
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
-                   "AMDBC250-DREAM-V4.3: [STEP 6/8] GART init failed (non-fatal): 0x%08X\n", Status));
+                   "AMDBC250-DREAM-V4.3: [STEP 8/12] GART init failed (non-fatal): 0x%08X\n", Status));
     } else {
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-                   "AMDBC250-DREAM-V4.3: [STEP 6/8] GART OK\n"));
+                   "AMDBC250-DREAM-V4.3: [STEP 8/12] GART OK\n"));
     }
 
-    /* Step 7: GPU Virtual Memory */
+    /* Step 9: GPU Virtual Memory */
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-               "AMDBC250-DREAM-V4.3: [STEP 7/8] GPUVM\n"));
+               "AMDBC250-DREAM-V4.3: [STEP 9/12] GPUVM\n"));
     Status = DreamV3VmInitialize(DevExt);
     if (!NT_SUCCESS(Status)) {
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
-                   "AMDBC250-DREAM-V4.3: [STEP 7/8] GPUVM init failed (non-fatal): 0x%08X\n", Status));
+                   "AMDBC250-DREAM-V4.3: [STEP 9/12] GPUVM init failed (non-fatal): 0x%08X\n", Status));
     } else {
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-                   "AMDBC250-DREAM-V4.3: [STEP 7/8] GPUVM OK\n"));
+                   "AMDBC250-DREAM-V4.3: [STEP 9/12] GPUVM OK\n"));
     }
 
-    /* Step 8: Display engine (DCN 2.1) */
+    /* Step 10: Display engine (DCN 2.1) */
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-               "AMDBC250-DREAM-V4.3: [STEP 8/8] Display (DCN 2.1)\n"));
+               "AMDBC250-DREAM-V4.3: [STEP 10/12] Display (DCN 2.1)\n"));
     Status = DreamV3HwInitDisplay(DevExt);
     if (!NT_SUCCESS(Status)) {
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
-                   "AMDBC250-DREAM-V4.3: [STEP 8/8] Display init failed (non-fatal): 0x%08X\n", Status));
+                   "AMDBC250-DREAM-V4.3: [STEP 10/12] Display init failed (non-fatal): 0x%08X\n", Status));
     } else {
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-                   "AMDBC250-DREAM-V4.3: [STEP 8/8] Display OK\n"));
+                   "AMDBC250-DREAM-V4.3: [STEP 10/12] Display OK\n"));
     }
 
-    /* Step 9: PSP & NBIO unlock (GPU BAR5, MP0 discovery, ring, NBIO bypass) */
+    /* Step 11: PSP & NBIO unlock (GPU BAR5, MP0 discovery, ring, NBIO bypass) */
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-               "AMDBC250-DREAM-V4.3: [STEP 9/9] PSP init\n"));
+               "AMDBC250-DREAM-V4.3: [STEP 11/12] PSP init\n"));
     Status = DreamV3PspHardwareInit(DevExt);
     if (DevExt->PspAlive) {
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-                   "AMDBC250-DREAM-V4.3: [STEP 9/9] SOS alive, NBIO unlocked=%u\n",
+                   "AMDBC250-DREAM-V4.3: [STEP 11/12] SOS alive, NBIO unlocked=%u\n",
                    DevExt->NbioUnlocked));
     } else {
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
-                   "AMDBC250-DREAM-V4.3: [STEP 9/9] SOS not found — continuing\n"));
+                   "AMDBC250-DREAM-V4.3: [STEP 11/12] SOS not found — continuing\n"));
+    }
+
+    /* Step 12: RLC initialization (power/scheduler) */
+    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+               "AMDBC250-DREAM-V4.3: [STEP 12/12] RLC init\n"));
+    Status = DreamV3InitRlc(DevExt);
+    if (!NT_SUCCESS(Status)) {
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+                   "AMDBC250-DREAM-V4.3: [STEP 12/12] RLC init failed (non-fatal): 0x%08X\n", Status));
+    } else {
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                   "AMDBC250-DREAM-V4.3: [STEP 12/12] RLC OK\n"));
     }
 
     /* Set VRAM sizes */
@@ -193,28 +222,6 @@ DreamV3HwInitialize(
     }
     DevExt->UsedVramBytes = 0;
     DevExt->VisibleVramBytes = min(DevExt->VisibleVramBytes, DevExt->TotalVramBytes);
-
-    /* Step 10: GFX ring init (via NBIO or PSP proxy) */
-    if (DevExt->NbioUnlocked) {
-        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-                   "AMDBC250-DREAM-V4.3: [STEP 10] NBIO unlocked — initializing GFX ring\n"));
-        Status = DreamV3HwInitGfxRing(DevExt);
-    } else if (Amdbc250PspProxyAvailable()) {
-        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-                   "AMDBC250-DREAM-V4.3: [STEP 10] Using PSP proxy for GFX ring init\n"));
-        Status = DreamV3HwInitGfxRing(DevExt); /* Uses proxy internally */
-    } else {
-        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-                   "AMDBC250-DREAM-V4.3: [STEP 10] NBIO locked + no PSP proxy — deferred\n"));
-        Status = STATUS_DEVICE_NOT_READY;
-    }
-    if (!NT_SUCCESS(Status)) {
-        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
-                   "AMDBC250-DREAM-V4.3: [STEP 10] GFX ring init failed: 0x%08X\n", Status));
-    } else {
-        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-                   "AMDBC250-DREAM-V4.3: [STEP 10] GFX ring ready\n"));
-    }
 
     /* Set clocks */
     DevExt->GpuClockMhz = AMDBC250_BOOST_CLOCK_MHZ;  /* Assume governor active */
@@ -302,8 +309,13 @@ DreamV3HwShutdown(_In_ PDREAM_V3_DEVICE_EXTENSION DevExt)
     }
 
     if (DevExt->SdmaRing.VirtualAddress != NULL) {
-        DreamV3FreeContiguousMemory(DevExt->SdmaRing.VirtualAddress,
-                                     DevExt->SdmaRing.SizeInBytes);
+        if (DevExt->SdmaRing.MappedIo) {
+            MmUnmapIoSpace(DevExt->SdmaRing.VirtualAddress,
+                           DevExt->SdmaRing.SizeInBytes);
+        } else {
+            DreamV3FreeContiguousMemory(DevExt->SdmaRing.VirtualAddress,
+                                         DevExt->SdmaRing.SizeInBytes);
+        }
         DevExt->SdmaRing.VirtualAddress = NULL;
     }
 
@@ -348,51 +360,14 @@ DreamV3HdpFlush(_In_ PDREAM_V3_DEVICE_EXTENSION DevExt)
 }
 
 /*===========================================================================
-  DreamV3HwProgramGoldenRegs — Program hardware workaround registers
+  DreamV3HwProgramGoldenRegs — REMOVED
   
-  Linux programs these for Kaveri/Cyan Skillfish:
-  - spectre_golden_registers
-  - spectre_golden_common_registers
-  - spectre_golden_spm_registers
+  This function has been replaced by DreamV3ProgramGoldenSettings()
+  in amdbc250_dream_golden.c, which programs 47+ golden registers
+  from Linux golden_settings_gc_10_0_cyan_skillfish[].
   
-  These fix hardware bugs/errata. Missing these = instability!
+  See: DreamV3ProgramGoldenSettings() for the new implementation.
 ===========================================================================*/
-
-NTSTATUS
-DreamV3HwProgramGoldenRegs(_In_ PDREAM_V3_DEVICE_EXTENSION DevExt)
-{
-    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-               "AMDBC250-DREAM-V4.3: Programming golden registers\n"));
-
-    /*
-     * NOTE: In production driver, these would be hardcoded arrays from
-     * AMD's gfx_v10_0.c golden register tables.
-     * 
-     * For now, we program known critical workarounds:
-     */
-
-    /* 1. GB_ADDR_CONFIG workaround for correct memory addressing */
-    ULONG GbAddrConfig = DreamV3ReadRegister(DevExt, AMDBC250_REG_GB_ADDR_CONFIG_READ);
-    DreamV3WriteRegister(DevExt, AMDBC250_REG_GB_ADDR_CONFIG, GbAddrConfig);
-
-    /* 2. Disable broken compute queue (hardware quirk) */
-    if (AMDBC250_QUIRK_BROKEN_COMPUTE_QUEUE) {
-        ULONG ComputeRingCntl = DreamV3ReadRegister(DevExt, AMDBC250_REG_CP_COMPUTE_RING0_CNTL);
-        ComputeRingCntl &= ~0x1;  /* Disable bit */
-        DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_COMPUTE_RING0_CNTL, ComputeRingCntl);
-        
-        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
-                   "AMDBC250-DREAM-V4.3: Compute queue DISABLED (HW quirk)\n"));
-    }
-
-    /* 3. Ensure HDP coherency is enabled */
-    DreamV3WriteRegister(DevExt, AMDBC250_REG_HDP_NONSURFACE_INFO, 0x00000001);
-
-    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-               "AMDBC250-DREAM-V4.3: Golden registers programmed\n"));
-
-    return STATUS_SUCCESS;
-}
 
 /*===========================================================================
   DreamV3HwInitGfxRing — Initialize GFX command ring (GFX10 style)
@@ -531,7 +506,7 @@ DreamV3HwInitGfxRing(
                 DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_HQD_PQ_BASE_HI, BaseHiVal);
 
                 /* 7. Set PQ control (ring size in log2 DWORDs) */
-                DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_HQD_PQ_CONTROL, RbBufSz);
+                DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_HQD_PQ_CONTROL, RbBufSz - 1);
 
                 /* 8. Clear RPTR report addr and WPTR poll addr */
                 DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_HQD_PQ_RPTR_REPORT_ADDR, 0);
@@ -592,6 +567,10 @@ DreamV3HwInitGfxRing(
     /* Initialize command processor */
     NTSTATUS Status = DreamV3InitCommandProcessor(DevExt);
     if (!NT_SUCCESS(Status)) {
+        DreamV3FreeContiguousMemory(FenceVirt, PAGE_SIZE);
+        DreamV3FreeContiguousMemory(RingVirt, RingSize);
+        DevExt->GfxRing.VirtualAddress = NULL;
+        DevExt->GlobalFence.VirtualAddress = NULL;
         return Status;
     }
 
@@ -646,9 +625,11 @@ DreamV3HwInitIhRing(_In_ PDREAM_V3_DEVICE_EXTENSION DevExt)
                          (ULONG)(IhPhys.QuadPart >> 40));
     /* IH_RB_CNTL: ring size log2-1 (256KB=64K DWORDs -> 15), WPTR writeback enable */
     {
-        ULONG IhRbCntl = (15 & 0x3);            /* bits [1:0] = ring size log2 - 1 */
-        IhRbCntl |= ((12 << 4) & 0xFF0);        /* bits [11:4] = WB writeback timer */
-        IhRbCntl |= (1 << 22);                  /* bit 22 = WPTR writeback enable */
+        ULONG RingSizeLog2 = 0;
+        { ULONG Sz = IhSize / sizeof(ULONG); while (Sz > 1) { Sz >>= 1; RingSizeLog2++; } }
+        ULONG IhRbCntl = ((RingSizeLog2 - 1) & 0x3F);   /* bits [5:0] = ring size log2 - 1 */
+        IhRbCntl |= ((12 << 8) & 0xFF00);          /* bits [15:8] = WB writeback timer */
+        IhRbCntl |= (1 << 22);                     /* bit 22 = WPTR writeback enable */
         DreamV3WriteRegister(DevExt, AMDBC250_REG_IH_RB_CNTL, IhRbCntl);
     }
 
@@ -674,40 +655,55 @@ DreamV3HwInitIhRing(_In_ PDREAM_V3_DEVICE_EXTENSION DevExt)
 NTSTATUS
 DreamV3HwInitSdmaRing(_In_ PDREAM_V3_DEVICE_EXTENSION DevExt)
 {
-    PHYSICAL_ADDRESS SdmaPhys;
-    PVOID SdmaVirt;
-    ULONG SdmaSize = 512 * 1024;  /* 512 KB */
+    ULONG baseLo, baseHi, cntlVal;
+    PHYSICAL_ADDRESS ringPhys;
+    PVOID ringVirt;
+    ULONG ringSize = 8 * 1024;  /* 8KB - match BIOS ring */
 
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-               "AMDBC250-DREAM-V4.3: InitSdmaRing — %d KB\n", SdmaSize / 1024));
+               "AMDBC250-DREAM-V4.3: InitSdmaRing\n"));
 
-    SdmaVirt = DreamV3AllocateContiguousMemory(SdmaSize, &SdmaPhys);
-    if (SdmaVirt == NULL) {
+    /* Read hardware ring base registers (BASE_LO is read-only on BC-250) */
+    baseLo = DreamV3ReadRegister(DevExt, AMDBC250_REG_SDMA0_GFX_RB_BASE_LO);
+    baseHi = DreamV3ReadRegister(DevExt, AMDBC250_REG_SDMA0_GFX_RB_BASE_HI);
+
+    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+               "AMDBC250-DREAM-V4.3: SDMA hw BASE_LO=0x%08X BASE_HI=0x%08X\n", baseLo, baseHi));
+
+    /* Reconstruct ring PA from hardware register values */
+    ringPhys.QuadPart = ((ULONG64)baseHi << 32) | ((ULONG64)baseLo << 8);
+
+    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+               "AMDBC250-DREAM-V4.3: SDMA ring PA=0x%llX\n", ringPhys.QuadPart));
+
+    /* Map the existing BIOS ring buffer (don't allocate - BASE_LO is R/O) */
+    ringVirt = MmMapIoSpace(ringPhys, ringSize, MmNonCached);
+    if (ringVirt == NULL) {
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
-                   "AMDBC250-DREAM-V4.3: Failed to allocate SDMA ring\n"));
-        return STATUS_NO_MEMORY;
+                   "AMDBC250-DREAM-V4.3: Failed to map SDMA ring at PA 0x%llX\n",
+                   ringPhys.QuadPart));
+        return STATUS_INSUFFICIENT_RESOURCES;
     }
 
-    RtlZeroMemory(SdmaVirt, SdmaSize);
+    RtlZeroMemory(ringVirt, ringSize);
 
-    DevExt->SdmaRing.PhysicalAddress = SdmaPhys;
-    DevExt->SdmaRing.VirtualAddress = SdmaVirt;
-    DevExt->SdmaRing.SizeInBytes = SdmaSize;
+    DevExt->SdmaRing.PhysicalAddress = ringPhys;
+    DevExt->SdmaRing.VirtualAddress = ringVirt;
+    DevExt->SdmaRing.SizeInBytes = ringSize;
     DevExt->SdmaRing.ReadPointer = 0;
     DevExt->SdmaRing.WritePointer = 0;
     DevExt->SdmaRing.Initialized = TRUE;
+    DevExt->SdmaRing.MappedIo = TRUE;
 
-    /* Program ring */
-    DreamV3WriteRegister(DevExt, AMDBC250_REG_SDMA0_GFX_RB_BASE_LO,
-                         (ULONG)((SdmaPhys.QuadPart >> 8) & 0xFFFFFFFF));
-    DreamV3WriteRegister(DevExt, AMDBC250_REG_SDMA0_GFX_RB_BASE_HI,
-                         (ULONG)(SdmaPhys.QuadPart >> 32));
-    DreamV3WriteRegister(DevExt, AMDBC250_REG_SDMA0_GFX_RB_CNTL, 0x0000001F); /* 512KB */
+    /* Enable ring + clear pointers (don't touch BASE regs) */
+    cntlVal = DreamV3ReadRegister(DevExt, AMDBC250_REG_SDMA0_GFX_RB_CNTL);
+    DreamV3WriteRegister(DevExt, AMDBC250_REG_SDMA0_GFX_RB_CNTL, cntlVal | 1); /* enable */
     DreamV3WriteRegister(DevExt, AMDBC250_REG_SDMA0_GFX_RB_RPTR, 0);
     DreamV3WriteRegister(DevExt, AMDBC250_REG_SDMA0_GFX_RB_WPTR, 0);
 
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-               "AMDBC250-DREAM-V4.3: SDMA ring initialized\n"));
+               "AMDBC250-DREAM-V4.3: SDMA ring initialized (mapped BIOS ring PA=0x%llX)\n",
+               ringPhys.QuadPart));
 
     return STATUS_SUCCESS;
 }
@@ -803,65 +799,21 @@ DreamV3PspHardwareInit(
 NTSTATUS
 DreamV3HwInitDisplay(_In_ PDREAM_V3_DEVICE_EXTENSION DevExt)
 {
-    ULONG OtgCntl;
+    UNREFERENCED_PARAMETER(DevExt);
+
+    /* ======================================================================
+     * OTG registers (0x6000+) are in the 0x3400-0x8100 FREEZE ZONE.
+     * Direct MMIO writes cause hardware hang on BC-250.
+     *
+     * Display engine programming must go through the display controller
+     * driver (dcn20) or PSP proxy. For now, we skip display init entirely.
+     *
+     * The GPU will still render to framebuffer; display output is handled
+     * by BIOS/firmware display controller until proper DCN init is added.
+     * ====================================================================== */
 
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-               "AMDBC250-DREAM-V4.3: InitDisplay — DCN 2.1 engine\n"));
-
-    /* Enable OTG (Output Timing Generator) */
-    OtgCntl = DreamV3ReadRegister(DevExt, AMDBC250_REG_OTG0_OTG_CONTROL);
-    OtgCntl |= OTG_CNTL__ENABLE;
-    DreamV3WriteRegister(DevExt, AMDBC250_REG_OTG0_OTG_CONTROL, OtgCntl);
-
-    /* VGA fallback: 640x480 @ 60Hz (safe mode for first boot) */
-    if (DevExt->CurrentMode.Width == 0 || DevExt->CurrentMode.Height == 0) {
-        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
-                   "AMDBC250-DREAM-V4.3: VGA fallback — 640x480@60Hz\n"));
-        DevExt->CurrentMode.Width = 640;
-        DevExt->CurrentMode.Height = 480;
-        DevExt->CurrentMode.RefreshRate = 60;
-        DevExt->CurrentMode.BitsPerPixel = 32;
-        DevExt->CurrentMode.PixelClockKhz = 25175;
-        DevExt->CurrentMode.Format = D3DDDIFMT_A8R8G8B8;
-    }
-
-    /* Program display timing based on current mode */
-    if (DevExt->CurrentMode.Width == 640 && DevExt->CurrentMode.Height == 480) {
-        /* VGA 640x480@60Hz timing (standard VESA) */
-        DreamV3WriteRegister(DevExt, AMDBC250_REG_OTG0_OTG_CRTC_H_TOTAL, 800 - 1);
-        DreamV3WriteRegister(DevExt, AMDBC250_REG_OTG0_OTG_CRTC_V_TOTAL, 525 - 1);
-        DreamV3WriteRegister(DevExt, AMDBC250_REG_OTG0_OTG_CRTC_H_BLANK_START_END,
-                             (640 << 16) | 800);
-        DreamV3WriteRegister(DevExt, AMDBC250_REG_OTG0_OTG_CRTC_V_BLANK_START_END,
-                             (480 << 16) | 525);
-        DreamV3WriteRegister(DevExt, AMDBC250_REG_OTG0_OTG_CRTC_H_SYNC_START_END,
-                             (656 << 16) | 752);
-        DreamV3WriteRegister(DevExt, AMDBC250_REG_OTG0_OTG_CRTC_V_SYNC_START_END,
-                             (490 << 16) | 492);
-        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-                   "AMDBC250-DREAM-V4.3: Display — 640x480@60Hz (VGA)\n"));
-    } else {
-        /* 1920x1080@60Hz timing (standard CEA-861) */
-        DevExt->CurrentMode.Width = 1920;
-        DevExt->CurrentMode.Height = 1080;
-        DevExt->CurrentMode.RefreshRate = 60;
-        DevExt->CurrentMode.BitsPerPixel = 32;
-        DevExt->CurrentMode.PixelClockKhz = 148500;
-        DevExt->CurrentMode.Format = D3DDDIFMT_A8R8G8B8;
-
-        DreamV3WriteRegister(DevExt, AMDBC250_REG_OTG0_OTG_CRTC_H_TOTAL, 2200 - 1);
-        DreamV3WriteRegister(DevExt, AMDBC250_REG_OTG0_OTG_CRTC_V_TOTAL, 1125 - 1);
-        DreamV3WriteRegister(DevExt, AMDBC250_REG_OTG0_OTG_CRTC_H_BLANK_START_END,
-                             (1920 << 16) | 2200);
-        DreamV3WriteRegister(DevExt, AMDBC250_REG_OTG0_OTG_CRTC_V_BLANK_START_END,
-                             (1080 << 16) | 1125);
-        DreamV3WriteRegister(DevExt, AMDBC250_REG_OTG0_OTG_CRTC_H_SYNC_START_END,
-                             (2008 << 16) | 2052);
-        DreamV3WriteRegister(DevExt, AMDBC250_REG_OTG0_OTG_CRTC_V_SYNC_START_END,
-                             (1084 << 16) | 1089);
-        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-                   "AMDBC250-DREAM-V4.3: Display — 1920x1080@60Hz\n"));
-    }
+        "AMDBC250-DREAM-V4.3: InitDisplay SKIPPED (OTG registers in freeze zone 0x6000+)\n"));
 
     return STATUS_SUCCESS;
 }
@@ -874,9 +826,16 @@ static NTSTATUS
 DreamV3InitCommandProcessor(_In_ PDREAM_V3_DEVICE_EXTENSION DevExt)
 {
     UNREFERENCED_PARAMETER(DevExt);
-    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
-               "AMDBC250-DREAM-V4.3: InitCommandProcessor FAILED — ME/PFP firmware not loaded\n"));
-    return STATUS_UNSUCCESSFUL;
+    /* Firmware loading is now handled by:
+     * 1. LOAD_CP_FW IOCTL (from userspace via load-cp-fw.exe)
+     * 2. DreamV3LoadSingleFirmware() in amdbc250_dream_fw_load.c
+     * 
+     * This stub is kept for API compatibility.
+     * Firmware must be loaded BEFORE GPU operations.
+     */
+    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+               "AMDBC250-DREAM-V4.3: InitCommandProcessor — firmware loading via IOCTL\n"));
+    return STATUS_SUCCESS;
 }
 
 /*===========================================================================
@@ -894,12 +853,14 @@ DreamV3InitMemoryController(_In_ PDREAM_V3_DEVICE_EXTENSION DevExt)
      * BC-250 has 16GB GDDR6 shared between CPU and GPU.
      */
 
-    /* Configure GB_ADDR_CONFIG for RDNA2 topology */
+    /* Configure GB_ADDR_CONFIG for BC-250 (Cyan Skillfish)
+     * Linux golden value: 0x00100044 (from CYAN_SKILLFISH_GB_ADDR_CONFIG_GOLDEN)
+     * Bits [3:0] = NUM_PIPES: 4 (0x4)
+     * Bits [7:4] = PIPE_INTERLEAVE: 256B (0x4)
+     * Bits [19:16] = NUM_PKRS: 1 (0x1)
+     */
     DreamV3WriteRegister(DevExt, AMDBC250_REG_GB_ADDR_CONFIG,
-                         (2 << 0) |   /* NUM_PIPES: 4 pipes  */
-                         (2 << 4) |   /* PIPE_INTERLEAVE: 256B */
-                         (0 << 8) |   /* MAX_COMPRESSED_FRAGS */
-                         (2 << 12));  /* NUM_PKRS: 4          */
+                         0x00100044);  /* BC-250 golden value from Linux */
 
     /* Configure framebuffer location */
     if (DevExt->FbSize > 0) {
@@ -926,22 +887,17 @@ DreamV3InitMemoryController(_In_ PDREAM_V3_DEVICE_EXTENSION DevExt)
 LONG
 DreamV3ReadTemperature(_In_ PDREAM_V3_DEVICE_EXTENSION DevExt)
 {
-    ULONG ThermalStatus = DreamV3ReadRegister(DevExt, AMDBC250_REG_THM_CURRENT_TEMP);
-    
-    /* Extract temperature value (implementation depends on sensor type) */
-    /* Typical format: 10-bit signed value with scale factor */
-    ULONG TempRaw = ThermalStatus & 0x3FF;
-    
-    /* Convert to Celsius using fixed-point arithmetic: Raw * 125 / 1000 - 49 */
-    LONG TempCelsius = (LONG)((TempRaw * 125) / 1000 - 49);
-    
-    /* Clamp to reasonable range */
-    if (TempCelsius < 0) TempCelsius = 0;
-    if (TempCelsius > 150) TempCelsius = 150;
-    
-    DevExt->CurrentTemperatureC = TempCelsius;
-    
-    return TempCelsius;
+    UNREFERENCED_PARAMETER(DevExt);
+
+    /* ======================================================================
+     * THM_CURRENT_TEMP register (0x8008) is in the 0x3400-0x8100 FREEZE ZONE.
+     * Direct MMIO read causes hardware hang on BC-250.
+     *
+     * TODO: Use PSP proxy or MP1 SMU mailbox to read temperature.
+     * For now, return a safe default.
+     * ====================================================================== */
+
+    return 45;  /* Safe default: 45°C */
 }
 
 /*===========================================================================

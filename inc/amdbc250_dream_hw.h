@@ -51,6 +51,10 @@ Environment:
 
 #include <ntddk.h>
 
+/* Forward declaration — defined in amdbc250_dream_kmd.h */
+struct _DREAM_V3_DEVICE_EXTENSION;
+typedef struct _DREAM_V3_DEVICE_EXTENSION *PDREAM_V3_DEVICE_EXTENSION;
+
 /*===========================================================================
   PCI Identifiers — AMD BC-250 / Cyan Skillfish (GFX1013)
   
@@ -767,5 +771,56 @@ Environment:
 /* Golden register sequences (MUST be programmed at init) */
 /* These are hardware workarounds/errata from AMD */
 #define AMDBC250_HAS_GOLDEN_REGS                  TRUE
+
+/*===========================================================================
+  Firmware Loading Functions (amdbc250_dream_fw_load.c)
+  
+  BC-250 uses DIRECT firmware loading (AMDGPU_FW_LOAD_DIRECT).
+  Firmware is uploaded to IP block registers via MMIO, not through PSP.
+===========================================================================*/
+
+/* Load all CP firmware during initialization */
+NTSTATUS
+DreamV3LoadAllFirmware(
+    _In_ PDREAM_V3_DEVICE_EXTENSION DevExt
+    );
+
+/* Load a single firmware blob (called from LOAD_CP_FW IOCTL) */
+NTSTATUS
+DreamV3LoadSingleFirmware(
+    _In_ PDREAM_V3_DEVICE_EXTENSION DevExt,
+    _In_ UINT32 FwType,
+    _In_ const UINT8 *FwBlob,
+    _In_ UINT32 FwSize
+    );
+
+/* Halt/unhalt all CP engines */
+VOID
+DreamV3HaltAllEngines(
+    _In_ PDREAM_V3_DEVICE_EXTENSION DevExt
+    );
+
+VOID
+DreamV3UnhaltAllEngines(
+    _In_ PDREAM_V3_DEVICE_EXTENSION DevExt
+    );
+
+/* Golden register programming (amdbc250_dream_golden.c) */
+NTSTATUS
+DreamV3ProgramGoldenSettings(
+    _In_ PDREAM_V3_DEVICE_EXTENSION DevExt
+    );
+
+/* HDP register initialization */
+NTSTATUS
+DreamV3InitHdpRegisters(
+    _In_ PDREAM_V3_DEVICE_EXTENSION DevExt
+    );
+
+/* RLC initialization */
+NTSTATUS
+DreamV3InitRlc(
+    _In_ PDREAM_V3_DEVICE_EXTENSION DevExt
+    );
 
 #endif /* _AMDBC250_DREAM_V3_HW_H_ */

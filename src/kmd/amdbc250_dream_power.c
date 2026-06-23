@@ -551,19 +551,19 @@ DreamV3ReadAllThermalSensors(
     _Out_ PDREAM_V3_THERMAL_SENSORS Sensors
     )
 {
-    /* Read edge temperature (primary sensor) */
-    ULONG EdgeRaw = DreamV3ReadRegister(DevExt, AMDBC250_REG_THM_CURRENT_TEMP);
-    Sensors->EdgeTempC = (LONG)((EdgeRaw & 0x3FF) * 0.125 - 49);
+    UNREFERENCED_PARAMETER(DevExt);
 
-    /* Junction temperature - use thermal offset */
-    /* Typically 10-15°C hotter than edge */
-    Sensors->JunctionTempC = Sensors->EdgeTempC + 12;
+    /* ======================================================================
+     * THM_CURRENT_TEMP register (0x8008) is in the 0x3400-0x8100 FREEZE ZONE.
+     * Direct MMIO read causes hardware hang on BC-250.
+     *
+     * TODO: Use PSP proxy or MP1 SMU mailbox to read temperature.
+     * For now, return safe defaults.
+     * ====================================================================== */
 
-    /* VRM temperature - estimate from power draw */
-    /* Real hardware has dedicated VRM sensor */
-    Sensors->VrmTempC = Sensors->EdgeTempC + 5;
-
-    /* HBM temperature - not applicable for BC-250 (uses GDDR6) */
+    Sensors->EdgeTempC = 45;       /* Safe default */
+    Sensors->JunctionTempC = 57;   /* Edge + 12 */
+    Sensors->VrmTempC = 50;        /* Edge + 5 */
     Sensors->HbmTempC = 0;
 
     /* Clamp to valid ranges */

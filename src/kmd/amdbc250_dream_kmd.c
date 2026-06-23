@@ -1989,16 +1989,10 @@ DreamV3DdiSetVidPnSourceVisibility(
                pSetVidPnSourceVisibility->Visible));
 
     /* Show/hide display output */
+    /* OTG0 registers (0x6000+) are in the freeze zone — skip */
     if (DevExt->MmioVirtualBase != NULL) {
-        ULONG OtgCntl = DreamV3ReadRegister(DevExt, AMDBC250_REG_OTG0_OTG_CONTROL);
-        
-        if (pSetVidPnSourceVisibility->Visible) {
-            OtgCntl |= OTG_CNTL__ENABLE;
-        } else {
-            OtgCntl &= ~OTG_CNTL__ENABLE;
-        }
-        
-        DreamV3WriteRegister(DevExt, AMDBC250_REG_OTG0_OTG_CONTROL, OtgCntl);
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_TRACE_LEVEL,
+                   "AMDBC250-DREAM-V4.3: SetVidPnSourceVisibility — OTG skip (freeze zone)\n"));
     }
 
     return STATUS_SUCCESS;
@@ -2064,12 +2058,8 @@ DreamV3DdiGetScanLine(
     }
 
     /* Read current scanline from OTG status */
-    if (DevExt->MmioVirtualBase != NULL) {
-        ULONG Status = DreamV3ReadRegister(DevExt, AMDBC250_REG_OTG0_OTG_CRTC_STATUS);
-        pGetScanLine->ScanLine = Status & 0xFFFF;
-    } else {
-        pGetScanLine->ScanLine = 0;
-    }
+    /* OTG0 registers (0x6000+) are in the freeze zone — skip */
+    pGetScanLine->ScanLine = 0;
     
     return STATUS_SUCCESS;
 }
@@ -2713,6 +2703,7 @@ DreamV3DeviceControl(
                         status = STATUS_SUCCESS;
                     } else {
                         MmFreePagesFromMdl(mdl);
+                        ExFreePool(mdl);
                         status = STATUS_INSUFFICIENT_RESOURCES;
                     }
                 } else {
@@ -2993,7 +2984,6 @@ DreamV3DeviceControl(
             PULONG64 InData = (PULONG64)inputBuffer;
             PVOID handle = (PVOID)(UINT_PTR)InData[0];
             if (handle != NULL) {
-                /* Try MDL table first (for MDL allocations) */
                 KIRQL oldIrql;
                 BOOLEAN found = FALSE;
                 KeAcquireSpinLock(&g_MdlTableLock, &oldIrql);
@@ -3012,13 +3002,14 @@ DreamV3DeviceControl(
                 KeReleaseSpinLock(&g_MdlTableLock, oldIrql);
 
                 if (!found) {
-                    /* Fallback: contiguous memory allocation */
                     MmFreeContiguousMemory(handle);
                 }
                 KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                     "AMDBC250-DREAM-V4.3: FreeVidMem OK (MDL=%s)\n",
                     found ? "freed" : "contiguous"));
             }
+        } else {
+            status = STATUS_BUFFER_TOO_SMALL;
         }
         break;
     }
@@ -3451,9 +3442,8 @@ DreamV3DeviceControl(
             }
             cuCount *= 2; /* Each bit = 2 CUs (1 WGP = 2 CUs) */
 
-            /* Decode WGP count from SPI mask */
             ULONG wgpCount = 0;
-            for (ULONG i = 0; i < 5; i++) {
+            for (ULONG i = 8; i < 14; i++) {
                 if (spiMask & (1 << i)) wgpCount++;
             }
 
@@ -3614,6 +3604,10 @@ DreamV3DeviceControl(
                         "AMDBC250-DREAM-V4.3: KIQ init FAILED in NBIO_MAP mode\n"));
                 }
 
+                /* SDMA ring init DISABLED for debugging (check BSOD source) */
+                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                    "AMDBC250-DREAM-V4.3: SDMA ring init SKIPPED (debug)\n"));
+
                 status = STATUS_SUCCESS;
                 break;
             }
@@ -3709,24 +3703,23 @@ DreamV3DeviceControl(
 
             /* PATH 1: PSP KIQ ring (preferred � KIQ_WPTR works via PSP driver) */
             if (Amdbc250PspKiqIsInitialized()) {
-                /* Build PM4 buffer: user commands + EOP fence (if requested) */
-                ULONG Pm4Buffer[128];  /* Max 64 user + 6 EOP = 70, with margin */
+                /* Build PM4 buffer: user commands + EOP fence (if requested).
+                 * PSP KIQ submit accepts max 64 DWORDs total. */
+                ULONG Pm4Buffer[128];
                 ULONG Pm4Count = SendPm4->CommandCount;
 
-                RtlCopyMemory(Pm4Buffer, SendPm4->Commands, SendPm4->CommandCount * sizeof(ULONG));
+                if (SendPm4->FenceValue > 0) {
+                    if (Pm4Count > 58) Pm4Count = 58;
+                }
+
+                RtlCopyMemory(Pm4Buffer, SendPm4->Commands, Pm4Count * sizeof(ULONG));
 
                 if (SendPm4->FenceValue > 0) {
-                    /* Append EOP fence packet (6 DWORDs) */
                     ULONG idx = Pm4Count;
-                    /* EOP header: type=3, count=5, opcode=IT_EVENT_WRITE_EOP(0x47) */
                     Pm4Buffer[idx++] = PM4_TYPE3_HDR(IT_EVENT_WRITE_EOP, 5);
-                    /* EOP control: EVENT_TYPE=0x47, EVENT_INDEX=5, DATA_SEL=2(64-bit), INT_SEL=1(interrupt)
-                     * GFX10 layout: EVENT_TYPE[7:0] | EVENT_INDEX[11:8] | DATA_SEL[13:12] | INT_SEL[14] */
                     Pm4Buffer[idx++] = (0x47 << 0) | (5 << 8) | (2 << 12) | (1 << 14);
-                    /* Fence address low/high */
                     Pm4Buffer[idx++] = (ULONG)DevExt->GlobalFence.PhysicalAddress.QuadPart;
                     Pm4Buffer[idx++] = (ULONG)(DevExt->GlobalFence.PhysicalAddress.QuadPart >> 32);
-                    /* Fence value low/high */
                     Pm4Buffer[idx++] = (ULONG)SendPm4->FenceValue;
                     Pm4Buffer[idx++] = (ULONG)(SendPm4->FenceValue >> 32);
                     Pm4Count = idx;
@@ -3830,6 +3823,11 @@ DreamV3DeviceControl(
                 break;
             }
 
+            if (RegAcc->RegisterOffset + 4 > DevExt->MmioSize) {
+                status = STATUS_INVALID_PARAMETER;
+                break;
+            }
+
             ULONG value = DreamV3ReadRegister(DevExt, RegAcc->RegisterOffset);
             RegAcc->Value = value;
             bytesReturned = sizeof(AMDBC250_IOCTL_REG_ACCESS);
@@ -3850,6 +3848,11 @@ DreamV3DeviceControl(
 
             if (!DevExt->HardwareInitialized || DevExt->MmioVirtualBase == NULL) {
                 status = STATUS_DEVICE_NOT_READY;
+                break;
+            }
+
+            if (RegAcc->RegisterOffset + 4 > DevExt->MmioSize) {
+                status = STATUS_INVALID_PARAMETER;
                 break;
             }
 
@@ -4957,16 +4960,16 @@ DreamV3DeviceControl(
             /* Step 19: Write PM4 NOP + WRITE_REG to SCRATCH into ring */
             {
                 volatile PULONG ring = (volatile PULONG)ringVa;
-                /* PM4 Type 3: IT_WRITE_DATA (0x37), count=2
-                 * Header: TYPE=3(11), COUNT=2(010), OPCODE=0x37 -> 0xC0023700 */
-                ring[0] = 0xC0023700;  /* PM4 header: IT_WRITE_DATA */
-                ring[1] = 0x000032D4;  /* SCRATCH register offset */
-                ring[2] = 0xCAFEBABE;  /* value to write */
-                ring[3] = 0x30000000;  /* NOP */
-                ring[4] = 0x30000000;  /* NOP */
-                ring[5] = 0x30000000;  /* NOP */
-                ring[6] = 0x30000000;  /* NOP */
-                ring[7] = 0x30000000;  /* NOP */
+                /* PM4 Type 3: IT_WRITE_DATA (0x37), count=3 (control + offset + data)
+                 * Header: TYPE=3(11), COUNT=3(011), OPCODE=0x37 -> 0xC0033700 */
+                ring[0] = 0xC0033700;  /* PM4 header: IT_WRITE_DATA, count=3 */
+                ring[1] = 0x00000000;  /* CONTROL: default (no confirm, dest_sel=GFX) */
+                ring[2] = 0x000032D4;  /* SCRATCH register offset */
+                ring[3] = 0xCAFEBABE;  /* value to write */
+                ring[4] = 0xC0001000;  /* PM4: NOP (count=0) */
+                ring[5] = 0xC0001000;  /* PM4: NOP */
+                ring[6] = 0xC0001000;  /* PM4: NOP */
+                ring[7] = 0xC0001000;  /* PM4: NOP */
                 KeMemoryBarrier();
                 kiqTest->Pm4Submitted = 1;
 
@@ -5535,19 +5538,20 @@ DreamV3DeviceControl(
             KeStallExecutionProcessor(1);
 
             /* Step 6: Write PM4 packets to ring
-             * PM4 Type 3 IT_WRITE_DATA: header=0xC0023700, reg=SCRATCH, val=0xCAFEBABE
+             * PM4 Type 3 IT_WRITE_DATA: header=0xC0033700 (count=3), control + offset + data
              * PM4 Type 3 IT_NOP: header=0xC0001000 */
             {
                 volatile PULONG ring = (volatile PULONG)ringVa;
-                ring[0] = 0xC0023700;   /* PM4: IT_WRITE_DATA (count=2, opcode=0x37) */
-                ring[1] = 0x000032D4;   /* SCRATCH register offset */
-                ring[2] = 0xCAFEBABE;   /* value to write */
-                ring[3] = 0xC0001000;   /* PM4: NOP (count=0) */
+                ring[0] = 0xC0033700;   /* PM4: IT_WRITE_DATA (count=3) */
+                ring[1] = 0x00000000;   /* CONTROL: default (no confirm, dest_sel=GFX) */
+                ring[2] = 0x000032D4;   /* SCRATCH register offset */
+                ring[3] = 0xCAFEBABE;   /* value to write */
+                ring[4] = 0xC0001000;   /* PM4: NOP (count=0) */
             }
 
-            /* Step 7: Set WPTR = 4 DWORDs (16 bytes) */
-            KIQ_REG32(KIQ_WPTR_OFF) = 4;
-            kt->KiqWptrSet = 4;
+            /* Step 7: Set WPTR = 5 DWORDs (5 DWORDs: header+control+offset+data+nop) */
+            KIQ_REG32(KIQ_WPTR_OFF) = 5;
+            kt->KiqWptrSet = 5;
 
             /* Step 8: Resume ME+PFP (clear halt bits) */
             {
@@ -5799,22 +5803,29 @@ DreamV3DeviceControl(
             BIOS_WRITE(BIOS_KIQ_WPTR_OFF, 0);
             KeStallExecutionProcessor(1);
 
-            /* Step 7: Write PM4 to ring - use simple NOP packets */
+            /* Step 7: Write PM4 WRITE_DATA to SCRATCH (0x32D4) = 0xCAFEBABE
+             * PM4 IT_WRITE_DATA (0x37), count=3: CONTROL + REG_OFFSET + DATA
+             * Header: TYPE=3(11), COUNT=3, OPCODE=0x37 -> 0xC0033700
+             * REG_OFFSET must be in DWORDs: 0x32D4 bytes = 0x0C75 DWORDs */
             {
                 PULONG ring = (PULONG)ringVa;
-                /* Type 3 NOP packets - simpler format that GPU should definitely accept */
-                ring[0] = (3U << 30) | (2U << 16) | (0x10U << 8) | 3U;  /* Type3 NOP, Count=2 */
-                ring[1] = 0xDEADBEEF;
-                ring[2] = 0xDEADBEEF;
-                ring[3] = 0xDEADBEEF;
+                ring[0] = 0xC0033700;  /* PM4 Type3: IT_WRITE_DATA, count=3 */
+                ring[1] = 0x00000000;  /* CONTROL: default (dest_sel=GFX_SH_DATA) */
+                ring[2] = 0x00000C75;  /* SCRATCH register offset in DWORDs (0x32D4 / 4) */
+                ring[3] = 0xCAFEBABE;  /* value to write */
+                ring[4] = 0xC0001000;  /* NOP (padding) */
+                ring[5] = 0xC0001000;  /* NOP (padding) */
+                ring[6] = 0xC0001000;  /* NOP (padding) */
+                ring[7] = 0xC0001000;  /* NOP (padding) */
+                KdPrint(("KIQ_BIOS_RING: wrote IT_WRITE_DATA 0xCAFEBABE -> SCRATCH (offset 0x%08X)\n", 0x00000C75));
             }
 
             /* Step 7.5: CRITICAL � flush CPU stores before WPTR update */
             KeMemoryBarrier();
 
-            /* Step 8: Set WPTR = 4 DWORDs */
-            BIOS_WRITE(BIOS_KIQ_WPTR_OFF, 4);
-            resp->KiqWptrSet = 4;
+            /* Step 8: Set WPTR = 8 DWORDs (header + control + offset + data + 4 NOPs) */
+            BIOS_WRITE(BIOS_KIQ_WPTR_OFF, 8);
+            resp->KiqWptrSet = 8;
 
             /* Step 9: Resume ME+PFP */
             {
@@ -5822,8 +5833,12 @@ DreamV3DeviceControl(
                 BIOS_WRITE(BIOS_ME_CNTL_OFF, meVal & ~((1 << 28) | (1 << 30)));
             }
 
-            /* Step 10: Wait */
-            KeStallExecutionProcessor(10000);
+            /* Step 10: Wait 100ms for GPU to process PM4 */
+            {
+                LARGE_INTEGER delay;
+                delay.QuadPart = -10000LL * 100;  /* 100ms */
+                KeDelayExecutionThread(KernelMode, FALSE, &delay);
+            }
 
             /* Step 11: Read results */
             resp->KiqRptrAfter = BIOS_READ(BIOS_KIQ_RPTR_OFF);
@@ -5856,7 +5871,7 @@ DreamV3DeviceControl(
             KeStallExecutionProcessor(10);
             {
                 PULONG ring = (PULONG)ringVa;
-                ring[0] = 0; ring[1] = 0; ring[2] = 0; ring[3] = 0;
+                for (int i = 0; i < 8; i++) ring[i] = 0;
             }
             KeMemoryBarrier();
             BIOS_WRITE(BIOS_KIQ_RPTR_OFF, 0);
@@ -5870,6 +5885,151 @@ DreamV3DeviceControl(
             bytesReturned = sizeof(*resp);
         } else {
             status = STATUS_BUFFER_TOO_SMALL;
+        }
+        break;
+    }
+
+    case 0x80000988: { /* IOCTL_AMDBC250_SDMA_SELFTEST */
+        {
+            PULONG Resp = (PULONG)outputBuffer;
+            PHYSICAL_ADDRESS srcPhys = {0}, dstPhys = {0}, lowAddr = {0x100000}, highAddr = {0xFFFFFFFFFFFFFFFFULL}, boundaryAddr = {0};
+            PVOID srcVa = NULL, dstVa = NULL;
+            ULONG sz = 4096;
+            NTSTATUS testStatus;
+
+            if (outputLen < sizeof(ULONG)) {
+                status = STATUS_BUFFER_TOO_SMALL;
+                break;
+            }
+
+            /* Allocate two physically contiguous pages (inline, no wrapper dependency) */
+            srcVa = MmAllocateContiguousMemorySpecifyCache(sz, lowAddr, highAddr, boundaryAddr, MmWriteCombined);
+            if (srcVa != NULL) {
+                srcPhys = MmGetPhysicalAddress(srcVa);
+                dstVa = MmAllocateContiguousMemorySpecifyCache(sz, lowAddr, highAddr, boundaryAddr, MmWriteCombined);
+                if (dstVa != NULL) {
+                    dstPhys = MmGetPhysicalAddress(dstVa);
+                }
+            }
+
+            if (srcVa == NULL || dstVa == NULL) {
+                *Resp = (srcVa == NULL) ? 0xDEAD0001 : 0xDEAD0002;
+                if (srcVa != NULL) MmFreeContiguousMemory(srcVa);
+                if (dstVa != NULL) MmFreeContiguousMemory(dstVa);
+                bytesReturned = sizeof(ULONG);
+                status = STATUS_SUCCESS;
+                break;
+            }
+
+            RtlZeroMemory(srcVa, sz);
+            RtlZeroMemory(dstVa, sz);
+
+            /* Fill source with pattern */
+            for (ULONG i = 0; i < sz / sizeof(ULONG); i++) {
+                ((PULONG)srcVa)[i] = 0x600DC0DE + i;
+            }
+            KeMemoryBarrier();
+
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                "AMDBC250-DREAM-V4.3: SDMA self-test: srcPA=0x%llX dstPA=0x%llX size=%u\n",
+                srcPhys.QuadPart, dstPhys.QuadPart, sz));
+
+            /* Do SDMA copy */
+            testStatus = DreamV3SdmaCopyBuffer(DevExt, srcPhys, dstPhys, sz);
+
+            if (!NT_SUCCESS(testStatus)) {
+                *Resp = testStatus;
+                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+                    "AMDBC250-DREAM-V4.3: SDMA copy FAILED: 0x%08X\n", testStatus));
+            } else {
+                BOOLEAN match = TRUE;
+                for (ULONG i = 0; i < sz / sizeof(ULONG); i++) {
+                    if (((PULONG)dstVa)[i] != 0x600DC0DE + i) {
+                        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+                            "AMDBC250-DREAM-V4.3: SDMA mismatch at offset %u: expected 0x%08X got 0x%08X\n",
+                            i * 4, 0x600DC0DE + i, ((PULONG)dstVa)[i]));
+                        match = FALSE;
+                        break;
+                    }
+                }
+                if (match) {
+                    *Resp = 0x600DCAFE;
+                    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                        "AMDBC250-DREAM-V4.3: SDMA self-test PASSED!\n"));
+                } else {
+                    *Resp = 0xDEADBEEF;
+                    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+                        "AMDBC250-DREAM-V4.3: SDMA self-test FAILED (data mismatch)\n"));
+                }
+            }
+
+            MmFreeContiguousMemory(srcVa);
+            MmFreeContiguousMemory(dstVa);
+
+            bytesReturned = sizeof(ULONG);
+            status = STATUS_SUCCESS;
+        }
+        break;
+    }
+
+    case 0x8000098C: { /* IOCTL_AMDBC250_GCVM_PT_SETUP — Set up GCVM page table */
+        {
+            PHYSICAL_ADDRESS lowAddr = {0x100000}, highAddr = {0xFFFFFFFFFFFFFFFFULL}, boundaryAddr = {0};
+            PHYSICAL_ADDRESS ringPhys;
+            PVOID ptPage = NULL;
+            ULONG sz = 4096;
+
+            struct {
+                ULONG CtxCntlBefore;
+                ULONG CtxCntlAfter;
+                ULONG RingBaseLo;
+                ULONG RingBaseHi;
+                ULONG PtBase0LoBefore;
+                ULONG PtBase0HiBefore;
+                ULONG PtBase0LoAfter;
+                ULONG PtBase0HiAfter;
+                ULONG PtBaseLoAfter;
+                ULONG PtBaseHiAfter;
+                ULONG Result;
+            } *resp = (PVOID)outputBuffer;
+
+            if (outputLen < sizeof(*resp)) {
+                status = STATUS_BUFFER_TOO_SMALL;
+                break;
+            }
+            RtlZeroMemory(resp, sizeof(*resp));
+
+            /* Phase 1: Read only — NO WRITES to GCVM regs */
+            resp->CtxCntlBefore = DreamV3ReadRegister(DevExt, 0x0B460);
+            resp->RingBaseLo    = DreamV3ReadRegister(DevExt, 0xE060);
+            resp->RingBaseHi    = DreamV3ReadRegister(DevExt, 0xE064);
+            resp->PtBase0LoBefore = DreamV3ReadRegister(DevExt, 0x0B408);
+            resp->PtBase0HiBefore = DreamV3ReadRegister(DevExt, 0x0B40C);
+            ringPhys.QuadPart = ((ULONG64)resp->RingBaseHi << 32) | resp->RingBaseLo;
+
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                "AMDBC250-DREAM-V4.3: GCVM_PT_SETUP: ring PA=0x%llX ctx=0x%08X pt0=0x%08X_%08X\n",
+                ringPhys.QuadPart, resp->CtxCntlBefore,
+                resp->PtBase0HiBefore, resp->PtBase0LoBefore));
+
+            /* Check: are we 3-level? */
+            if ((resp->CtxCntlBefore & 6) != 4) { /* bits 2:1 should be 10b = 4 */
+                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+                    "AMDBC250-DREAM-V4.3: Unexpected CTX0_CNTL depth bits: 0x%X\n",
+                    resp->CtxCntlBefore & 6));
+            }
+
+            resp->CtxCntlAfter = DreamV3ReadRegister(DevExt, 0x0B460);
+            resp->PtBase0LoAfter = DreamV3ReadRegister(DevExt, 0x0B408);
+            resp->PtBase0HiAfter = DreamV3ReadRegister(DevExt, 0x0B40C);
+            resp->PtBaseLoAfter = DreamV3ReadRegister(DevExt, 0x0B608);
+            resp->PtBaseHiAfter = DreamV3ReadRegister(DevExt, 0x0B60C);
+
+            /* Don't write anything — just report current state */
+            resp->Result = 0x00000CAFE; /* read-only success */
+
+            bytesReturned = sizeof(*resp);
+            status = STATUS_SUCCESS;
         }
         break;
     }

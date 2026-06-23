@@ -10,8 +10,11 @@ static void Log(const char *fmt, ...) {
 }
 
 static unsigned ReadReg(HANDLE h, unsigned off) {
-    unsigned ra[2] = {off, 0xDEADBEEF}; DWORD br = 0;
-    DeviceIoControl(h, 0x80000B88, ra, sizeof(ra), ra, sizeof(ra), &br, NULL);
+    unsigned ra[2] = {off, 0}; DWORD br = 0;
+    BOOL ok = DeviceIoControl(h, 0x80000B88, ra, sizeof(ra), ra, sizeof(ra), &br, NULL);
+    if (!ok || br < sizeof(ra)) {
+        return 0xFFFFFFFF;
+    }
     return ra[1];
 }
 
@@ -25,7 +28,9 @@ static void Dump(HANDLE h, const char *label) {
     struct { unsigned o; const char *n; } r[] = {
         {0x4A74,"ME_CNTL"},{0x3260,"GRBM"},{0x32D4,"SCRATCH0"},{0x32D8,"SCRATCH1"},
         {0xE060,"KIQ_BASE"},{0xE068,"KIQ_CNTL"},{0xE06C,"KIQ_RPTR"},{0xE078,"KIQ_WPTR"},
-        {0xDAC0,"HQD_ACT"},{0xDAC4,"HQD_VMD"},{0xDACC,"HQD_PQ"},{0xDAD0,"HQD_RPTR"},{0xDAD4,"HQD_WPTR"},
+        {0xDAC0,"HQD_ACT"},{0xDAC4,"HQD_VMD"},
+        {0xDACC,"HQD_PIPE_PRIORITY"},{0xDAD0,"HQD_QUEUE_PRIORITY"},{0xDAD4,"HQD_QUANTUM"},
+        {0xDAE0,"HQD_PQ_RPTR"},{0xDB90,"HQD_PQ_WPTR_LO"},{0xDB94,"HQD_PQ_WPTR_HI"},
     };
     for (int i = 0; i < sizeof(r)/sizeof(r[0]); i++)
         Log("    %s=0x%08X", r[i].n, ReadReg(h, r[i].o));
@@ -40,11 +45,15 @@ int main(void) {
         GENERIC_READ|GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
     if (h == INVALID_HANDLE_VALUE) { Log("Open failed\n"); if(g) fclose(g); return 1; }
 
-    /* INIT_HARDWARE */
-    UCHAR i[32]={0}; DWORD br=0;
-    *(unsigned __int64*)(i+0)=0xFE800000ULL; *(unsigned*)(i+8)=0x00080000;
-    *(unsigned*)(i+12)=1; *(unsigned __int64*)(i+16)=0xC0000000ULL; *(unsigned*)(i+24)=0x10000000;
-    DeviceIoControl(h, 0x80000B80, i, sizeof(i), NULL, 0, &br, NULL);
+    /* INIT_HARDWARE — match driver struct size (28 bytes) */
+    struct { unsigned __int64 mmio; unsigned size; unsigned flags; } ih = {0};
+    ih.mmio = 0xFE800000ULL;
+    ih.size = 0x00080000;
+    ih.flags = 1;
+    DWORD br = 0;
+    if (!DeviceIoControl(h, 0x80000B80, &ih, sizeof(ih), NULL, 0, &br, NULL)) {
+        Log("INIT_HARDWARE failed (err=%lu) — BAR5 may not be mapped\n", GetLastError());
+    }
 
     /* Step 0: Baseline */
     Log("--- Step 0: Baseline ---\n");
@@ -56,9 +65,16 @@ int main(void) {
     Log("\n--- Step 1: Unhalt ME only (0x4A74 &= ~0x10000000) ---\n");
     unsigned me = ReadReg(h, 0x4A74);
     Log("  ME_CNTL before: 0x%08X\n", me);
-    unsigned me_new = me & ~(1u << 28);  /* Only clear ME_HALT, keep PFP_HALT */
+    if (me == 0xFFFFFFFF) {
+        Log("  FATAL: ME_CNTL read failed — aborting\n");
+        CloseHandle(h); if(g) fclose(g); return 1;
+    }
+    unsigned me_new = me & ~(1u << 28);
     Log("  Write: 0x%08X (clear bit 28 only)\n", me_new);
-    WriteReg(h, 0x4A74, me_new);
+    if (!WriteReg(h, 0x4A74, me_new)) {
+        Log("  FATAL: ME_CNTL write failed — aborting\n");
+        CloseHandle(h); if(g) fclose(g); return 1;
+    }
     unsigned me_read = ReadReg(h, 0x4A74);
     Log("  Readback: 0x%08X\n", me_read);
     Sleep(200);
@@ -66,15 +82,10 @@ int main(void) {
     Sleep(500);
     Dump(h, "500ms after ME unhalt");
 
-    /* Step 2: Write KIQ_CNTL (bufsz only) */
-    Log("\n--- Step 2: KIQ_CNTL bufsz=7 (0xE068) ---\n");
+    /* Step 2: Read KIQ_CNTL (it is READ-ONLY on BC-250) */
+    Log("\n--- Step 2: KIQ_CNTL (0xE068) — READ-ONLY on BC-250 ---\n");
     unsigned kcntl = ReadReg(h, 0xE068);
-    Log("  KIQ_CNTL before: 0x%08X\n", kcntl);
-    WriteReg(h, 0xE068, 0x00000007);
-    unsigned kcntl_r = ReadReg(h, 0xE068);
-    Log("  KIQ_CNTL after: 0x%08X\n", kcntl_r);
-    Sleep(200);
-    Dump(h, "200ms after KIQ_CNTL");
+    Log("  KIQ_CNTL current: 0x%08X\n", kcntl);
 
     /* Step 3: KIQ_RPTR = 0 */
     Log("\n--- Step 3: KIQ_RPTR = 0 (0xE06C) ---\n");
@@ -88,15 +99,23 @@ int main(void) {
     Log("  KIQ_WPTR readback: 0x%08X\n", ReadReg(h, 0xE078));
     Sleep(100);
 
-    /* Step 5: HQD_PQ_RPTR = 0 */
-    Log("\n--- Step 5: HQD_PQ_RPTR = 0 (0xDAD0) ---\n");
-    WriteReg(h, 0xDAD0, 0x00000000);
-    Log("  HQD_PQ_RPTR readback: 0x%08X\n", ReadReg(h, 0xDAD0));
+    /* Step 5: HQD_PQ_RPTR = 0 (0xDAE0, NOT 0xDAD0) */
+    Log("\n--- Step 5: HQD_PQ_RPTR = 0 (0xDAE0) ---\n");
+    WriteReg(h, 0xDAE0, 0x00000000);
+    Log("  HQD_PQ_RPTR readback: 0x%08X\n", ReadReg(h, 0xDAE0));
+    Sleep(100);
 
-    /* Step 6: HQD_PQ_WPTR = 0 */
-    Log("\n--- Step 6: HQD_PQ_WPTR = 0 (0xDAD4) ---\n");
-    WriteReg(h, 0xDAD4, 0x00000000);
-    Log("  HQD_PQ_WPTR readback: 0x%08X\n", ReadReg(h, 0xDAD4));
+    /* Step 6: HQD_PQ_WPTR_LO = 0 (0xDB90, NOT 0xDAD4) */
+    Log("\n--- Step 6: HQD_PQ_WPTR_LO = 0 (0xDB90) ---\n");
+    WriteReg(h, 0xDB90, 0x00000000);
+    Log("  HQD_PQ_WPTR_LO readback: 0x%08X\n", ReadReg(h, 0xDB90));
+    Sleep(100);
+
+    /* Step 6b: HQD_PQ_WPTR_HI = 0 (0xDB94) */
+    Log("\n--- Step 6b: HQD_PQ_WPTR_HI = 0 (0xDB94) ---\n");
+    WriteReg(h, 0xDB94, 0x00000000);
+    Log("  HQD_PQ_WPTR_HI readback: 0x%08X\n", ReadReg(h, 0xDB94));
+    Sleep(100);
 
     /* STOP HERE — review log before continuing */
     Log("\n=== STOPS HERE — review log before Step 7 ===\n");

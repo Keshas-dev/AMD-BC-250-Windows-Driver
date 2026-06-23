@@ -1,91 +1,128 @@
-/* pt-base-test.c — Test if GCVM_CONTEXT0_PT_BASE is truly hardware-locked */
+/* pt-base-test.c — Test if PT_BASE is writable after disabling GCVM context */
+/* Step 1: Disable CTX0_CNTL, Step 2: Try write PT_BASE, Step 3: Restore */
+
 #include <windows.h>
 #include <stdio.h>
 
-#define IOCTL_AMDBC250_INIT_HARDWARE  0x80000B80
-#define IOCTL_AMDBC250_READ_REG       0x80000B88
-#define IOCTL_AMDBC250_WRITE_REG      0x80000B8C
-#define AMDBC250_INIT_FLAG_NBIO_MAP   0x00000001
+#define IOCTL_GPU_READ  0x80000B88
+#define IOCTL_GPU_WRITE 0x80000B8C
+#define IOCTL_GPU_INIT  0x80000B80
 
-static BOOL ReadReg(HANDLE h, unsigned off, unsigned *val) {
-    unsigned ra[2] = {off, 0xDEADBEEF};
+static HANDLE h;
+
+static ULONG R(ULONG off) {
+    UCHAR buf[8] = {0};
+    *(ULONG*)(buf+0) = off;
+    *(ULONG*)(buf+4) = 0xDEADBEEF;
     DWORD br = 0;
-    BOOL ok = DeviceIoControl(h, IOCTL_AMDBC250_READ_REG, ra, sizeof(ra), ra, sizeof(ra), &br, NULL);
-    if (ok) *val = ra[1]; else *val = 0xDEADBEEF;
-    return ok;
+    if (!DeviceIoControl(h, IOCTL_GPU_READ, buf, 8, buf, 8, &br, NULL))
+        return 0xBAD0C0DE;
+    return *(ULONG*)(buf+4);
 }
-static BOOL WriteReg(HANDLE h, unsigned off, unsigned val) {
-    unsigned ra[2] = {off, val};
+
+static BOOL W(ULONG off, ULONG val) {
+    UCHAR buf[8] = {0};
+    *(ULONG*)(buf+0) = off;
+    *(ULONG*)(buf+4) = val;
     DWORD br = 0;
-    return DeviceIoControl(h, IOCTL_AMDBC250_WRITE_REG, ra, sizeof(ra), ra, sizeof(ra), &br, NULL);
+    return DeviceIoControl(h, IOCTL_GPU_WRITE, buf, 8, buf, 8, &br, NULL);
+}
+
+static void Init(void) {
+    UCHAR init[32] = {0};
+    *(unsigned __int64*)(init+0) = 0xFE800000ULL;
+    *(unsigned*)(init+8) = 0x00080000;
+    *(unsigned*)(init+12) = 1;
+    *(unsigned __int64*)(init+16) = 0xC0000000ULL;
+    *(unsigned*)(init+24) = 0x10000000;
+    DWORD br = 0;
+    DeviceIoControl(h, IOCTL_GPU_INIT, init, sizeof(init), NULL, 0, &br, NULL);
 }
 
 int main(void) {
-    printf("=== GCVM PT_BASE Lock Test ===\n\n");
+    printf("=== PT_BASE Unlock Test ===\n");
 
-    HANDLE h = CreateFileW(L"\\\\.\\AMDBC250DreamV43", GENERIC_READ|GENERIC_WRITE,
-        0, NULL, OPEN_EXISTING, 0, NULL);
-    if (h == INVALID_HANDLE_VALUE) { printf("Cannot open driver\n"); return 1; }
+    h = CreateFileW(L"\\\\.\\AMDBC250DreamV43", GENERIC_READ|GENERIC_WRITE,
+                    0, NULL, OPEN_EXISTING, 0, NULL);
+    if (h == INVALID_HANDLE_VALUE) {
+        printf("FAIL: Cannot open (err=%lu)\n", GetLastError());
+        return 1;
+    }
 
-    DWORD br = 0;
-    UCHAR initIn[32] = {0};
-    *(unsigned __int64*)(initIn + 0) = 0xFE800000ULL;
-    *(unsigned*)(initIn + 8) = 0x00080000;
-    *(unsigned*)(initIn + 12) = AMDBC250_INIT_FLAG_NBIO_MAP;
-    *(unsigned __int64*)(initIn + 16) = 0xC0000000ULL;
-    *(unsigned*)(initIn + 24) = 0x10000000;
-    DeviceIoControl(h, IOCTL_AMDBC250_INIT_HARDWARE, initIn, sizeof(initIn), NULL, 0, &br, NULL);
-    printf("INIT_HARDWARE OK\n\n");
+    Init();
+    printf("Init OK\n\n");
 
-    unsigned v;
+    /* Save original state */
+    ULONG origCtx0Cntl  = R(0x0B460);
+    ULONG origPtBaseLo  = R(0x0B608);
+    ULONG origPtBaseHi  = R(0x0B60C);
+    
+    printf("=== INITIAL STATE ===\n");
+    printf("  CTX0_CNTL  (0x0B460) = 0x%08X (ENABLE=%d, DEFAULT_PAGE=%d)\n",
+           origCtx0Cntl, origCtx0Cntl & 1, (origCtx0Cntl >> 1) & 1);
+    printf("  PT_BASE_LO (0x0B608) = 0x%08X\n", origPtBaseLo);
+    printf("  PT_BASE_HI (0x0B60C) = 0x%08X\n", origPtBaseHi);
 
-    /* Test GCVM_CONTEXT0_PT_BASE_LO (0x0B608) */
-    printf("--- PT_BASE_LO (0x0B608) ---\n");
-    ReadReg(h, 0x0B608, &v);
-    printf("  Before: 0x%08X\n", v);
-    WriteReg(h, 0x0B608, 0x12345678);
-    ReadReg(h, 0x0B608, &v);
-    printf("  After write 0x12345678: 0x%08X %s\n", v, (v == 0x12345678) ? "WRITABLE!" : "LOCKED");
-    WriteReg(h, 0x0B608, 0xDEADBEEF);
-    ReadReg(h, 0x0B608, &v);
-    printf("  After write 0xDEADBEEF: 0x%08X %s\n", v, (v == 0xDEADBEEF) ? "WRITABLE!" : "LOCKED");
+    /* Step 1: Disable context by writing 0 to CTX0_CNTL */
+    printf("\n=== Step 1: Disable CTX0_CNTL ===\n");
+    printf("  Writing 0x00000000 to CTX0_CNTL...\n");
+    if (!W(0x0B460, 0)) {
+        printf("  WRITE FAILED!\n");
+        return 1;
+    }
+    ULONG ctxAfter = R(0x0B460);
+    printf("  CTX0_CNTL now = 0x%08X (ENABLE=%d)\n", ctxAfter, ctxAfter & 1);
+    
+    /* Step 2: Try reading PT_BASE again */
+    printf("\n=== Step 2: Check PT_BASE after disable ===\n");
+    ULONG ptLoAfterDisable = R(0x0B608);
+    ULONG ptHiAfterDisable = R(0x0B60C);
+    printf("  PT_BASE_LO = 0x%08X\n", ptLoAfterDisable);
+    printf("  PT_BASE_HI = 0x%08X\n", ptHiAfterDisable);
+    
+    if (ptLoAfterDisable == origPtBaseLo && ptHiAfterDisable == origPtBaseHi) {
+        printf("  -> Unchanged (may be HW-locked or read-only)\n");
+    } else {
+        printf("  -> CHANGED! PT_BASE is software-gated!\n");
+    }
 
-    /* Test GCVM_CONTEXT0_PT_BASE_HI (0x0B60C) */
-    printf("\n--- PT_BASE_HI (0x0B60C) ---\n");
-    ReadReg(h, 0x0B60C, &v);
-    printf("  Before: 0x%08X\n", v);
-    WriteReg(h, 0x0B60C, 0x00000012);
-    ReadReg(h, 0x0B60C, &v);
-    printf("  After write 0x00000012: 0x%08X %s\n", v, (v == 0x00000012) ? "WRITABLE!" : "LOCKED");
+    /* Step 3: Try WRITING a test pattern to PT_BASE */
+    printf("\n=== Step 3: Write test pattern to PT_BASE ===\n");
+    ULONG testPattern = 0x12345678;
+    printf("  Writing 0x%08X to PT_BASE_LO...\n", testPattern);
+    if (!W(0x0B608, testPattern)) {
+        printf("  WRITE FAILED! PT_BASE is truly HW locked.\n");
+    } else {
+        ULONG ptAfterWrite = R(0x0B608);
+        printf("  Read back: 0x%08X\n", ptAfterWrite);
+        if (ptAfterWrite == testPattern) {
+            printf("  -> PT_BASE IS WRITABLE after disabling context!\n");
+            printf("  *** MAJOR FINDING: Gemini was correct! ***\n");
+        } else {
+            printf("  -> PT_BASE did NOT accept write (still locked)\n");
+        }
+    }
 
-    /* Test CONTEXT0_CNTL (0x0B460) */
-    printf("\n--- CONTEXT0_CNTL (0x0B460) ---\n");
-    ReadReg(h, 0x0B460, &v);
-    printf("  Before: 0x%08X\n", v);
-    WriteReg(h, 0x0B460, v | 0x03);
-    ReadReg(h, 0x0B460, &v);
-    printf("  After write 0x%08X: 0x%08X %s\n", v|0x03, v, ((v & 0x03) == 0x03) ? "WRITABLE!" : "PARTIAL/LOCKED");
+    /* Step 4: Restore original values */
+    printf("\n=== Step 4: Restore ===\n");
+    printf("  Writing back PT_BASE_LO = 0x%08X... ", origPtBaseLo);
+    W(0x0B608, origPtBaseLo);
+    printf("OK\n  Writing back PT_BASE_HI = 0x%08X... ", origPtBaseHi);
+    W(0x0B60C, origPtBaseHi);
+    printf("OK\n  Writing back CTX0_CNTL = 0x%08X... ", origCtx0Cntl);
+    W(0x0B460, origCtx0Cntl);
+    printf("OK\n");
 
-    /* Test L2_CNTL (0x0B360) */
-    printf("\n--- L2_CNTL (0x0B360) ---\n");
-    ReadReg(h, 0x0B360, &v);
-    printf("  Value: 0x%08X (bit0=%u = L2 %s)\n", v, v & 1, (v & 1) ? "ENABLED" : "DISABLED");
-
-    /* Summary: Try to set PT_BASE to a real address, then read it back */
-    printf("\n=== FINAL TEST: Write PT_BASE = 0x0000000012345000 ===\n");
-    WriteReg(h, 0x0B608, 0x12345000);
-    WriteReg(h, 0x0B60C, 0x00000001);
-    unsigned lo, hi;
-    ReadReg(h, 0x0B608, &lo);
-    ReadReg(h, 0x0B60C, &hi);
-    printf("  PT_BASE = 0x%08X%08X\n", hi, lo);
-    if (lo == 0 && hi == 0)
-        printf("  VERDICT: PT_BASE IS HARDWARE-LOCKED AT 0\n");
-    else if (lo == 0x12345000 && hi == 0x00000001)
-        printf("  VERDICT: PT_BASE IS WRITABLE! Page tables CAN be configured!\n");
-    else
-        printf("  VERDICT: PT_BASE is partially writable or unpredictable\n");
+    /* Verify restore */
+    ULONG finalPtLo = R(0x0B608);
+    ULONG finalPtHi = R(0x0B60C);
+    ULONG finalCtx = R(0x0B460);
+    printf("\n=== VERIFY RESTORE ===\n");
+    printf("  CTX0_CNTL  = 0x%08X (%s)\n", finalCtx, finalCtx == origCtx0Cntl ? "MATCH" : "DIFF");
+    printf("  PT_BASE_LO = 0x%08X (%s)\n", finalPtLo, finalPtLo == origPtBaseLo ? "MATCH" : "DIFF");
+    printf("  PT_BASE_HI = 0x%08X (%s)\n", finalPtHi, finalPtHi == origPtBaseHi ? "MATCH" : "DIFF");
 
     CloseHandle(h);
+    printf("\n=== Test Complete ===\n");
     return 0;
 }

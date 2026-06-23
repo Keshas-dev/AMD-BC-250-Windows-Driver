@@ -474,6 +474,7 @@ DreamV3VmDestroyContext(
     PDREAM_V3_VM_CONTEXT VmCtx;
     PLIST_ENTRY Entry;
     PDREAM_V3_VM_ALLOCATION Alloc;
+    KIRQL OldIrql;
 
     if (VmId >= AMDBC250_MAX_VM_CONTEXTS) {
         return STATUS_INVALID_PARAMETER;
@@ -486,7 +487,7 @@ DreamV3VmDestroyContext(
     }
 
     /* Free all allocations in this VM */
-    KIRQL OldIrql = KeAcquireSpinLock(&VmCtx->VmLock);
+    KeAcquireSpinLock(&VmCtx->VmLock, &OldIrql);
     
     while (!IsListEmpty(&VmCtx->AllocationList)) {
         Entry = RemoveHeadList(&VmCtx->AllocationList);

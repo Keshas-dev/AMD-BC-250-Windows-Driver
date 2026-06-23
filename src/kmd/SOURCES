@@ -1,5 +1,5 @@
 ###########################################################################
-# SOURCES file for AMD BC-250 Dream Drivers v3.0 (Kernel-Mode Driver)
+# SOURCES file for AMD BC-250 Dream Drivers v4.3 (Kernel-Mode Driver)
 # This file is used by WDK build system (BUILD.exe)
 ###########################################################################
 
@@ -10,20 +10,20 @@ DRIVERTYPE=DISPLAY
 TARGETLIBS=$(DDK_LIB_PATH)\dxgkrnl.lib
 
 SOURCES=amdbc250_dream_kmd.c \
-        amdbc250_dream_hw_init.c \
-        amdbc250_dream_vm.c \
-        amdbc250_dream_power.c \
-        amdbc250_psp.c
-\
-# PSP logic integrated into dream driver (amdbc250_psp.c compiled in above) \
-# Separate PSP driver (amdbc250_psp_driver.c) no longer needed
+    amdbc250_dream_hw_init.c \
+    amdbc250_dream_vm.c \
+    amdbc250_dream_power.c \
+    amdbc250_psp.c \
+    amdbc250_dream_fw_load.c \
+    amdbc250_dream_golden.c \
+    amdbc250_dream_hdp.c \
+    amdbc250_dream_rlc.c
 
 TARGETPATH=obj
 
 INCLUDES=..\inc
 
-C_DEFINES=$(C_DEFINES) \
-    -DAMDBC250_DREAM_V3
+C_DEFINES=$(C_DEFINES) -DAMDBC250_DREAM_V3
 
 MSC_WARNING_LEVEL=/W3 /WX
 

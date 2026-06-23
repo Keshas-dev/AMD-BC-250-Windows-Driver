@@ -93,6 +93,7 @@ typedef struct _DREAM_V3_RING_BUFFER {
     ULONG               WritePointer;
     ULONG               DoorbellOffset;
     BOOLEAN             Initialized;
+    BOOLEAN             MappedIo;           /* TRUE = MmMapIoSpace, FALSE = allocated */
     KSPIN_LOCK          Lock;
 } DREAM_V3_RING_BUFFER, *PDREAM_V3_RING_BUFFER;
 

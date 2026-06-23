@@ -7,4 +7,14 @@ set "INCLUDE=!EXTRA_INC!;!INCLUDE!"
 set "LIB=!EXTRA_LIB!;!LIB!"
 cl.exe /nologo /W3 /O2 "C:\AMD-BC-250\AMD-BC-250-Windows-Driver-main\test-tools\safe-test.c" /Fe"C:\AMD-BC-250\AMD-BC-250-Windows-Driver-main\output\safe-test.exe" user32.lib gdi32.lib dxgi.lib d3d11.lib d3d9.lib
 if %errorlevel% neq 0 (echo BUILD FAILED & exit /b %errorlevel%)
+
+cl.exe /nologo /O2 "C:\AMD-BC-250\AMD-BC-250-Windows-Driver-main\test-tools\sdma-selftest.c" /Fe"C:\AMD-BC-250\AMD-BC-250-Windows-Driver-main\output\sdma-selftest.exe" user32.lib
+if %errorlevel% neq 0 (echo BUILD FAILED & exit /b %errorlevel%)
+
+cl.exe /nologo /O2 "C:\AMD-BC-250\AMD-BC-250-Windows-Driver-main\test-tools\sdma-wptrtest.c" /Fe"C:\AMD-BC-250\AMD-BC-250-Windows-Driver-main\output\sdma-wptrtest.exe" user32.lib
+if %errorlevel% neq 0 (echo BUILD FAILED & exit /b %errorlevel%)
+
+cl.exe /nologo /O2 "C:\AMD-BC-250\AMD-BC-250-Windows-Driver-main\test-tools\gcvm-pt-test.c" /Fe"C:\AMD-BC-250\AMD-BC-250-Windows-Driver-main\output\gcvm-pt-test.exe" user32.lib
+if %errorlevel% neq 0 (echo BUILD FAILED & exit /b %errorlevel%)
+
 echo BUILD OK
