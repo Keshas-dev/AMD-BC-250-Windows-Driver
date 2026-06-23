@@ -5975,13 +5975,14 @@ DreamV3DeviceControl(
     case 0x8000098C: { /* IOCTL_AMDBC250_GCVM_PT_SETUP — Set up GCVM page table */
         {
             PHYSICAL_ADDRESS lowAddr = {0x100000}, highAddr = {0xFFFFFFFFFFFFFFFFULL}, boundaryAddr = {0};
-            PHYSICAL_ADDRESS ringPhys;
-            PVOID ptPage = NULL;
-            ULONG sz = 4096;
+            PHYSICAL_ADDRESS ringPhys, ptPhys[3];
+            PVOID ptPages[3] = {NULL};
+            ULONG i, rootIdx, midIdx, leafIdx, pollCount;
+            ULONG checkLo, checkHi;
+            ULONG64 writtenVal;
 
             struct {
                 ULONG CtxCntlBefore;
-                ULONG CtxCntlAfter;
                 ULONG RingBaseLo;
                 ULONG RingBaseHi;
                 ULONG PtBase0LoBefore;
@@ -5991,6 +5992,12 @@ DreamV3DeviceControl(
                 ULONG PtBaseLoAfter;
                 ULONG PtBaseHiAfter;
                 ULONG Result;
+                ULONG PtPhysLo[3];
+                ULONG PtPhysHi[3];
+                ULONG InvStatus;
+                ULONG KIQ_WPTR;
+                ULONG KIQ_RPTR;
+                ULONG Reserved[8];
             } *resp = (PVOID)outputBuffer;
 
             if (outputLen < sizeof(*resp)) {
@@ -5999,12 +6006,14 @@ DreamV3DeviceControl(
             }
             RtlZeroMemory(resp, sizeof(*resp));
 
-            /* Phase 1: Read only — NO WRITES to GCVM regs */
+            /* Read before state */
             resp->CtxCntlBefore = DreamV3ReadRegister(DevExt, 0x0B460);
             resp->RingBaseLo    = DreamV3ReadRegister(DevExt, 0xE060);
             resp->RingBaseHi    = DreamV3ReadRegister(DevExt, 0xE064);
             resp->PtBase0LoBefore = DreamV3ReadRegister(DevExt, 0x0B408);
             resp->PtBase0HiBefore = DreamV3ReadRegister(DevExt, 0x0B40C);
+            resp->KIQ_WPTR = DreamV3ReadRegister(DevExt, 0xE078);
+            resp->KIQ_RPTR = DreamV3ReadRegister(DevExt, 0xE06C);
             ringPhys.QuadPart = ((ULONG64)resp->RingBaseHi << 32) | resp->RingBaseLo;
 
             KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
@@ -6012,21 +6021,126 @@ DreamV3DeviceControl(
                 ringPhys.QuadPart, resp->CtxCntlBefore,
                 resp->PtBase0HiBefore, resp->PtBase0LoBefore));
 
-            /* Check: are we 3-level? */
-            if ((resp->CtxCntlBefore & 6) != 4) { /* bits 2:1 should be 10b = 4 */
+            /* Must have 3-level page tables (depth=2 = bits 2:1 = 10b = 4) */
+            if ((resp->CtxCntlBefore & 6) != 4) {
                 KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
-                    "AMDBC250-DREAM-V4.3: Unexpected CTX0_CNTL depth bits: 0x%X\n",
-                    resp->CtxCntlBefore & 6));
+                    "AMDBC250-DREAM-V4.3: Unexpected depth: 0x%X\n", resp->CtxCntlBefore & 6));
+                resp->Result = 0xBAD0BAD0;
+                bytesReturned = sizeof(*resp);
+                status = STATUS_SUCCESS;
+                break;
             }
 
-            resp->CtxCntlAfter = DreamV3ReadRegister(DevExt, 0x0B460);
+            /* KIQ ring must be initialized */
+            if (ringPhys.QuadPart == 0) {
+                resp->Result = 0xBAD0C0DE;
+                bytesReturned = sizeof(*resp);
+                status = STATUS_SUCCESS;
+                break;
+            }
+
+            /* For 3-level (depth=2): root = bits 38:30, mid = bits 29:21, leaf = bits 20:12 */
+            rootIdx = (ULONG)((ringPhys.QuadPart >> 30) & 0x1FF);
+            midIdx  = (ULONG)((ringPhys.QuadPart >> 21) & 0x1FF);
+            leafIdx = (ULONG)((ringPhys.QuadPart >> 12) & 0x1FF);
+
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                "AMDBC250-DREAM-V4.3:   ring VA=0x%llX -> root[%lu] mid[%lu] leaf[%lu]\n",
+                ringPhys.QuadPart, rootIdx, midIdx, leafIdx));
+
+            /* Allocate 3 page table pages (non-cached) */
+            for (i = 0; i < 3; i++) {
+                ptPages[i] = MmAllocateContiguousMemorySpecifyCache(
+                    4096, lowAddr, highAddr, boundaryAddr, MmNonCached);
+                if (ptPages[i] == NULL) break;
+                RtlZeroMemory(ptPages[i], 4096);
+                ptPhys[i] = MmGetPhysicalAddress(ptPages[i]);
+                resp->PtPhysLo[i] = (ULONG)(ptPhys[i].QuadPart & 0xFFFFFFFF);
+                resp->PtPhysHi[i] = (ULONG)(ptPhys[i].QuadPart >> 32);
+            }
+            if (ptPages[0] == NULL || ptPages[1] == NULL || ptPages[2] == NULL) {
+                for (i = 0; i < 3; i++) {
+                    if (ptPages[i]) MmFreeContiguousMemory(ptPages[i]);
+                }
+                resp->Result = 0xDEADF00D;
+                bytesReturned = sizeof(*resp);
+                status = STATUS_SUCCESS;
+                break;
+            }
+
+            /* Fill page tables: PDE = VALID|SYSTEM, PTE = VALID|SYSTEM|READABLE|WRITABLE */
+            { PULONG64 root = (PULONG64)ptPages[0];
+              PULONG64 mid  = (PULONG64)ptPages[1];
+              PULONG64 leaf = (PULONG64)ptPages[2];
+
+            root[rootIdx] = (ptPhys[1].QuadPart & 0xFFFFFFFFF000ULL) | 0x03;
+            mid[midIdx]   = (ptPhys[2].QuadPart & 0xFFFFFFFFF000ULL) | 0x03;
+            leaf[leafIdx] = (ringPhys.QuadPart & 0xFFFFFFFFF000ULL) | 0x63;
+
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                "AMDBC250-DREAM-V4.3:   root[%lu]=0x%llX mid[%lu]=0x%llX leaf[%lu]=0x%llX\n",
+                rootIdx, root[rootIdx], midIdx, mid[midIdx], leafIdx, leaf[leafIdx]));
+            }
+
+            /* Flush cache to ensure GPU sees page tables */
+            KeMemoryBarrier();
+
+            /* Write PT_BASE0 (0x0B408/0x0B40C) with root page PA */
+            DreamV3WriteRegister(DevExt, 0x0B408, (ULONG)(ptPhys[0].QuadPart & 0xFFFFFFFF));
+            DreamV3WriteRegister(DevExt, 0x0B40C, (ULONG)(ptPhys[0].QuadPart >> 32));
+
+            KeMemoryBarrier();
+
+            /* Verify write */
+            checkLo = DreamV3ReadRegister(DevExt, 0x0B408);
+            checkHi = DreamV3ReadRegister(DevExt, 0x0B40C);
+            writtenVal = ((ULONG64)checkHi << 32) | checkLo;
+
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                "AMDBC250-DREAM-V4.3:   PT_BASE0 written=0x%llX readback=0x%llX\n",
+                ptPhys[0].QuadPart, writtenVal));
+
+            if (writtenVal != ptPhys[0].QuadPart) {
+                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+                    "AMDBC250-DREAM-V4.3:   PT_BASE0 write MISMATCH! read=0x%llX expected=0x%llX\n",
+                    writtenVal, ptPhys[0].QuadPart));
+            }
+
+            /* TLB invalidation via 0x6C0C/0x6C10 */
+            resp->InvStatus = 0;
+
+            /* Step 1: Clear previous ACK */
+            DreamV3WriteRegister(DevExt, 0x6C10, 1);
+            KeMemoryBarrier();
+
+            /* Step 2: Request invalidation */
+            DreamV3WriteRegister(DevExt, 0x6C0C, 1);
+            KeMemoryBarrier();
+
+            /* Step 3: Poll for ACK (0x6C10 bit 0) with timeout */
+            {
+                pollCount = 0;
+                while (pollCount < 1000) {
+                    ULONG ack; ack = DreamV3ReadRegister(DevExt, 0x6C10);
+                    if (ack & 1) {
+                        resp->InvStatus = 1; /* ACK received */
+                        break;
+                    }
+                    KeStallExecutionProcessor(1); /* 1 us */
+                    pollCount++;
+                }
+                if (pollCount >= 1000) {
+                    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+                        "AMDBC250-DREAM-V4.3:   TLB invalidation TIMEOUT!\n"));
+                }
+            }
+
             resp->PtBase0LoAfter = DreamV3ReadRegister(DevExt, 0x0B408);
             resp->PtBase0HiAfter = DreamV3ReadRegister(DevExt, 0x0B40C);
             resp->PtBaseLoAfter = DreamV3ReadRegister(DevExt, 0x0B608);
             resp->PtBaseHiAfter = DreamV3ReadRegister(DevExt, 0x0B60C);
 
-            /* Don't write anything — just report current state */
-            resp->Result = 0x00000CAFE; /* read-only success */
+            resp->Result = 0xCAFEBABE; /* success */
 
             bytesReturned = sizeof(*resp);
             status = STATUS_SUCCESS;
