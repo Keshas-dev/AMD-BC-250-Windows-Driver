@@ -6048,11 +6048,14 @@ DreamV3DeviceControl(
                 "AMDBC250-DREAM-V4.3:   ring VA=0x%llX -> root[%lu] mid[%lu] leaf[%lu]\n",
                 ringPhys.QuadPart, rootIdx, midIdx, leafIdx));
 
-            /* Allocate 3 page table pages (non-cached) */
+            /* Reuse or allocate 3 page table pages (non-cached) */
             for (i = 0; i < 3; i++) {
-                ptPages[i] = MmAllocateContiguousMemorySpecifyCache(
-                    4096, lowAddr, highAddr, boundaryAddr, MmNonCached);
-                if (ptPages[i] == NULL) break;
+                if (DevExt->GcvmPtPages[i] == NULL) {
+                    DevExt->GcvmPtPages[i] = MmAllocateContiguousMemorySpecifyCache(
+                        4096, lowAddr, highAddr, boundaryAddr, MmNonCached);
+                    if (DevExt->GcvmPtPages[i] == NULL) break;
+                }
+                ptPages[i] = DevExt->GcvmPtPages[i];
                 RtlZeroMemory(ptPages[i], 4096);
                 ptPhys[i] = MmGetPhysicalAddress(ptPages[i]);
                 resp->PtPhysLo[i] = (ULONG)(ptPhys[i].QuadPart & 0xFFFFFFFF);
@@ -6060,7 +6063,11 @@ DreamV3DeviceControl(
             }
             if (ptPages[0] == NULL || ptPages[1] == NULL || ptPages[2] == NULL) {
                 for (i = 0; i < 3; i++) {
-                    if (ptPages[i]) MmFreeContiguousMemory(ptPages[i]);
+                    if (DevExt->GcvmPtPages[i]) {
+                        MmFreeContiguousMemory(DevExt->GcvmPtPages[i]);
+                        DevExt->GcvmPtPages[i] = NULL;
+                    }
+                    ptPages[i] = NULL;
                 }
                 resp->Result = 0xDEADF00D;
                 bytesReturned = sizeof(*resp);
