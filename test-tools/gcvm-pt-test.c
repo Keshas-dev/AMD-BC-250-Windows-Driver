@@ -29,6 +29,14 @@ static ULONG R(ULONG off) {
     return *(ULONG*)(buf+4);
 }
 
+static void GpuWrite(ULONG offset, ULONG value) {
+    UCHAR buf[8] = {0};
+    *(ULONG*)(buf+0) = offset;
+    *(ULONG*)(buf+4) = value;
+    DWORD br = 0;
+    DeviceIoControl(hGpu, IOCTL_GPU_WRITE, buf, 8, NULL, 0, &br, NULL);
+}
+
 static void GpuInit(void) {
     UCHAR init[32] = {0};
     *(unsigned __int64*)(init+0) = 0xFE800000ULL;
@@ -117,20 +125,6 @@ int main(void) {
     printf("  KIQ_WPTR     (0xE078) = 0x%08X\n", kiqWptr);
     printf("  KIQ_RPTR     (0xE06C) = 0x%08X\n", kiqRptr);
 
-    if (kiqBaseLo == 0) {
-        printf("\n*** KIQ still not initialized after NOP. Trying more submits...\n");
-        for (int i = 0; i < 5; i++) {
-            PspKiqNop();
-            Sleep(100);
-            kiqBaseLo = R(0xE060);
-            if (kiqBaseLo) {
-                kiqBaseHi = R(0xE064);
-                printf("  KIQ init triggered after submit #%d: BASE=0x%08X_%08X\n", i+1, kiqBaseHi, kiqBaseLo);
-                break;
-            }
-        }
-    }
-
     /* Read full before state */
     printf("\n--- Before ---\n");
     printf("  CTX0_CNTL    (0xB460) = 0x%08X\n", R(0x0B460));
@@ -178,15 +172,31 @@ int main(void) {
         }
     }
 
-    printf("\n--- After (direct read) ---\n");
-     printf("  CTX0_CNTL    (0xB460) = 0x%08X\n", R(0x0B460));
-     printf("  PT_BASE0_LO  (0xB408) = 0x%08X\n", R(0x0B408));
-     printf("  PT_BASE0_HI  (0xB40C) = 0x%08X\n", R(0x0B40C));
-     printf("  KIQ_WPTR     (0xE078) = 0x%08X\n", R(0xE078));
-     printf("  KIQ_RPTR     (0xE06C) = 0x%08X\n", R(0xE06C));
+    /* Read HQD registers written by PSP */
+    printf("\n--- HQD Status (verify PSP proxy writes) ---\n");
+    printf("  HQD_ACTIVE   (0xDAC0) = 0x%08X (expected 1 if PSP wrote it)\n", R(0xDAC0));
+    printf("  HQD_PQ_CNTL  (0xDAFC) = 0x%08X\n", R(0xDAFC));
+    printf("  ME_CNTL      (0x4A74) = 0x%08X (expected 0 if PSP cleared halt)\n", R(0x4A74));
 
-     if (hPsp != INVALID_HANDLE_VALUE) CloseHandle(hPsp);
-     CloseHandle(hGpu);
-     printf("\n=== Done ===\n");
-return 0;
+    /* Test: Try to write HQD_ACTIVE directly via GPU driver */
+    printf("\n--- Testing direct HQD_ACTIVE write ---\n");
+    ULONG hqdBefore = R(0xDAC0);
+    printf("  HQD_ACTIVE before = 0x%08X, writing 1...\n", hqdBefore);
+    /* Skip HQD_ACTIVE write - may be write-protected without firmware */
+    /* GpuWrite(0xDAC0, 1); */
+    /* Sleep(10); */
+    ULONG hqdAfter = R(0xDAC0);
+    printf("  HQD_ACTIVE after  = 0x%08X\n", hqdAfter);
+
+    printf("\n--- After (direct read) ---\n");
+    printf("  CTX0_CNTL    (0xB460) = 0x%08X\n", R(0x0B460));
+    printf("  PT_BASE0_LO  (0xB408) = 0x%08X\n", R(0x0B408));
+    printf("  PT_BASE0_HI  (0xB40C) = 0x%08X\n", R(0x0B40C));
+    printf("  KIQ_WPTR     (0xE078) = 0x%08X\n", R(0xE078));
+    printf("  KIQ_RPTR     (0xE06C) = 0x%08X\n", R(0xE06C));
+
+    if (hPsp != INVALID_HANDLE_VALUE) CloseHandle(hPsp);
+    CloseHandle(hGpu);
+    printf("\n=== Done ===\n");
+    return 0;
 }

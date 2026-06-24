@@ -17,4 +17,7 @@ if %errorlevel% neq 0 (echo BUILD FAILED & exit /b %errorlevel%)
 cl.exe /nologo /O2 "C:\AMD-BC-250\AMD-BC-250-Windows-Driver-main\test-tools\gcvm-pt-test.c" /Fe"C:\AMD-BC-250\AMD-BC-250-Windows-Driver-main\output\gcvm-pt-test.exe" user32.lib
 if %errorlevel% neq 0 (echo BUILD FAILED & exit /b %errorlevel%)
 
+cl.exe /nologo /O2 "C:\AMD-BC-250\AMD-BC-250-Windows-Driver-main\test-tools\test-load-cp-fw.c" /Fe"C:\AMD-BC-250\AMD-BC-250-Windows-Driver-main\output\test-load-cp-fw.exe" user32.lib
+if %errorlevel% neq 0 (echo BUILD FAILED & exit /b %errorlevel%)
+
 echo BUILD OK
