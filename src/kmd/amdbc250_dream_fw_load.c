@@ -214,8 +214,11 @@ DreamV3LoadSingleFirmware(
         "AMDBC250-FW: Firmware PA=0x%llX size=%u\n", FwPa.QuadPart, FwSize));
     
     __try {
-        /* Step 1: Halt ALL CP engines (ME + PFP + CE) */
+        /* Step 1: Halt ALL engines */
         BAR5_U32(REG_CP_ME_CNTL) = ME_CNTL__ME_HALT | ME_CNTL__PFP_HALT | ME_CNTL__CE_HALT;
+        if (FwType == FW_TYPE_MEC) {
+            BAR5_U32(REG_MEC_ME1_CNTL) = 1;  /* Halt MEC ME1 */
+        }
         KeStallExecutionProcessor(10);
         
         /* Verify halt */
@@ -252,6 +255,14 @@ DreamV3LoadSingleFirmware(
                 "AMDBC250-FW: CE IC_BASE=0x%08X%08X\n", IcBaseHi, IcBaseLo));
             break;
             
+        case FW_TYPE_MEC:
+            BAR5_U32(REG_MEC_IC_CNTL) = IC_CNTL__ENABLE;
+            BAR5_U32(REG_MEC_IC_LO) = IcBaseLo;
+            BAR5_U32(REG_MEC_IC_HI) = IcBaseHi;
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                "AMDBC250-FW: MEC IC_BASE=0x%08X%08X\n", IcBaseHi, IcBaseLo));
+            break;
+
         default:
             KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
                 "AMDBC250-FW: Unknown firmware type %u\n", FwType));
@@ -270,9 +281,10 @@ DreamV3LoadSingleFirmware(
         /* Select UCODE registers based on firmware type */
         UINT32 UcodeAddrReg, UcodeDataReg;
         switch (FwType) {
-        case FW_TYPE_ME:  UcodeAddrReg = REG_ME_UCODE_ADDR;  UcodeDataReg = REG_ME_UCODE_DATA;  break;
-        case FW_TYPE_PFP: UcodeAddrReg = REG_PFP_UCODE_ADDR; UcodeDataReg = REG_PFP_UCODE_DATA; break;
-        case FW_TYPE_CE:  UcodeAddrReg = REG_CE_UCODE_ADDR;  UcodeDataReg = REG_CE_UCODE_DATA;  break;
+        case FW_TYPE_ME:
+        case FW_TYPE_MEC:  UcodeAddrReg = REG_ME_UCODE_ADDR;  UcodeDataReg = REG_ME_UCODE_DATA;  break;
+        case FW_TYPE_PFP:  UcodeAddrReg = REG_PFP_UCODE_ADDR; UcodeDataReg = REG_PFP_UCODE_DATA; break;
+        case FW_TYPE_CE:   UcodeAddrReg = REG_CE_UCODE_ADDR;  UcodeDataReg = REG_CE_UCODE_DATA;  break;
         default: Status = STATUS_INVALID_PARAMETER; goto cleanup;
         }
         
@@ -316,6 +328,10 @@ DreamV3LoadSingleFirmware(
         case FW_TYPE_CE:
             /* Unhalt CE only */
             BAR5_U32(REG_CP_ME_CNTL) = ME_CNTL__ME_HALT | ME_CNTL__PFP_HALT;
+            break;
+        case FW_TYPE_MEC:
+            /* Unhalt MEC ME1 */
+            BAR5_U32(REG_MEC_ME1_CNTL) = 0;
             break;
         }
         KeStallExecutionProcessor(10);

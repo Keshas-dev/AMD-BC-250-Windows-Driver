@@ -426,6 +426,8 @@ typedef struct _DREAM_V3_DEVICE_EXTENSION {
 
     /* GCVM Page Table Setup allocations */
     PVOID               GcvmPtPages[3];
+    PVOID               GcvmRingBuf;        /* KIQ ring buffer page (4KB) */
+    ULONG64             GcvmRingBufPa;      /* Physical address of ring buffer */
 
 } DREAM_V3_DEVICE_EXTENSION, *PDREAM_V3_DEVICE_EXTENSION;
 

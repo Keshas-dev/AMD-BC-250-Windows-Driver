@@ -103,66 +103,100 @@ Formula: `BAR5_offset = GC_BASE(0x1260) + Linux_DWORD_offset * 4`
 - Useful but potentially stale docs: `docs\REGISTER-MAP-BC250.md`, `docs\PSP-PROXY-BYPASS.md`, and `docs\RING-INIT-STATUS.md`.
 - Trust: `docs\BC250-LINUX-IP-MAP.md` (Linux kernel source-verified IP base addresses).
 
-## Progress Summary (2026-06-23) — MILESTONE ACHIEVED: GCVM PT_SETUP Works!
+## Code Review (2026-06-24) — 17 Bugs Found
 
-### Milestone: First Successful GCVM Page Table Setup
-On 2026-06-23 we achieved the first successful GCVM page table installation on BC-250 hardware:
+### CRITICAL Bugs
+| # | File | Description |
+|---|------|-------------|
+| 1 | kmd.c:3810,3838 | **Integer overflow in READ/WRITE_REG bounds check** — `RegisterOffset + 4` wraps to 0 if offset >= `0xFFFFFFFC`, bypassing bounds check |
+| 2 | hw.h:360, PspKiq.c:57 | **RLC_CP_SCHEDULERS at 0xECA1 is NOT 4-byte aligned** (0xECA1 & 3 = 1) — writes go to wrong register or cause bus error |
+| 3 | kmd.c:6117-6142 | **GCVM page table pages double-freed** — error path frees existing pages from prior successful call while GPU may still use them |
+| 4 | ioctl.h:420, PspCore.c:17 | **IOCTL name collision** — `IOCTL_AMDBC250_BAR5_READ_PROXY` = 0x80000BCC (CTL_CODE) in GPU driver but = 0x900 (raw) in PSP driver; same name, different value |
 
-1. **PSP KIQ_BASE programmed via GPU proxy** — KIQ_BASE_LO(0xE060) = 0x7E511000 ✅
-2. **GCVM PT_BASE0 (0x0B408) written** — from BIOS garbage (0x087ECCC4) to valid root PA (0x7E510000) ✅
-3. **Page tables allocated** — root(0x7E510000)→mid(0x7E50F000)→leaf(0x7E50E000) identity-mapping ring PA ✅
-4. **TLB invalidation succeeded** — InvStatus=1 (ACK received) ✅
-5. **IOCTL returned 0xCAFEBABE** — full success path ✅
+### HIGH Bugs
+| # | File | Description |
+|---|------|-------------|
+| 5 | kmd.c:5419 | **REG_DUMP reads GRBM_GFX_INDEX at wrong offset 0x33C4** (should be 0x34D0) |
+| 6 | hw.h:453-454, vm.c:755-762 | **GCVM invalidate regs in hw.h (0x0B51C/0x0B520) don't match working code (0x6C0C/0x6C10)** — any code using hw.h definitions writes to dead registers |
+| 7 | kmd.c:3570,3601,5412 | **GPU_ID read from 3 different offsets** (0x0000, 0x3840, 0x0E08) — no consistent definition |
+| 8 | kmd.c:5491-5965 | **KIQ_NOP_TEST/KIQ_BIOS_RING_SUBMIT lack __try/__except** — access violation if MmioVirtualBase is NULL |
 
-This was the first time anyone has successfully set up GPU VM page tables on this hardware from an OS driver.
+### MEDIUM Bugs
+| # | File | Description |
+|---|------|-------------|
+| 9 | PspKiq.c:47-60 | `PspGpuProxyWriteRegister` return value **ignored in all callers** |
+| 10 | kmd.c:3745 | **SEND_PM4 ring wrap check has 32-bit overflow** — large WPtr wraps past check |
+| 11 | kmd.c:6035-6214 | **GCVM_PT_SETUP uses raw offsets, no MmioSize bounds check** |
+| 12 | PspKiq.c:86-94 | **Race condition on g_GpuDriverHandle proxy init** — no lock |
+| 13 | kmd.c:5221-5224 | **LOAD_CP_FW halts ALL engines when only MEC needs loading** |
 
-### Root Cause of KIQ_BASE=0 (Two PSP Guard Checks Blocking Proxy Path)
-On Windows 11 26100, `MmMapIoSpace` for GPU BAR5 from the PSP driver **fails** (different PCI device). The PSP driver falls back to `PspGpuProxyInit` which opens `g_GpuDriverHandle` (IOCTL path via `ZwDeviceIoControlFile` to GPU driver). But the PSP KIQ init code had **two guard checks** that blocked the proxy path:
+### LOW Bugs
+| # | File | Description |
+|---|------|-------------|
+| 14 | kmd.h:428-430 | **GCVM page table pages never freed on driver unload** |
+| 15 | kmd.c:5469 | REG_DUMP reads SDMA0_CNTL at 0x10040 (hw.h says 0xE018) |
+| 16 | kmd.c:5217 | MEC_ME1_HALT bit (bit0) may be inverted |
+| 17 | kmd.c:5472-5479 | `CpRb1BaseProbe` field mislabels GFX ring0 registers |
 
-1. **PspKiqInit line 163**: `if (!devExt->MmioBase)` — MmioBase stays NULL because the INIT_HW handler `break`s before setting it on the proxy path. Fix: added `g_GpuDriverHandle == NULL`.
-2. **PspKiqProgramHwRegisters line 64**: `if (!g_Bar5Mapping && !devExt->GpuMmioBase)` — both NULL when proxy is active. Fix: added `g_GpuDriverHandle == NULL`. Also added `extern HANDLE g_GpuDriverHandle` to `PspCore.h`.
+## Linux Register Comparison (2026-06-24)
 
-### What Was Built This Session
+### KIQ Model — FUNDAMENTAL DIFFERENCE
+- **Our driver** uses KIQ_BASE/CNTL/RPTR/WPTR at 0xE060-0xE078 — **not in Linux GFX10 headers at all**
+- **Linux** uses CP_HQD_* registers (MQD model) via `gfx_v10_0_kiq_init_register()` for KIQ
+- Our KIQ_BASE approach works on BC-250 (KIQ_BASE_LO writable) but is BC-250-specific
 
-**GPU Driver (amdbc250_dream_kmd.c):**
-- `GCVM_PT_SETUP` IOCTL (0x8000098C): allocates 3-level (depth=2) page table with `MmNonCached` pages, writes PDE/PTE for KIQ ring PA identity mapping at PT_BASE0 (0x0B408/0x0B40C), triggers TLB invalidation via 0x6C0C/0x6C10 protocol. Returns 56 bytes of state.
-- **5 bugs fixed by code review**: (1) MDL leak in ALLOC_VIDMEM, (2) RegisterOffset bounds check in READ/WRITE_REG, (3) EOP fence overflow in PSP KIQ, (4) WGP bit range decode error, (5) FREE_VIDMEM wrong error code.
-- `prebuild-check.ps1` integrated into `build.bat`.
+### GRBM Selection — Linux Uses Different Register
+- **Our driver** writes `GRBM_GFX_INDEX` (0x34D0) for ME/PIPE/QUEUE select
+- **Linux** writes `mmGRBM_GFX_CNTL` (0x0dc2) via `nv_grbm_select()`
+- 0x34D0 confirmed writable on BC-250 but may not be the intended register
 
-**PSP Driver (PspDriver.sys):**
-- NBIO range check fixed: `0xC000-0xFFFF` → `0xC000-0xC1FF` to not catch KIQ/HQD registers
-- PspKiqInit guard: allows proxy path via `g_GpuDriverHandle`
-- PspKiqProgramHwRegisters guard: allows proxy path via `g_GpuDriverHandle`
-- PspCore.h: added `extern HANDLE g_GpuDriverHandle`
+### IC_BASE Registers — MATCH
+- All CP IC_BASE registers (0x17360-0x17388) match Linux: `BAR5 = GC_BASE(0x1260) + mm*4` ✅
 
-### Files Modified
-- `src/kmd/amdbc250_dream_kmd.c` — GCVM PT_SETUP IOCTL (line ~5975), 5 bug fixes
-- `test-tools/gcvm-pt-test.c` — Full KIQ+GCVM test suite (PSP device name, INIT_HW, KIQ submit, PT_SETUP)
-- `build.bat` — Added pre-build validation
-- `prebuild-check.ps1` — 6 validation checks
-- `C:\AMD-BC-250\AMD-BC-250-PSP-Windows-Driver\src\driver\PspDriver.c` — NBIO range check
-- `C:\AMD-BC-250\AMD-BC-250-PSP-Windows-Driver\src\driver\PspKiq.c` — Two guard fixes
-- `C:\AMD-BC-250\AMD-BC-250-PSP-Windows-Driver\src\driver\PspCore.h` — Added extern handle
-- `AGENTS.md` — Updated with all findings
+### Halt Bits — MATCH
+- ME_HALT=bit28, PFP_HALT=bit30, CE_HALT=bit29 — identical to Linux ✅
+- CP_MEC_CNTL at 0x21B5 matches Sienna_Cichlid override ✅
 
-### Key Hardware Discoveries
-- **PT_BASE0 (0x0B408) IS the GCVM page table base register** — confirmed by BSOD 0x1A and subsequent successful write.
-- **PT_BASE (0x0B608/0x6C8C) is HW-LOCKED to 0** — NOT used for translation.
-- **CONTEXT0_CNTL (0x0B460)**: bit 0=ENABLE, bits 2:1=10b = 3-level depth=2. Read-modify-write required.
-- **TLB invalidation protocol**: write 1 to 0x6C10 (clear ACK), write 1 to 0x6C0C (request), poll 0x6C10 bit 0 (wait for ACK). Works.
-- **System aperture disabled** in read-only L2_CNTL (bit 8=0). Cannot enable.
-- **NBIO blocks 0xC000+ physical register writes** but GC_BASE-shifted aliases (0xE060, 0xE078) bypass it.
-- **GRBM_GFX_INDEX (0x34D0) writes still dangerous** — but ME=1 (KIQ) seems to exist on this hardware (no hang yet).
+### GCVM Registers — Partial Match
+- Our empirically verified offsets (0xB360-0xB60C) do NOT match `GC_BASE + mm*4` formula
+- GCVM registers are in a different address block on BC-250; keep our verified values
 
-### What's Next
-1. **Fix PSP crash (0x50) after PT_SETUP + multiple KIQ submits** — likely a memory management issue (page table pages allocated but leaked, or WPTR poll page access causing page fault).
-2. **Make PT_SETUP test stable** — remove the 10-submit polling loop to avoid the crash.
-3. **Check if KIQ_RPTR advances** — now that GCVM page tables are active, the CP should be able to read the ring. RPTR=0 may mean the CP needs a "kick" (WPTR register write to HW, or HQD_ACTIVE activation).
-4. **Investigate CP wake-up** — check ME_CNTL halt bits, try writing 0 to clear them, verify queue activation.
-5. **Long-term: execute meaningful PM4 commands** (WRITE_DATA to SCRATCH, compute dispatch, DMA).
+### CP_HQD_* Registers (0xDAC0-0xDBFF) — NBIO-BLOCKED
+- All HQD writes at 0xDAC0+ range silently dropped by NBIO on BC-250
+- Linux uses these for KIQ init; they are unusable on our hardware
+- KIQ alias at 0xE060+ is the only usable path
+
+### RLC_CP_SCHEDULERS (0xECA1) — Confirmed Correct for Sienna_Cichlid
+- Value matches Sienna_Cichlid override `mmRLC_CP_SCHEDULERS_Sienna_Cichlid = 0x4ca1`
+- But 0xECA1 mod 4 = 1 means offset is NOT 4-byte aligned — empirically found at 0xECAA by probe
+
+## Progress Summary (2026-06-24) — KIQ RPTR Still 0
+
+### Achievements Since Last Session
+- **GRBM_GFX_INDEX (0x34D0) confirmed writable** — selects ME=1 correctly for KIQ alias access
+- **HQD registers at 0xDAC0+ are NBIO-BLOCKED for writes** — ACTIVE=1, PQ_BASE, PQ_CONTROL, VMID writes all return 0. Only PERSISTENT_STATE bit 0 sticks
+- **KIQ alias at 0xE060+ writability mapped**: WRITABLE → BASE_LO (0xE060), RPTR (0xE06C), DOORBELL (0xE074), WPTR (0xE078), VMID (0xE07C), ACTIVE (0xE080). READ-ONLY → SIZE (0xE068, reads 0), PQ_CTL (0xE070, reads 0x81818181)
+- **MEC firmware loaded successfully** via extended LOAD_CP_FW IOCTL (type 4) — MEC_ME1_CNTL=0 (unhalted) after load. MEC firmware (cyan_skillfish2_mec.bin) version 0x90
+- **CONTEXT0_CNTL=0x04 test** (PT_DISABLE, DEFAULT_PAGE=system) did NOT advance RPTR
+- **Previous "partial HQD write" (0xDEADBEEF→0x0000BEE0) was misleading** — likely stale/aliased readback
+- **System hung** requiring hard reboot — likely from CONTEXT0_CNTL write (0x04) while engine active
+
+### Remaining Blockers for KIQ Ring Processing
+1. **KIQ_RPTR stays 0** — even with MEC loaded, KIQ_ACTIVE=1, KIQ_BASE=valid ring (NOP at offset 0), KIQ_WPTR=1/4, KIQ_SIZE=0 (read-only), KIQ_PQ_CTL=0x81818181 (read-only)
+2. **KIQ_SIZE=0 read-only** at 0xE068 — hardware thinks ring has 0 bytes; CP may refuse to process
+3. **HQD registers NBIO-blocked** — cannot configure queue via standard GFX10 path
+4. **RLC_CP_SCHEDULERS at 0xECA1 is misaligned** — empirically found at 0xECAA but that's also not 4-byte aligned (0xECAA & 3 = 2)
+5. **May need KIU firmware** — KIQ handler may be a separate microcode component within MEC, not loaded by standard MEC firmware load
+
+### Next Steps
+1. **Verify KIU firmware presence** — check if KIU needs separate loading (compare with Linux gfx_v10_0.c KIQ init)
+2. **Try VRAM ring allocation** — if system aperture is real blocker, find VRAM base via BAR2 or register
+3. **Find correct RLC_CP_SCHEDULERS offset** — scan 4-byte-aligned addresses around 0xEC00-0xEF00
+4. **Add GRBM_GFX_CNTL register** (Linux uses this for ME/PIPE/QUEUE select, not GRBM_GFX_INDEX)
+5. **Test KIQ with LOAD_CP_FW only** — skip PSP init, load all firmware manually first
 
 ### Safety Notes
-- **DO NOT WRITE** GRBM_GFX_INDEX (0x34D0) — instant black screen on non-existent ME.
-- **ALWAYS save/restore** PT_BASE0 before writing — some configs are destroyed by 0xDEADBEEF.
-- GCVM page table pages are LEAKED (not freed) on each IOCTL call — no tracking pointer in device extension.
-- PSP proxy crash (0x50) likely from rapid KIQ submits + page table setup. Debug with single submits only.
+- **40 CU unlock code removed** — wrote to wrong offset (0x3264 instead of 0x44C4=GC_BASE+0x3264), caused freeze
+- **GRBM_GFX_INDEX (0x34D0) IS safe to write** selecting ME=1 — confirmed by multiple runs
+- **CONTEXT0_CNTL writes may hang system** — PT_DISABLE while engine active caused last freeze
+- **ALWAYS save/restore** PT_BASE0 before writing — some configs destroyed by 0xDEADBEEF

@@ -104,6 +104,7 @@ int main(int argc, char *argv[]) {
             if (_stricmp(argv[i], "ME") == 0 || _stricmp(argv[i], "1") == 0) fwType = 1;
             else if (_stricmp(argv[i], "PFP") == 0 || _stricmp(argv[i], "2") == 0) fwType = 2;
             else if (_stricmp(argv[i], "CE") == 0 || _stricmp(argv[i], "3") == 0) fwType = 3;
+            else if (_stricmp(argv[i], "MEC") == 0 || _stricmp(argv[i], "4") == 0) fwType = 4;
             else { printf("ERROR: Unknown firmware type '%s'\n", argv[i]); return 1; }
         } else if (argv[i][0] != '-') {
             fwPath = argv[i];
@@ -111,18 +112,21 @@ int main(int argc, char *argv[]) {
     }
 
     if (!fwPath) {
-        printf("Usage: %s <firmware.bin> [-t ME|PFP|CE]\n", argv[0]);
+        printf("Usage: %s <firmware.bin> [-t ME|PFP|CE|MEC]\n", argv[0]);
         printf("\nFirmware types:\n");
         printf("  ME   (or 1) - Graphics ME firmware (command processor)\n");
         printf("  PFP  (or 2) - Pre-fetch parser firmware\n");
         printf("  CE   (or 3) - Copy engine firmware\n");
+        printf("  MEC  (or 4) - Multi-engine compute firmware\n");
         printf("\nAuto-detects type from filename:\n");
         printf("  *_me.bin   -> ME\n");
         printf("  *_pfp.bin  -> PFP\n");
         printf("  *_ce.bin   -> CE\n");
+        printf("  *_mec.bin  -> MEC\n");
         printf("\nExamples:\n");
         printf("  %s cyan_skillfish2_me.bin\n", argv[0]);
         printf("  %s cyan_skillfish2_pfp.bin -t PFP\n", argv[0]);
+        printf("  %s cyan_skillfish2_mec.bin -t MEC\n", argv[0]);
         return 1;
     }
 
@@ -131,14 +135,15 @@ int main(int argc, char *argv[]) {
         if (strstr(fwPath, "_me.") || strstr(fwPath, "_ME.")) fwType = 1;
         else if (strstr(fwPath, "_pfp.") || strstr(fwPath, "_PFP.")) fwType = 2;
         else if (strstr(fwPath, "_ce.") || strstr(fwPath, "_CE.")) fwType = 3;
+        else if (strstr(fwPath, "_mec") || strstr(fwPath, "_MEC")) fwType = 4;
         else {
             printf("ERROR: Cannot auto-detect firmware type from '%s'\n", fwPath);
-            printf("Use -t ME, -t PFP, or -t CE\n");
+            printf("Use -t ME, -t PFP, -t CE, or -t MEC\n");
             return 1;
         }
     }
 
-    const char *typeNames[] = {"", "ME", "PFP", "CE"};
+    const char *typeNames[] = {"", "ME", "PFP", "CE", "MEC"};
     printf("Firmware type: %s (%u)\n", typeNames[fwType], fwType);
     printf("Firmware file: %s\n", fwPath);
 

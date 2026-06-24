@@ -1,217 +1,98 @@
-#define INITGUID
+/* safe-test.c — Probe KIQ/HQD register writability + NBIO test */
 #include <windows.h>
 #include <stdio.h>
-#include <stdarg.h>
-#include <d3dkmthk.h>
 
-static FILE *g = NULL;
-static void Log(const char *fmt, ...) {
-    va_list a; va_start(a, fmt);
-    vfprintf(stdout, fmt, a); va_end(a); fflush(stdout);
-    if (g) { va_start(a, fmt); vfprintf(g, fmt, a); va_end(a); fflush(g); }
+#define IOCTL_GPU_READ  0x80000B88
+#define IOCTL_GPU_WRITE 0x80000B8C
+#define IOCTL_GPU_INIT  0x80000B80
+
+static HANDLE hGpu;
+
+static ULONG R(ULONG off) {
+    UCHAR buf[8]={0}; *(ULONG*)(buf+0)=off; *(ULONG*)(buf+4)=0xBAD0C0DE;
+    DWORD br=0;
+    if(!DeviceIoControl(hGpu,IOCTL_GPU_READ,buf,8,buf,8,&br,NULL)||br<8) return 0xBAD0C0DE;
+    return *(ULONG*)(buf+4);
+}
+static void W(ULONG off, ULONG v) {
+    UCHAR buf[8]={0}; *(ULONG*)(buf+0)=off; *(ULONG*)(buf+4)=v;
+    DWORD br=0; DeviceIoControl(hGpu,IOCTL_GPU_WRITE,buf,8,NULL,0,&br,NULL);
+    Sleep(1);
+}
+static void WNR(ULONG off, ULONG v) { /* Write no readback delay */
+    UCHAR buf[8]={0}; *(ULONG*)(buf+0)=off; *(ULONG*)(buf+4)=v;
+    DWORD br=0; DeviceIoControl(hGpu,IOCTL_GPU_WRITE,buf,8,NULL,0,&br,NULL);
 }
 
-int main(int argc, char *argv[]) {
-    g = fopen("C:\\AMD-BC-250\\AMD-BC-250-Windows-Driver-main\\output\\safe-test.log", "w");
-    if (!g) { printf("Cannot open log\n"); return 1; }
+int main(void) {
+    hGpu=CreateFileW(L"\\\\.\\AMDBC250DreamV43",GENERIC_READ|GENERIC_WRITE,0,NULL,OPEN_EXISTING,0,NULL);
+    if(hGpu==INVALID_HANDLE_VALUE){printf("FAIL err=%lu\n",GetLastError());return 1;}
 
-    if (argc >= 3 && strcmp(argv[1], "-r") == 0) {
-        char *end = NULL;
-        unsigned long offset = strtoul(argv[2], &end, 0);
-        if (!end || *end != '\0') { printf("Bad offset: %s\n", argv[2]); return 1; }
-        HANDLE h = CreateFileW(L"\\\\.\\AMDBC250DreamV43",
-            GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
-        if (h == INVALID_HANDLE_VALUE) { printf("Open failed error=%lu\n", GetLastError()); return 1; }
-        UINT32 ra[2] = {(UINT32)offset, 0xDEADBEEF};
-        DWORD br = 0;
-        BOOL ok = DeviceIoControl(h, 0x80000B88, ra, sizeof(ra), ra, sizeof(ra), &br, NULL);
-        if (ok) printf("READ_REG[0x%04X] = 0x%08X\n", (unsigned)offset, ra[1]);
-        else printf("READ_REG[0x%04X] FAILED err=%lu\n", (unsigned)offset, GetLastError());
-        CloseHandle(h);
-        return 0;
+    /* Test write + readback for KIQ registers */
+    printf("=== KIQ Register Writes (0xE060+) ===\n");
+    
+    /* Save original values */
+    ULONG orig[20];
+    for(int off=0xE060; off<=0xE098; off+=4)
+        orig[(off-0xE060)/4] = R(off);
+    
+    /* Write distinct pattern to each */
+    for(int off=0xE060; off<=0xE098; off+=4)
+        W(off, 0xA0000000 | ((off-0xE060)/4));
+    
+    /* Read back */
+    for(int off=0xE060; off<=0xE098; off+=4) {
+        ULONG v = R(off);
+        ULONG origV = orig[(off-0xE060)/4];
+        printf("  [0x%04X] wrote 0xA%01X_ ret=0x%08X (orig=0x%08X)%s\n",
+            off, (off-0xE060)/4, v, origV,
+            (v == (0xA0000000 | ((off-0xE060)/4))) ? " STUCK" : "");
     }
 
-    Log("=== Safe Test Start ===\n");
-    fflush(g);
+    /* Restore */
+    for(int off=0xE060; off<=0xE098; off+=4)
+        W(off, orig[(off-0xE060)/4]);
 
-    Log("Step 1: D3DKMTEnumAdapters\n"); fflush(g);
-    {
-        D3DKMT_ENUMADAPTERS ea = {0};
-        NTSTATUS st = D3DKMTEnumAdapters(&ea);
-        Log("  Result: 0x%08X  NumAdapters=%u\n", st, ea.NumAdapters); fflush(g);
+    /* Now test HQD range under ME=1 */
+    printf("\n=== HQD Register Writes (ME=1) ===\n");
+    WNR(0x34D0, 0x00010000); /* GRBM_GFX_INDEX = ME=1 */
+    Sleep(2);
+    
+    /* Save */
+    ULONG hqdOrig[40];
+    for(int off=0xDAC0; off<0xDBFF; off+=4)
+        hqdOrig[(off-0xDAC0)/4] = R(off);
+    
+    /* Write 0xA to each */
+    for(int off=0xDAC0; off<0xDBFF; off+=4)
+        W(off, 0xAAAA5555);
+    
+    /* Read back */
+    int stuckCount = 0;
+    for(int off=0xDAC0; off<0xDBFF; off+=4) {
+        ULONG v = R(off);
+        ULONG origV = hqdOrig[(off-0xDAC0)/4];
+        if(v == origV) {
+            stuckCount++;
+            if(stuckCount <= 5)
+                printf("  [0x%04X] WROTE=0xAAAA5555 GOT=0x%08X (orig=0x%08X) NO EFFECT\n", off, v, origV);
+        }
     }
-
-    Log("Step 2: D3DKMTOpenAdapterFromHdc\n"); fflush(g);
-    {
-        HDC hdc = GetDC(NULL);
-        D3DKMT_OPENADAPTERFROMHDC oah = {0};
-        oah.hDc = hdc;
-        NTSTATUS st = D3DKMTOpenAdapterFromHdc(&oah);
-        Log("  Result: 0x%08X  hAdapter=0x%08X\n", st, oah.hAdapter); fflush(g);
-        ReleaseDC(NULL, hdc);
-    }
-
-    {
-        HANDLE h;
-        UCHAR inBuf[64] = {0}, outBuf[64] = {0};
-        DWORD br = 0;
-
-        Log("Step 3: IOCTL GET_CAPS\n"); fflush(g);
-        h = CreateFileW(L"\\\\.\\AMDBC250DreamV43",
-            GENERIC_READ|GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
-        if (h == INVALID_HANDLE_VALUE) {
-            Log("  KMD device NOT FOUND error=%lu\n", GetLastError()); fflush(g);
-            goto done;
-        }
-        {
-            BOOL ok = DeviceIoControl(h, 0x80000800, inBuf, sizeof(inBuf),
-                outBuf, sizeof(outBuf), &br, NULL);
-            Log("  GET_CAPS: %s  Version=%u  CUs=%u  GPUCLK=%u MHz\n",
-                ok ? "OK" : "FAIL",
-                *(UINT32*)(outBuf+0), *(UINT32*)(outBuf+16), *(UINT32*)(outBuf+8));
-            fflush(g);
-        }
-
-        Log("Step 4: IOCTL GET_VRAM_INFO\n"); fflush(g);
-        {
-            BOOL ok = DeviceIoControl(h, 0x80000804, inBuf, sizeof(inBuf),
-                outBuf, sizeof(outBuf), &br, NULL);
-            Log("  GET_VRAM_INFO: %s  Total=%llu MB\n",
-                ok ? "OK" : "FAIL", *(UINT64*)(outBuf+0) / (1024*1024));
-            fflush(g);
-        }
-
-        Log("Step 5: IOCTL INIT_HARDWARE (Flags=1 NBIO_MAP)\n"); fflush(g);
-        {
-            UCHAR initIn[32] = {0};
-            UCHAR initOut[32] = {0};
-            *(UINT64*)(initIn + 0)  = 0xFE800000ULL;
-            *(UINT32*)(initIn + 8)  = 0x00080000;
-            *(UINT32*)(initIn + 12) = 1;
-            *(UINT64*)(initIn + 16) = 0xC0000000ULL;
-            *(UINT32*)(initIn + 24) = 0x10000000;
-            BOOL ok = DeviceIoControl(h, 0x80000B80, initIn, sizeof(initIn),
-                initOut, sizeof(initOut), &br, NULL);
-            Log("  INIT_HARDWARE: %s\n", ok ? "OK" : "FAIL"); fflush(g);
-        }
-
-        Log("Step 6: READ_REG GPU_ID [0x0000]\n"); fflush(g);
-        {
-            UINT32 ra[2] = {0x0000, 0xDEADBEEF};
-            BOOL ok = DeviceIoControl(h, 0x80000B88, ra, sizeof(ra), ra, sizeof(ra), &br, NULL);
-            Log("  READ_REG[0x0000]: %s  GPU_ID=0x%08X\n",
-                ok ? "OK" : "FAIL", ra[1]); fflush(g);
-        }
-
-        Log("Step 7: READ_REG HDP [0x05A0,0x05A4,0x05C8,0x05CC,0x05D0,0x05D4,0x05D8,0x05DC]\n");
-        fflush(g);
-        {
-            UINT32 hdpOffs[] = {0x05A0,0x05A4,0x05C8,0x05CC,0x05D0,0x05D4,0x05D8,0x05DC};
-            int i;
-            for (i = 0; i < 8; i++) {
-                UINT32 ra[2] = {hdpOffs[i], 0xDEADBEEF};
-                BOOL ok = DeviceIoControl(h, 0x80000B88, ra, sizeof(ra), ra, sizeof(ra), &br, NULL);
-                if (ok && ra[1] != 0xFFFFFFFF)
-                    Log("  HDP[0x%04X] = 0x%08X\n", hdpOffs[i], ra[1]);
-            }
-            fflush(g);
-        }
-
-        Log("Step 8: READ_REG GC [0x3000,0x3004,0x3008]\n"); fflush(g);
-        {
-            UINT32 gcOffs[] = {0x3000,0x3004,0x3008};
-            int i;
-            for (i = 0; i < 3; i++) {
-                UINT32 ra[2] = {gcOffs[i], 0xDEADBEEF};
-                BOOL ok = DeviceIoControl(h, 0x80000B88, ra, sizeof(ra), ra, sizeof(ra), &br, NULL);
-                if (ok && ra[1] != 0xFFFFFFFF)
-                    Log("  GC[0x%04X] = 0x%08X\n", gcOffs[i], ra[1]);
-            }
-            fflush(g);
-        }
-
-        Log("Step 9: MMHUB scan (BAR5+0x5000, 128 regs)\n"); fflush(g);
-        {
-            int count = 0;
-            UINT32 i;
-            for (i = 0; i < 128; i++) {
-                UINT32 ra[2] = {0x5000 + i*4, 0xDEADBEEF};
-                BOOL ok = DeviceIoControl(h, 0x80000B88, ra, sizeof(ra), ra, sizeof(ra), &br, NULL);
-                if (ok && ra[1] != 0xFFFFFFFF && ra[1] != 0x00000000) {
-                    Log("  MMHUB[0x%04X] = 0x%08X\n", 0x5000 + i*4, ra[1]);
-                    count++;
-                }
-            }
-            Log("  MMHUB readable: %d\n", count); fflush(g);
-        }
-
-        Log("Step 10: DF scan (BAR5+0x1A000, 64 regs)\n"); fflush(g);
-        {
-            int count = 0;
-            UINT32 i;
-            for (i = 0; i < 64; i++) {
-                UINT32 ra[2] = {0x1A000 + i*4, 0xDEADBEEF};
-                BOOL ok = DeviceIoControl(h, 0x80000B88, ra, sizeof(ra), ra, sizeof(ra), &br, NULL);
-                if (ok && ra[1] != 0xFFFFFFFF && ra[1] != 0x00000000) {
-                    Log("  DF[0x%05X] = 0x%08X\n", 0x1A000 + i*4, ra[1]);
-                    count++;
-                }
-            }
-            Log("  DF readable: %d\n", count); fflush(g);
-        }
-
-        Log("Step 11: CC_GC_SHADER_ARRAY_CONFIG [BC-250: 0x3264]\n"); fflush(g);
-        {
-            UINT32 ra[2] = {0x3264, 0xDEADBEEF};
-            BOOL ok = DeviceIoControl(h, 0x80000B88, ra, sizeof(ra), ra, sizeof(ra), &br, NULL);
-            Log("  CC_GC_SHADER_ARRAY_CONFIG[0x3264]: %s  Value=0x%08X\n",
-                ok ? "OK" : "FAIL", ra[1]); fflush(g);
-        }
-
-        Log("Step 12: Scratch regs [BC-250: 0x32D4,0x32D8,0x32DC]\n"); fflush(g);
-        {
-            UINT32 scOffs[] = {0x32D4,0x32D8,0x32DC};
-            int i;
-            for (i = 0; i < 3; i++) {
-                UINT32 ra[2] = {scOffs[i], 0xDEADBEEF};
-                BOOL ok = DeviceIoControl(h, 0x80000B88, ra, sizeof(ra), ra, sizeof(ra), &br, NULL);
-                Log("  SCRATCH[0x%04X]: %s  0x%08X\n", scOffs[i],
-                    ok ? "OK" : "FAIL", ra[1]);
-            }
-            fflush(g);
-        }
-
-        Log("Step 13: RSMU scan (BAR5+0xA000, 32 regs)\n"); fflush(g);
-        {
-            int count = 0;
-            UINT32 i;
-            for (i = 0; i < 32; i++) {
-                UINT32 ra[2] = {0xA000 + i*4, 0xDEADBEEF};
-                BOOL ok = DeviceIoControl(h, 0x80000B88, ra, sizeof(ra), ra, sizeof(ra), &br, NULL);
-                if (ok && ra[1] != 0xFFFFFFFF && ra[1] != 0x00000000) {
-                    Log("  RSMU[0x%04X] = 0x%08X\n", 0xA000 + i*4, ra[1]);
-                    count++;
-                }
-            }
-            Log("  RSMU readable: %d\n", count); fflush(g);
-        }
-
-        Log("Step 14: GET_HW_STATUS\n"); fflush(g);
-        {
-            UCHAR hwBuf[64] = {0};
-            BOOL ok = DeviceIoControl(h, 0x80000B90, inBuf, 0, hwBuf, sizeof(hwBuf), &br, NULL);
-            Log("  GET_HW_STATUS: %s  MMIO=%u Rings=%u Fence=%u\n",
-                ok ? "OK" : "FAIL",
-                *(UINT32*)(hwBuf+0), *(UINT32*)(hwBuf+4), *(UINT32*)(hwBuf+8));
-            fflush(g);
-        }
-
-        CloseHandle(h);
-    }
-
-done:
-    Log("=== Safe Test Complete ===\n"); fflush(g);
-    if (g) fclose(g);
-    printf("Done. Check output\\safe-test.log\n");
+    printf("  %d/%d registers unchanged (NBIO-blocked)\n", stuckCount, (0xDBFF-0xDAC0)/4+1);
+    
+    /* Now write via KIQ ACTIVE at 0xE080 */
+    printf("\n=== KIQ_ACTIVE (0xE080) writability ===\n");
+    ULONG actBefore = R(0xE080);
+    W(0xE080, 0);
+    ULONG actAfter0 = R(0xE080);
+    W(0xE080, 1);
+    ULONG actAfter1 = R(0xE080);
+    printf("  before=%u after(0)=%u after(1)=%u\n", actBefore, actAfter0, actAfter1);
+    
+    /* Restore GRBM */
+    WNR(0x34D0, 0xE0000000);
+    
+    CloseHandle(hGpu);
+    printf("\nDone.\n");
     return 0;
 }

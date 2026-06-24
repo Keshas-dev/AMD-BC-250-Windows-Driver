@@ -1,202 +1,111 @@
-/* gcvm-pt-test.c — Test GCVM page table setup IOCTL (0x8000098C) */
-
+/* gcvm-pt-test.c — KIQ with DEFAULT_PAGE=system (bypass page tables) */
 #include <windows.h>
 #include <stdio.h>
 
-#define IOCTL_GPU_READ      0x80000B88
-#define IOCTL_GPU_WRITE     0x80000B8C
-#define IOCTL_GPU_INIT      0x80000B80
+#define IOCTL_GPU_READ  0x80000B88
+#define IOCTL_GPU_WRITE 0x80000B8C
+#define IOCTL_GPU_INIT  0x80000B80
 #define IOCTL_GCVM_PT_SETUP 0x8000098C
-#define PSP_DEVICE          L"\\\\.\\AmdBcPsp"
-#define PSP_IOCTL_INIT      CTL_CODE(FILE_DEVICE_UNKNOWN, 0x803, METHOD_BUFFERED, FILE_ANY_ACCESS)
-#define PSP_IOCTL_KIQ       CTL_CODE(FILE_DEVICE_UNKNOWN, 0x818, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
-static HANDLE hGpu, hPsp = INVALID_HANDLE_VALUE;
-
-typedef struct {
-    ULONG CommandCount;
-    ULONG Reserved[3];
-    ULONG Commands[64];
-} PSP_KIQ_REQ;
+static HANDLE hGpu;
 
 static ULONG R(ULONG off) {
-    UCHAR buf[8] = {0};
-    *(ULONG*)(buf+0) = off;
-    *(ULONG*)(buf+4) = 0xBAD0C0DE;
-    DWORD br = 0;
-    if (!DeviceIoControl(hGpu, IOCTL_GPU_READ, buf, 8, buf, 8, &br, NULL))
-        return 0xBAD0C0DE;
+    UCHAR buf[8]={0}; *(ULONG*)(buf+0)=off; *(ULONG*)(buf+4)=0xBAD0C0DE;
+    DWORD br=0;
+    if(!DeviceIoControl(hGpu,IOCTL_GPU_READ,buf,8,buf,8,&br,NULL)||br<8) return 0xBAD0C0DE;
     return *(ULONG*)(buf+4);
 }
-
-static void GpuWrite(ULONG offset, ULONG value) {
-    UCHAR buf[8] = {0};
-    *(ULONG*)(buf+0) = offset;
-    *(ULONG*)(buf+4) = value;
-    DWORD br = 0;
-    DeviceIoControl(hGpu, IOCTL_GPU_WRITE, buf, 8, NULL, 0, &br, NULL);
+static void W(ULONG off, ULONG v) {
+    UCHAR buf[8]={0}; *(ULONG*)(buf+0)=off; *(ULONG*)(buf+4)=v;
+    DWORD br=0; DeviceIoControl(hGpu,IOCTL_GPU_WRITE,buf,8,NULL,0,&br,NULL);
+    Sleep(1);
 }
-
-static void GpuInit(void) {
-    UCHAR init[32] = {0};
-    *(unsigned __int64*)(init+0) = 0xFE800000ULL;
-    *(unsigned*)(init+8) = 0x00080000;
-    *(unsigned*)(init+12) = 1;
-    *(unsigned __int64*)(init+16) = 0xC0000000ULL;
-    *(unsigned*)(init+24) = 0x20000000;
-    DWORD br = 0;
-    DeviceIoControl(hGpu, IOCTL_GPU_INIT, init, sizeof(init), NULL, 0, &br, NULL);
-}
-
-static void PspInit(void) {
-    struct { unsigned __int64 PA; unsigned size; } req = {0xFE800000ULL, 0x00080000};
-    DWORD br = 0;
-    DeviceIoControl(hPsp, PSP_IOCTL_INIT, &req, sizeof(req), NULL, 0, &br, NULL);
-}
-
-static void PspKiqNop(void) {
-    PSP_KIQ_REQ req;
-    ZeroMemory(&req, sizeof(req));
-    req.CommandCount = 1;
-    req.Commands[0] = 0xC0001000; /* IT_NOP */
-    DWORD br = 0;
-    DeviceIoControl(hPsp, PSP_IOCTL_KIQ, &req, sizeof(req), NULL, 0, &br, NULL);
-}
-
-typedef struct {
-    ULONG CtxCntlBefore;
-    ULONG RingBaseLo;
-    ULONG RingBaseHi;
-    ULONG PtBase0LoBefore;
-    ULONG PtBase0HiBefore;
-    ULONG PtBase0LoAfter;
-    ULONG PtBase0HiAfter;
-    ULONG PtBaseLoAfter;
-    ULONG PtBaseHiAfter;
-    ULONG Result;
-    ULONG PtPhysLo[3];
-    ULONG PtPhysHi[3];
-    ULONG InvStatus;
-    ULONG KIQ_WPTR;
-    ULONG KIQ_RPTR;
-    ULONG Reserved[8];
-} GCVM_PT_RESP;
 
 int main(void) {
-    printf("=== GCVM Page Table Setup Test ===\n");
+    printf("=== KIQ with DEFAULT_PAGE=system ===\n");
 
-    hGpu = CreateFileW(L"\\\\.\\AMDBC250DreamV43", GENERIC_READ|GENERIC_WRITE,
-                    0, NULL, OPEN_EXISTING, 0, NULL);
-    if (hGpu == INVALID_HANDLE_VALUE) {
-        printf("FAIL: Cannot open GPU (err=%lu)\n", GetLastError());
-        return 1;
+    hGpu=CreateFileW(L"\\\\.\\AMDBC250DreamV43",GENERIC_READ|GENERIC_WRITE,0,NULL,OPEN_EXISTING,0,NULL);
+    if(hGpu==INVALID_HANDLE_VALUE){printf("FAIL err=%lu\n",GetLastError());return 1;}
+
+    /* GPU init */
+    {
+        UCHAR init[32]={0};
+        *(UINT64*)(init+0)=0xFE800000ULL;*(UINT32*)(init+8)=0x00080000;
+        *(UINT32*)(init+12)=1;*(UINT64*)(init+16)=0xC0000000ULL;*(UINT32*)(init+24)=0x20000000;
+        DWORD br=0;
+        if(!DeviceIoControl(hGpu,IOCTL_GPU_INIT,init,sizeof(init),NULL,0,&br,NULL))
+            {printf("GPU init FAIL\n");goto end;}
     }
-    hPsp = CreateFileW(PSP_DEVICE, GENERIC_READ|GENERIC_WRITE,
-                    0, NULL, OPEN_EXISTING, 0, NULL);
-    if (hPsp == INVALID_HANDLE_VALUE) {
-        printf("FAIL: Cannot open PSP (err=%lu)\n", GetLastError());
-        CloseHandle(hGpu);
-        return 1;
+    printf("GPU init OK\n");
+
+    /* PT_SETUP to allocate ring and KIQ_BASE */
+    ULONG ringPA=0;
+    {
+        UCHAR buf[512]={0}; DWORD br=0;
+        if(!DeviceIoControl(hGpu,IOCTL_GCVM_PT_SETUP,NULL,0,buf,sizeof(buf),&br,NULL))
+            {printf("PT_SETUP FAIL\n");goto end;}
+        ULONG *p=(ULONG*)buf;
+        ringPA = p[1];
+        printf("PT_SETUP: result=0x%08X ringPA=0x%08X\n",p[9],ringPA);
+        printf("  CtxCntl before PT_SETUP=0x%08X\n", p[0]);
     }
+    if(ringPA==0){printf("No ring\n");goto end;}
 
-    GpuInit();
-    PspInit();
-    printf("Init OK\n");
+    /* Read CONTEXT0_CNTL */
+    ULONG ctx0 = R(0x0B460);
+    printf("CONTEXT0_CNTL before=0x%08X\n", ctx0);
 
-    /* Read KIQ state before triggering init */
-    printf("\n--- Before KIQ Init ---\n");
-    printf("  KIQ_BASE_LO  (0xE060) = 0x%08X\n", R(0xE060));
-    printf("  KIQ_WPTR     (0xE078) = 0x%08X\n", R(0xE078));
-    printf("  KIQ_RPTR     (0xE06C) = 0x%08X\n", R(0xE06C));
+    /* Read L2_CNTL */
+    ULONG l2 = R(0x0B360);
+    printf("GCVM_L2_CNTL=0x%08X (bit8=%u)\n", l2, (l2>>8)&1);
 
-    /* Trigger PSP KIQ init by sending a NOP submit */
-    printf("\n--- Triggering PSP KIQ Init ---\n");
-    PspKiqNop();
-    printf("  PSP KIQ submit sent\n");
+    /* Write CONTEXT0_CNTL = DEFAULT_PAGE=2 (system), PT_ENABLE=0 */
+    /* DEFAULT_PAGE in bits 2:1 = 10b = 2 */
+    W(0x0B460, 0x04);  /* bit1=1, bit0=0: page tables off, default=system */
+    ULONG ctxAfter = R(0x0B460);
+    printf("CONTEXT0_CNTL after=0x%08X (PT=%u DEFAULT=%u)\n", ctxAfter, ctxAfter&1, (ctxAfter>>1)&3);
 
-    /* Check KIQ state after init */
-    printf("\n--- After KIQ Init ---\n");
-    ULONG kiqBaseLo = R(0xE060);
-    ULONG kiqBaseHi = R(0xE064);
-    ULONG kiqWptr = R(0xE078);
-    ULONG kiqRptr = R(0xE06C);
-    printf("  KIQ_BASE_LO  (0xE060) = 0x%08X\n", kiqBaseLo);
-    printf("  KIQ_BASE_HI  (0xE064) = 0x%08X\n", kiqBaseHi);
-    printf("  KIQ_WPTR     (0xE078) = 0x%08X\n", kiqWptr);
-    printf("  KIQ_RPTR     (0xE06C) = 0x%08X\n", kiqRptr);
+    /* Set KIQ_ACTIVE=1 */
+    W(0xE080, 1);
+    printf("KIQ_ACTIVE=%u\n", R(0xE080));
 
-    /* Read full before state */
-    printf("\n--- Before ---\n");
-    printf("  CTX0_CNTL    (0xB460) = 0x%08X\n", R(0x0B460));
-    printf("  PT_BASE0_LO  (0xB408) = 0x%08X\n", R(0x0B408));
-    printf("  PT_BASE0_HI  (0xB40C) = 0x%08X\n", R(0x0B40C));
-    printf("  KIQ_WPTR     (0xE078) = 0x%08X\n", R(0xE078));
-    printf("  KIQ_RPTR     (0xE06C) = 0x%08X\n", R(0xE06C));
+    /* Write a WRITE_DATA command to the ring instead of NOP */
+    /* The ringPA is in system memory. PT_SETUP writes a NOP (0xC0001000) there.
+     * Let's try with NOP first, then with WRITE_DATA */
+    
+    /* Kick: WPTR=1 (past NOP header at ring offset 0) */
+    printf("\n--- Kick (NOP) ---\n");
+    W(0xE078, 1);
+    printf("WPTR=1 RPTR=%u\n", R(0xE06C));
 
-    /* Call GCVM page table setup */
-    printf("\n--- GCVM_PT_SETUP IOCTL ---\n");
-    GCVM_PT_RESP resp;
-    DWORD br = 0;
-    RtlZeroMemory(&resp, sizeof(resp));
-    BOOL ok = DeviceIoControl(hGpu, IOCTL_GCVM_PT_SETUP, NULL, 0, &resp, sizeof(resp), &br, NULL);
-    printf("  IOCTL: %s (br=%lu)\n", ok ? "OK" : "FAILED", br);
-
-    if (ok && br >= sizeof(resp)) {
-        printf("\n=== Response ===\n");
-        printf("  CTX0_CNTL (before):    0x%08X\n", resp.CtxCntlBefore);
-        printf("  KIQ_BASE_LO:           0x%08X\n", resp.RingBaseLo);
-        printf("  KIQ_BASE_HI:           0x%08X\n", resp.RingBaseHi);
-        printf("  Ring PA:               0x%llX\n",
-               ((ULONG64)resp.RingBaseHi << 32) | resp.RingBaseLo);
-        printf("  PT_BASE0_LO (before):  0x%08X\n", resp.PtBase0LoBefore);
-        printf("  PT_BASE0_HI (before):  0x%08X\n", resp.PtBase0HiBefore);
-        printf("  PT_BASE0_LO (after):   0x%08X\n", resp.PtBase0LoAfter);
-        printf("  PT_BASE0_HI (after):   0x%08X\n", resp.PtBase0HiAfter);
-        printf("  PT_BASE_LO  (after):   0x%08X\n", resp.PtBaseLoAfter);
-        printf("  PT_BASE_HI  (after):   0x%08X\n", resp.PtBaseHiAfter);
-        printf("  PT root PA:             0x%08X_%08X\n", resp.PtPhysHi[0], resp.PtPhysLo[0]);
-        printf("  PT mid  PA:             0x%08X_%08X\n", resp.PtPhysHi[1], resp.PtPhysLo[1]);
-        printf("  PT leaf PA:             0x%08X_%08X\n", resp.PtPhysHi[2], resp.PtPhysLo[2]);
-        printf("  KIQ_WPTR (in driver):   0x%08X\n", resp.KIQ_WPTR);
-        printf("  KIQ_RPTR (in driver):   0x%08X\n", resp.KIQ_RPTR);
-        printf("  InvStatus:              0x%08X (%s)\n", resp.InvStatus,
-               resp.InvStatus ? "TLB flushed" : "TIMEOUT/FAIL");
-
-        printf("\n  Result: 0x%08X — ", resp.Result);
-        switch (resp.Result) {
-            case 0xCAFEBABE: printf("GCVM PT SETUP OK! Page tables active\n"); break;
-            case 0xBAD0BAD0: printf("Wrong page table depth in CTX0_CNTL\n"); break;
-            case 0xBAD0C0DE: printf("KIQ ring not initialized (KIQ_BASE=0)\n"); break;
-            case 0xDEADF00D: printf("Failed to allocate page table pages\n"); break;
-            default:         printf("Error code: 0x%08X\n", resp.Result); break;
-        }
+    /* Poll */
+    for(int i=0;i<300;i++){
+        ULONG rptr=R(0xE06C);
+        ULONG scr=R(0x32D4);
+        if(rptr!=0){printf(">>> RPTR=%u after %dms (SCRATCH=0x%08X)\n",rptr,i*10,scr);break;}
+        Sleep(10);
+        if(i==299) printf(">>> RPTR=0 after 3s\n");
     }
 
-    /* Read HQD registers written by PSP */
-    printf("\n--- HQD Status (verify PSP proxy writes) ---\n");
-    printf("  HQD_ACTIVE   (0xDAC0) = 0x%08X (expected 1 if PSP wrote it)\n", R(0xDAC0));
-    printf("  HQD_PQ_CNTL  (0xDAFC) = 0x%08X\n", R(0xDAFC));
-    printf("  ME_CNTL      (0x4A74) = 0x%08X (expected 0 if PSP cleared halt)\n", R(0x4A74));
+    /* Also try WPTR=4 (skip 4 DWORDS to ensure we're past any garbage) */
+    printf("\n--- Kick WPTR=4 ---\n");
+    W(0xE078, 4);
+    printf("WPTR=4 RPTR=%u\n", R(0xE06C));
+    for(int i=0;i<100;i++){
+        ULONG rptr=R(0xE06C);
+        if(rptr!=0){printf(">>> RPTR=%u after %dms!\n",rptr,i*10);break;}
+        Sleep(10);
+        if(i==99) printf(">>> RPTR=0 after 1s\n");
+    }
 
-    /* Test: Try to write HQD_ACTIVE directly via GPU driver */
-    printf("\n--- Testing direct HQD_ACTIVE write ---\n");
-    ULONG hqdBefore = R(0xDAC0);
-    printf("  HQD_ACTIVE before = 0x%08X, writing 1...\n", hqdBefore);
-    /* Skip HQD_ACTIVE write - may be write-protected without firmware */
-    /* GpuWrite(0xDAC0, 1); */
-    /* Sleep(10); */
-    ULONG hqdAfter = R(0xDAC0);
-    printf("  HQD_ACTIVE after  = 0x%08X\n", hqdAfter);
+    /* Read back all KIQ registers */
+    printf("\n=== KIQ final ===\n");
+    for(int off=0xE060;off<=0xE098;off+=4)
+        printf("  [0x%04X]=0x%08X\n",off,R(off));
+    printf("CONTEXT0_CNTL=0x%08X MEC_ME1_CNTL=0x%08X ME_CNTL=0x%08X\n",
+        R(0x0B460), R(0x7A00), R(0x4A74));
 
-    printf("\n--- After (direct read) ---\n");
-    printf("  CTX0_CNTL    (0xB460) = 0x%08X\n", R(0x0B460));
-    printf("  PT_BASE0_LO  (0xB408) = 0x%08X\n", R(0x0B408));
-    printf("  PT_BASE0_HI  (0xB40C) = 0x%08X\n", R(0x0B40C));
-    printf("  KIQ_WPTR     (0xE078) = 0x%08X\n", R(0xE078));
-    printf("  KIQ_RPTR     (0xE06C) = 0x%08X\n", R(0xE06C));
-
-    if (hPsp != INVALID_HANDLE_VALUE) CloseHandle(hPsp);
-    CloseHandle(hGpu);
-    printf("\n=== Done ===\n");
+end:
+    if(hGpu!=INVALID_HANDLE_VALUE)CloseHandle(hGpu);
     return 0;
 }
