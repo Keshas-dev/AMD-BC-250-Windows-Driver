@@ -350,6 +350,16 @@ typedef struct _DREAM_V3_DEVICE_EXTENSION *PDREAM_V3_DEVICE_EXTENSION;
 /* GFX queue select: ME=0, PIPE=0, QUEUE=0 */
 #define AMDBC250_GRBM_GFX_INDEX_GFX_VAL  0
 
+/* --- GRBM_GFX_CNTL (Linux uses this for ME/PIPE/QUEUE select, NOT GRBM_GFX_INDEX) --- */
+/* Linux nv_grbm_select() uses mmGRBM_GFX_CNTL = 0x0dc2 (BAR5 = GC_BASE + 0x0dc2 = 0x2022)
+ * GRBM_GFX_INDEX (0x34D0) may be for SPM/indexed access; GRBM_GFX_CNTL for direct select.
+ * Test which one controls KIQ register routing on BC-250. */
+#define AMDBC250_REG_GRBM_GFX_CNTL              (AMDBC250_GC_BASE + 0x00000DC2)  /* 0x2022 */
+#define AMDBC250_GRBM_GFX_CNTL_ME_SHIFT         16
+#define AMDBC250_GRBM_GFX_CNTL_PIPE_SHIFT       8
+#define AMDBC250_GRBM_GFX_CNTL_QUEUE_SHIFT      0
+#define AMDBC250_GRBM_GFX_CNTL_KIQ_VAL          (1 << 16)  /* ME=1, PIPE=0, QUEUE=0 */
+
 /* --- RLC / Scheduler (Sienna_Cichlid override: mm=0x4CA1, BASE_IDX=1) --- */
 /* From Linux gfx_v10_0.c: #define mmRLC_CP_SCHEDULERS_Sienna_Cichlid 0x4ca1 BASE_IDX=1
  * BAR5 = GC_BASE_SEG1(0xA000) + 0x4CA1 = 0xECA1 (theoretical Sienna_Cichlid offset)
@@ -449,9 +459,12 @@ typedef struct _DREAM_V3_DEVICE_EXTENSION *PDREAM_V3_DEVICE_EXTENSION;
 #define AMDBC250_REG_GCVM_CTX0_CFG_0                    0x00000B4C0
 #define AMDBC250_REG_GCVM_CTX0_CFG_5                    0x00000B4D4
 
-/* GCVM Invalidate (offsets TBD — scan 0x0B500-0x0B600 to find exact) */
-#define AMDBC250_REG_GCVM_INVALIDATE_ENG0_REQ            0x00000B51C  /* guess from scan */
-#define AMDBC250_REG_GCVM_INVALIDATE_ENG0_ACK            0x00000B520  /* guess from scan */
+/* GCVM Invalidate — verified working offsets:
+ * REQ at 0x6C0C, ACK at 0x6C10.
+ * Protocol: write 1 to ACK (clear), write 1 to REQ (request), poll ACK bit 0.
+ * NOTE: hw.h previously had 0x0B51C/0x0B520 which are WRONG (dead registers). */
+#define AMDBC250_REG_GCVM_INVALIDATE_ENG0_REQ            0x000006C0C
+#define AMDBC250_REG_GCVM_INVALIDATE_ENG0_ACK            0x000006C10
 
 /* --- MMHUB VM (Memory Hub) — WRONG on BC-250, DO NOT USE --- */
 /* These are MMHUB MMEA registers (memory controller), NOT VM registers */

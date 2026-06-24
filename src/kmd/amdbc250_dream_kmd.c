@@ -3807,7 +3807,7 @@ DreamV3DeviceControl(
                 break;
             }
 
-            if (RegAcc->RegisterOffset + 4 > DevExt->MmioSize) {
+            if (RegAcc->RegisterOffset > DevExt->MmioSize - 4) {
                 status = STATUS_INVALID_PARAMETER;
                 break;
             }
@@ -3835,7 +3835,7 @@ DreamV3DeviceControl(
                 break;
             }
 
-            if (RegAcc->RegisterOffset + 4 > DevExt->MmioSize) {
+            if (RegAcc->RegisterOffset > DevExt->MmioSize - 4) {
                 status = STATUS_INVALID_PARAMETER;
                 break;
             }
@@ -5416,7 +5416,7 @@ DreamV3DeviceControl(
             dump->CcShaderArrayConfig = DUMP_REG32(0x3264);
             dump->Scratch             = DUMP_REG32(0x32D4);
             dump->SpiWgpMask          = DUMP_REG32(0x34FC);
-            dump->GrbmGfxIndex        = DUMP_REG32(0x33C4);
+            dump->GrbmGfxIndex        = DUMP_REG32(0x34D0);
 
             /* CP registers � BOTH sets of offsets to compare:
              * The fresh boot dump used Navi10+GC_BASE and got 0xFFFFFFFF for CP.
@@ -6114,31 +6114,36 @@ DreamV3DeviceControl(
                 "AMDBC250-DREAM-V4.3:   ring VA=0x%llX -> root[%lu] mid[%lu] leaf[%lu]\n",
                 ringPhys.QuadPart, rootIdx, midIdx, leafIdx));
 
-            /* Reuse or allocate 3 page table pages (non-cached) */
-            for (i = 0; i < 3; i++) {
-                if (DevExt->GcvmPtPages[i] == NULL) {
-                    DevExt->GcvmPtPages[i] = MmAllocateContiguousMemorySpecifyCache(
-                        4096, lowAddr, highAddr, boundaryAddr, MmNonCached);
-                    if (DevExt->GcvmPtPages[i] == NULL) break;
-                }
-                ptPages[i] = DevExt->GcvmPtPages[i];
-                RtlZeroMemory(ptPages[i], 4096);
-                ptPhys[i] = MmGetPhysicalAddress(ptPages[i]);
-                resp->PtPhysLo[i] = (ULONG)(ptPhys[i].QuadPart & 0xFFFFFFFF);
-                resp->PtPhysHi[i] = (ULONG)(ptPhys[i].QuadPart >> 32);
-            }
-            if (ptPages[0] == NULL || ptPages[1] == NULL || ptPages[2] == NULL) {
+            /* Reuse or allocate 3 page table pages (non-cached).
+             * Track which pages were already existing so we don't free them on error. */
+            {
+                BOOLEAN newlyAllocated[3] = {FALSE, FALSE, FALSE};
                 for (i = 0; i < 3; i++) {
-                    if (DevExt->GcvmPtPages[i]) {
-                        MmFreeContiguousMemory(DevExt->GcvmPtPages[i]);
-                        DevExt->GcvmPtPages[i] = NULL;
+                    if (DevExt->GcvmPtPages[i] == NULL) {
+                        DevExt->GcvmPtPages[i] = MmAllocateContiguousMemorySpecifyCache(
+                            4096, lowAddr, highAddr, boundaryAddr, MmNonCached);
+                        if (DevExt->GcvmPtPages[i] == NULL) break;
+                        newlyAllocated[i] = TRUE;
                     }
-                    ptPages[i] = NULL;
+                    ptPages[i] = DevExt->GcvmPtPages[i];
+                    RtlZeroMemory(ptPages[i], 4096);
+                    ptPhys[i] = MmGetPhysicalAddress(ptPages[i]);
+                    resp->PtPhysLo[i] = (ULONG)(ptPhys[i].QuadPart & 0xFFFFFFFF);
+                    resp->PtPhysHi[i] = (ULONG)(ptPhys[i].QuadPart >> 32);
                 }
-                resp->Result = 0xDEADF00D;
-                bytesReturned = sizeof(*resp);
-                status = STATUS_SUCCESS;
-                break;
+                if (ptPages[0] == NULL || ptPages[1] == NULL || ptPages[2] == NULL) {
+                    for (i = 0; i < 3; i++) {
+                        if (newlyAllocated[i] && DevExt->GcvmPtPages[i]) {
+                            MmFreeContiguousMemory(DevExt->GcvmPtPages[i]);
+                            DevExt->GcvmPtPages[i] = NULL;
+                        }
+                        ptPages[i] = NULL;
+                    }
+                    resp->Result = 0xDEADF00D;
+                    bytesReturned = sizeof(*resp);
+                    status = STATUS_SUCCESS;
+                    break;
+                }
             }
 
             /* Fill page tables: PDE = VALID|SYSTEM, PTE = VALID|SYSTEM|READABLE|WRITABLE */
