@@ -43,7 +43,7 @@ int main(void) {
     *(UINT32*)(initBuf+8)  = 0x00080000;
     *(UINT32*)(initBuf+12) = 1;
     *(UINT64*)(initBuf+16) = 0xC0000000ULL;
-    *(UINT32*)(initBuf+24) = 0x10000000;
+    *(UINT32*)(initBuf+24) = 0x20000000;  /* 512MB VRAM per BIOS */
     DWORD br = 0;
     BOOL ok = DeviceIoControl(gH, IOCTL_INIT_HW, initBuf, sizeof(initBuf), NULL, 0, &br, NULL);
     printf("INIT_HARDWARE (NBIO_MAP): %s\n", ok ? "OK" : "FAILED");

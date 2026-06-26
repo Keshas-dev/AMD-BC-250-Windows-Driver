@@ -683,6 +683,13 @@ DreamV3HwInitSdmaRing(_In_ PDREAM_V3_DEVICE_EXTENSION DevExt)
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                "AMDBC250-DREAM-V4.3: SDMA hw BASE_LO=0x%08X BASE_HI=0x%08X\n", baseLo, baseHi));
 
+    /* Sanity check: if both registers are 0 or 0xFFFFFFFF, SDMA block is dead */
+    if ((baseLo == 0 && baseHi == 0) || (baseLo == 0xFFFFFFFF && baseHi == 0xFFFFFFFF)) {
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+                   "AMDBC250-DREAM-V4.3: SDMA registers dead — skipping ring init\n"));
+        return STATUS_DEVICE_NOT_READY;
+    }
+
     /* Reconstruct ring PA from hardware register values */
     ringPhys.QuadPart = ((ULONG64)baseHi << 32) | ((ULONG64)baseLo << 8);
 

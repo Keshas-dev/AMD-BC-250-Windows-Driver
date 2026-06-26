@@ -3789,18 +3789,10 @@ DreamV3DeviceControl(
                         "AMDBC250-DREAM-V4.3: KIQ init FAILED in NBIO_MAP mode\n"));
                 }
 
-                /* SDMA ring init — re-enabled after NBIO_MAP fix. Gracefully fails
-                 * if SDMA registers at 0xE000 are dead. */
-                {
-                    NTSTATUS sdmaStatus = DreamV3HwInitSdmaRing(DevExt);
-                    if (NT_SUCCESS(sdmaStatus)) {
-                        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-                            "AMDBC250-DREAM-V4.3: SDMA ring init OK\n"));
-                    } else {
-                        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
-                            "AMDBC250-DREAM-V4.3: SDMA ring init failed (non-fatal): 0x%08X\n", sdmaStatus));
-                    }
-                }
+                /* SDMA ring init SKIPPED — suspected BSOD 0x1a source.
+                 * Register range 0xE000-0xE018 needs probing first. */
+                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                    "AMDBC250-DREAM-V4.3: SDMA ring init SKIPPED\n"));
 
                 status = STATUS_SUCCESS;
                 break;

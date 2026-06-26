@@ -29,7 +29,7 @@ int main(void) {
     /* 1. INIT_HARDWARE with BAR2 (VRAM at 0xC0000000, 512MB) */
     struct { uint64_t mmioBase; uint32_t mmioSize; uint32_t flags;
              uint64_t fbBase; uint32_t fbSize; } init = {
-        0xFE800000ULL, 0x80000, 1, 0xC0000000ULL, 0x20000000 };
+        0xFE800000ULL, 0x80000, 1, 0xC0000000ULL, 0x20000000 /* 512MB VRAM per BIOS */ };
     DWORD br = 0;
     DeviceIoControl(hGpu, IOCTL_GPU_INIT, &init, sizeof(init), NULL, 0, &br, NULL);
     printf("INIT_HARDWARE done\n");
@@ -83,7 +83,7 @@ int main(void) {
     /* VRAM at 0xC0000000 is outside BAR5. READ_REG can only read BAR5.
      * We need a separate way to access VRAM. Try via BAR5 registers
      * that might give VRAM info. */
-    ULong vramInfo[] = {
+    uint32_t vramInfo[] = {
         R(0x1A00), R(0x1A04), R(0x1A08), R(0x1A0C),  /* MMHUB */
         R(0x3810), R(0x3814), /* BAR-related? */
         R(0x0E00), R(0x0E04), R(0x0E08),  /* GPU_ID area */
