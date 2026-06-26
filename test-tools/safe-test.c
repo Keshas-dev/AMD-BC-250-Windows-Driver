@@ -36,6 +36,10 @@ int main(void) {
     for(int off=0xE060; off<=0xE098; off+=4)
         orig[(off-0xE060)/4] = R(off);
     
+    /* SAFETY: Deactivate KIQ first to avoid GPU trying to process garbage */
+    W(0xE080, 0);
+    Sleep(10);
+    
     /* Write distinct pattern to each */
     for(int off=0xE060; off<=0xE098; off+=4)
         W(off, 0xA0000000 | ((off-0xE060)/4));
@@ -49,7 +53,7 @@ int main(void) {
             (v == (0xA0000000 | ((off-0xE060)/4))) ? " STUCK" : "");
     }
 
-    /* Restore */
+    /* Restore originals (also deactivates KIQ since orig[0xE080]=0) */
     for(int off=0xE060; off<=0xE098; off+=4)
         W(off, orig[(off-0xE060)/4]);
 

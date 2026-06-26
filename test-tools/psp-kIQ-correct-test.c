@@ -62,42 +62,30 @@ int main(void) {
 
     /* Step 4: Allocate ring buffer in system memory */
     printf("\n--- Allocating Ring Buffer ---\n");
-    PVOID ringVa = NULL;
-    PHYSICAL_ADDRESS ringPa = {0};
-    {
-        PHYSICAL_ADDRESS low = {0}, high = {0};
-        high.QuadPart = 0xFFFFFFFFULL;  // Allow allocation anywhere
-        ringVa = MmAllocateContiguousMemory(0x1000, low, high);  // 4KB ring
-        if (!ringVa) {
-            printf("Failed to allocate ring buffer\n");
-            CloseHandle(hPsp);
-            return 1;
-        }
-        RtlZeroMemory(ringVa, 0x1000);
-        ringPa = MmGetPhysicalAddress(ringVa);
-        printf("Ring buffer VA=%p PA=0x%llX\n", ringVa, ringPa.QuadPart);
+    PVOID ringVa = VirtualAlloc(NULL, 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (!ringVa) {
+        printf("Failed to allocate ring buffer\n");
+        CloseHandle(hPsp);
+        return 1;
     }
+    RtlZeroMemory(ringVa, 0x1000);
+    printf("Ring buffer VA=%p\n", ringVa);
 
-    /* Step 5: Write PM4 commands to ring buffer */
+    /* Step 5: Write PM4 commands to ring buffer (submitted via IOCTL) */
     printf("\n--- Writing PM4 Commands ---\n");
-    volatile PULONG ring = (volatile PULONG)ringVa;
+    PSP_KIQ_SUBMIT_REQUEST req;
+    ZeroMemory(&req, sizeof(req));
     // PM4 IT_WRITE_DATA to SCRATCH (0x32D4) = 0xCAFEBABE
-    // Header: TYPE=3(11), COUNT=3, OPCODE=0x37 -> 0xC0033700
-    ring[0] = 0xC0033700;   // PM4: IT_WRITE_DATA (count=3)
-    ring[1] = 0x00000000;   // CONTROL: default (no confirm, dest_sel=GFX)
-    ring[2] = 0x000032D4;   // SCRATCH register offset in DWORDs (0x32D4 / 4)
-    ring[3] = 0xCAFEBABE;   // value to write
-    ring[4] = 0xC0001000;   // PM4: NOP (count=0) - padding
-    printf("Wrote PM4 commands to ring buffer\n");
+    req.CommandCount = 5;     // 5 DWORDs: header + control + addr_lo + addr_hi + data
+    req.Commands[0] = 0xC0370003;   // PM4: IT_WRITE_DATA (count=3)
+    req.Commands[1] = 0x10100000;   // CONTROL: DST_SEL=register, WR_CONFIRM
+    req.Commands[2] = 0x000032D4;   // ADDR_LO = SCRATCH register byte offset
+    req.Commands[3] = 0x00000000;   // ADDR_HI
+    req.Commands[4] = 0xCAFEBABE;   // DATA
+    printf("Wrote PM4 commands to IOCTL request\n");
 
     /* Step 6: Submit via PSP KIQ */
     printf("\n--- Submitting via PSP KIQ ---\n");
-    PSP_KIQ_SUBMIT_REQUEST req;
-    req.RingBufferPA = ringPa.QuadPart;
-    req.RingBufferSize = 0x1000;  // 4KB
-    req.WriteOffset = 0;          // Start at beginning
-    req.CommandCount = 5;         // 5 DWORDs written
-    
     DWORD br = 0;
     BOOL ok = DeviceIoControl(hPsp, PSP_IOCTL_KIQ_SUBMIT, &req, sizeof(req), NULL, 0, &br, NULL);
     printf("PSP_IOCTL_KIQ_SUBMIT: ok=%d error=%lu\n", ok, GetLastError());
@@ -112,7 +100,7 @@ int main(void) {
     }
 
     /* Step 8: Cleanup */
-    MmFreeContiguousMemory(ringVa);
+    VirtualFree(ringVa, 0, MEM_RELEASE);
     CloseHandle(hPsp);
     printf("\n=== Done ===\n");
     return 0;

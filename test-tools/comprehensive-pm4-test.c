@@ -127,11 +127,11 @@ static void TestPspKiqFormats(void) {
     
     /* Format A: IT_WRITE_DATA with DWORD offset */
     ULONG cmdsA[] = {
-        0xC0033700,  // IT_WRITE_DATA count=3
-        0x00000000,  // CONTROL
-        0x00000CB5,  // SCRATCH offset in DWORDs (0x32D4/4=0x0CB5)
-        0xCAFEBABE,  // VALUE
-        0xC0001000   // NOP
+        0xC0370003,  // IT_WRITE_DATA count=3
+        0x10100000,  // CONTROL: DST_SEL=register, WR_CONFIRM
+        0x000032D4,  // ADDR_LO = byte address of SCRATCH
+        0x00000000,  // ADDR_HI = 0
+        0xCAFEBABE   // DATA
     };
     printf("\n  [Format A] DWORD offset:");
     ULONG scratchBefore = GpuRead(0x32D4);
@@ -142,13 +142,14 @@ static void TestPspKiqFormats(void) {
     
     /* Format B: IT_WRITE_DATA with byte offset (WRITE_DATA uses bytes) */
     ULONG cmdsB[] = {
-        0xC0023700,  // IT_WRITE_DATA count=2
-        0x00000000,  // CONTROL
-        0x000032D4,  // SCRATCH byte offset
-        0xDEADBEEF   // VALUE
+        0xC0370003,  // IT_WRITE_DATA count=3
+        0x10100000,  // CONTROL: DST_SEL=register, WR_CONFIRM
+        0x000032D4,  // ADDR_LO = byte address of SCRATCH
+        0x00000000,  // ADDR_HI = 0
+        0xDEADBEEF   // DATA
     };
     printf("\n  [Format B] Byte offset:");
-    PspKiqSubmit(4, cmdsB);
+    PspKiqSubmit(5, cmdsB);
     scratchAfter = GpuRead(0x32D4);
     if (scratchAfter == 0xDEADBEEF) printf(" *** PM4 EXECUTED! ***");
     else printf(" SCRATCH=0x%08X (unchanged)", scratchAfter);
@@ -176,11 +177,11 @@ static void TestGpuScratchAfterKiq(void) {
     
     /* Do a KIQ submit then check if GPU state changed */
     ULONG cmds[] = {
-        0xC0033700,
-        0x00000000,
-        0x00000CB5,
-        0x12345678,
-        0xC0001000
+        0xC0370003,
+        0x10100000,
+        0x000032D4,  // ADDR_LO = byte address of SCRATCH
+        0x00000000,  // ADDR_HI = 0
+        0x12345678   // DATA
     };
     BOOL ok = PspKiqSubmit(5, cmds);
     Sleep(50);  // Wait 50ms

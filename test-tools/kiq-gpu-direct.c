@@ -28,7 +28,7 @@ static void DumpAll(void) {
     struct { unsigned o; const char *n; } r[] = {
         {0x4A74,"ME_CNTL"},   {0x3260,"GRBM"},     {0x3264,"CC_CFG"},
         {0x32D4,"SCRATCH0"},  {0x32D8,"SCRATCH1"},
-        {0x34D0,"GFX_INDEX"}, {0xECA1,"RLC_SCHED"},
+        {0x34D0,"GFX_INDEX"}, {0xECA8,"RLC_SCHED"},
         {0xE060,"KIQ_BASE"},  {0xE064,"KIQ_BASE_HI"},
         {0xE068,"KIQ_CNTL"},  {0xE06C,"KIQ_RPTR"}, {0xE078,"KIQ_WPTR"},
         {0xDAC0,"HQD_ACT"},   {0xDAC4,"HQD_VMD"},  {0xDAC8,"HQD_PSTATE"},
@@ -75,7 +75,8 @@ int main(void) {
     g_RingVa = VirtualAlloc(NULL, RING_SIZE, MEM_COMMIT|MEM_RESERVE, PAGE_READWRITE);
     if (!g_RingVa) { Log("Ring alloc failed\n"); return 1; }
     RtlZeroMemory(g_RingVa, RING_SIZE);
-    g_RingPa = MmGetPhysicalAddress(g_RingVa);  /* Won't work from user mode! */
+    /* Physical address would be needed for ring base, but can't get from user mode.
+     * Use SEND_PM4 IOCTL instead which handles KIQ ring internally. */
 
     /* We need physical address — use VirtualLock + IOCTL approach */
     /* Actually, from user mode we can't get physical address directly.

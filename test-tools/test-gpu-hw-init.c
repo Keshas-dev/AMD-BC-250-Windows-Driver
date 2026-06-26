@@ -29,7 +29,7 @@ typedef struct { UINT32 Cmd[64], Count, Fence, Queue; } PM4_IN;
 #define IT_SET_SH_REG        0x76
 #define IT_DISPATCH_DIRECT   0x15
 #define WRITE_DATA_DST_REG     (1u << 16)   /* DST_SEL=register (bit 16) */
-#define WRITE_DATA_WR_CONFIRM  (1u << 18)   /* WR_CONFIRM */
+#define WRITE_DATA_WR_CONFIRM  (1u << 20)   /* WR_CONFIRM */
 #define WRITE_DATA_ADDR_64BIT  (1u << 14)   /* ADDR_SEL=64-bit address */
 
 static BOOL SIO(HANDLE h, DWORD c, PVOID i, DWORD is, PVOID o, DWORD os, DWORD *br)

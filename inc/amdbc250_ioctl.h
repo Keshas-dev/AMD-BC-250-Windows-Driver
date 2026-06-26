@@ -316,6 +316,9 @@ typedef struct _AMDBC250_IOCTL_PCI_BAR_INFO {
     UINT32 Is64Bit;             /* 1=64-bit BAR, 0=32-bit BAR */
 } AMDBC250_IOCTL_PCI_BAR_INFO, *PAMDBC250_IOCTL_PCI_BAR_INFO;
 
+/* --- GCVM Page Table Setup --- */
+#define IOCTL_AMDBC250_SETUP_PAGE_TABLES CTL_CODE(FILE_DEVICE_AMDBC250, 0x263, METHOD_BUFFERED, FILE_ANY_ACCESS)
+
 /* --- PCI Config Read Result --- */
 typedef struct _AMDBC250_IOCTL_PCI_CONFIG {
     UINT16 VendorId;
@@ -434,9 +437,9 @@ typedef struct _AMDBC250_IOCTL_GPU_KIQ_TEST {
     UINT32 ScratchAfter;              /* OUT: SCRATCH after PM4 */
     UINT32 MmioMapped;                /* OUT: 1 if BAR5 mapped */
     UINT32 RingAllocated;             /* OUT: 1 if ring allocated */
-    UINT32 HqdProgrammed;             /* OUT: 1 if HQD registers written */
+    UINT32 HqdProgrammed;             /* OUT: 1 if HQD/IB registers written */
     UINT32 Pm4Submitted;              /* OUT: 1 if PM4 written to ring */
-    UINT32 Padding;                   /* alignment */
+    UINT32 UseIB;                     /* IN: 1=use IB (0x3BAC/0x3BB0/0x3BC0) instead of KIQ/HQD */
 } AMDBC250_IOCTL_GPU_KIQ_TEST, *PAMDBC250_IOCTL_GPU_KIQ_TEST;
 
 /* --- Direct CP firmware load via MMIO (bypasses PSP entirely) --- */
@@ -541,6 +544,10 @@ typedef struct _AMDBC250_IOCTL_KIQ_BIOS_RING_SUBMIT {
     UINT32 RingDword2;              /* OUT: third DWORD */
     UINT32 RingDword3;              /* OUT: fourth DWORD */
 } AMDBC250_IOCTL_KIQ_BIOS_RING_SUBMIT, *PAMDBC250_IOCTL_KIQ_BIOS_RING_SUBMIT;
+
+/* --- Direct CP IB (Indirect Buffer) test — bypasses KIQ/HQD entirely --- */
+#define IOCTL_AMDBC250_GPU_IB_TEST     CTL_CODE_AMDBC250(0x89, METHOD_BUFFERED, FILE_ANY_ACCESS)
+/* Reuses AMDBC250_IOCTL_GPU_KIQ_TEST struct (output fields same) */
 
 #pragma pack(pop)
 

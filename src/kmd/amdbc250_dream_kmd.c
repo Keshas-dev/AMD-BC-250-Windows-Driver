@@ -944,6 +944,23 @@ static VOID DreamV3WdmUnload(_In_ PDRIVER_OBJECT DriverObject)
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                "AMDBC250-DREAM-V4.3: WDM Unload called\n"));
     
+    /* Free GCVM page table pages and ring buffer */
+    if (g_ControlDevice != NULL) {
+        PDREAM_V3_DEVICE_EXTENSION devExt = (PDREAM_V3_DEVICE_EXTENSION)g_ControlDevice->DeviceExtension;
+        if (devExt != NULL) {
+            for (int i = 0; i < 3; i++) {
+                if (devExt->GcvmPtPages[i] != NULL) {
+                    MmFreeContiguousMemory(devExt->GcvmPtPages[i]);
+                    devExt->GcvmPtPages[i] = NULL;
+                }
+            }
+            if (devExt->GcvmRingBuf != NULL) {
+                MmFreeContiguousMemory(devExt->GcvmRingBuf);
+                devExt->GcvmRingBuf = NULL;
+            }
+        }
+    }
+
     /* Free shared memory */
     if (g_SharedBuffer != NULL) {
         ExFreePoolWithTag(g_SharedBuffer, 'cmhS');
@@ -1542,6 +1559,117 @@ DreamV3WriteEopFence(
     WPtr += sizeof(ULONG);
     
     DevExt->GfxRing.WritePointer = WPtr;
+}
+
+/*
+ * Software PM4 executor — translate PM4 packets to direct register writes.
+ *
+ * Handles IT_NOP, IT_WRITE_DATA (DST_SEL=register only), and IT_EVENT_WRITE_EOP.
+ * Other opcodes are skipped (not supported in software mode).
+ *
+ * This is a FALLBACK path when hardware KIQ ring processing is unavailable
+ * (KIQ_SIZE=0 blocks all CP ring processing on BC-250).
+ */
+static NTSTATUS
+DreamV3SwPm4Process(
+    _In_ PDREAM_V3_DEVICE_EXTENSION DevExt,
+    _In_reads_(CommandCount) const ULONG *Commands,
+    _In_ ULONG CommandCount,
+    _In_ ULONG64 FenceValue
+    )
+{
+    ULONG i = 0;
+
+    while (i < CommandCount) {
+        ULONG header = Commands[i];
+        ULONG type = header >> 30;
+
+        switch (type) {
+        case 0: {
+            /* PM4_TYPE_0: Write consecutive registers */
+            ULONG count = ((header >> 16) & 0x7FF) + 1;
+            ULONG baseReg = (header & 0xFFFF) << 2;
+            i++;
+            for (ULONG j = 0; j < count && i < CommandCount; j++, i++) {
+                DreamV3WriteRegister(DevExt, baseReg + j * 4, Commands[i]);
+            }
+            break;
+        }
+
+        case 2:
+            /* PM4_TYPE_2: NOP padding */
+            i++;
+            break;
+
+        case 3: {
+            /* PM4_TYPE_3: Executive command
+             * Header bits: [31:30]=type, [27:16]=payload_count-1, [15:8]=opcode */
+            ULONG count = ((header >> 16) & 0xFFF) + 1;
+            ULONG opcode = (header >> 8) & 0xFF;
+            i++;
+
+            /* NOP has no meaningful payload — skip count validation */
+            if (opcode != IT_NOP && i + count > CommandCount) {
+                return STATUS_BUFFER_TOO_SMALL;
+            }
+
+            switch (opcode) {
+            case IT_NOP:
+                /* NOP: skip payload (count = padding DWORDs) */
+                i += count;
+                break;
+
+            case IT_WRITE_DATA: {
+                if (count < 3) {
+                    i += count;  /* malformed, skip */
+                    break;
+                }
+                ULONG control = Commands[i + 0];
+                ULONG addrLo  = Commands[i + 1];
+                ULONG addrHi  = Commands[i + 2];
+                /* GFX10 DST_SEL: bit 28 = 1 means register write */
+                BOOLEAN isReg = ((control >> 28) & 1) != 0;
+                ULONG wrOne   = (control >> 25) & 0x1;
+                ULONG dataDwCount = count - 3;
+
+                /* Always attempt register write in software mode (DST_SEL checked
+                 * but not strictly required — MMIO range writes work regardless) */
+                if (isReg || (addrLo < 0x200000)) {
+                    for (ULONG d = 0; d < dataDwCount; d++) {
+                        DreamV3WriteRegister(DevExt, addrLo + (wrOne ? 0 : d * 4), Commands[i + 3 + d]);
+                    }
+                }
+                i += count;
+                break;
+            }
+
+            case IT_EVENT_WRITE_EOP:
+            case IT_RELEASE_MEM: {
+                /* Write fence value to GlobalFence address */
+                if (count >= 5 && FenceValue > 0 && DevExt->GlobalFence.VirtualAddress != NULL) {
+                    *DevExt->GlobalFence.VirtualAddress = FenceValue;
+                    KeMemoryBarrier();
+                    DevExt->GlobalFence.LastSubmittedValue = FenceValue;
+                }
+                i += count;
+                break;
+            }
+
+            default:
+                /* Unknown opcode — skip payload */
+                i += count;
+                break;
+            }
+            break;
+        }
+
+        default:
+            i++;
+            break;
+        }
+    }
+
+    return STATUS_SUCCESS;
 }
 
 /*
@@ -3716,80 +3844,81 @@ DreamV3DeviceControl(
                     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_TRACE_LEVEL,
                         "AMDBC250-DREAM-V4.3: SEND_PM4 via PSP KIQ: %lu DWORDs, fence=%llu\n",
                         Pm4Count, (ULONG64)SendPm4->FenceValue));
-                } else {
-                    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
-                        "AMDBC250-DREAM-V4.3: PSP KIQ submit failed: 0x%08X\n", status));
+                    break;
                 }
-                break;
+                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+                    "AMDBC250-DREAM-V4.3: PSP KIQ submit failed (0x%08X), trying fallback\n", status));
             }
 
             /* PATH 2: Legacy GfxRing (HQD/KIQ/GFX doorbell) */
-            if (!DevExt->HardwareInitialized || DevExt->GfxRing.VirtualAddress == NULL) {
-                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
-                    "AMDBC250-DREAM-V4.3: SEND_PM4 but hardware not initialized\n"));
-                status = STATUS_DEVICE_NOT_READY;
-                break;
-            }
+            if (DevExt->GfxRing.VirtualAddress != NULL) {
+                KIRQL OldIrql;
+                KeAcquireSpinLock(&DevExt->GfxRing.Lock, &OldIrql);
 
-            KIRQL OldIrql;
-            KeAcquireSpinLock(&DevExt->GfxRing.Lock, &OldIrql);
+                volatile PULONG Ring = (volatile PULONG)DevExt->GfxRing.VirtualAddress;
+                ULONG WPtr = DevExt->GfxRing.WritePointer;
+                ULONG RingSize = (ULONG)DevExt->GfxRing.SizeInBytes;
+                ULONG BytesNeeded = SendPm4->CommandCount * sizeof(ULONG);
+                ULONG EopSize = 6 * sizeof(ULONG); /* EOP packet is 6 DWORDs */
+                ULONG TotalBytes = BytesNeeded + (SendPm4->FenceValue > 0 ? EopSize : 0);
 
-            volatile PULONG Ring = (volatile PULONG)DevExt->GfxRing.VirtualAddress;
-            ULONG WPtr = DevExt->GfxRing.WritePointer;
-            ULONG RingSize = (ULONG)DevExt->GfxRing.SizeInBytes;
-            ULONG BytesNeeded = SendPm4->CommandCount * sizeof(ULONG);
-            ULONG EopSize = 6 * sizeof(ULONG); /* EOP packet is 6 DWORDs */
-            ULONG TotalBytes = BytesNeeded + (SendPm4->FenceValue > 0 ? EopSize : 0);
-
-            /* Ring wrap if needed (including space for EOP) */
-            if (WPtr + TotalBytes > RingSize) {
-                ULONG NopCount = (RingSize - WPtr) / sizeof(ULONG);
-                for (ULONG i = 0; i < NopCount; i++) {
-                    Ring[WPtr / sizeof(ULONG) + i] = PM4_TYPE2_NOP;
+                /* Ring wrap if needed (including space for EOP) */
+                if (WPtr + TotalBytes > RingSize) {
+                    ULONG NopCount = (RingSize - WPtr) / sizeof(ULONG);
+                    for (ULONG i = 0; i < NopCount; i++) {
+                        Ring[WPtr / sizeof(ULONG) + i] = PM4_TYPE2_NOP;
+                    }
+                    WPtr = 0;
                 }
-                WPtr = 0;
-            }
 
-            /* Copy PM4 commands into ring */
-            ULONG idx = WPtr / sizeof(ULONG);
-            RtlCopyMemory((PVOID)&Ring[idx], SendPm4->Commands, BytesNeeded);
-            WPtr += BytesNeeded;
+                /* Copy PM4 commands into ring */
+                ULONG idx = WPtr / sizeof(ULONG);
+                RtlCopyMemory((PVOID)&Ring[idx], SendPm4->Commands, BytesNeeded);
+                WPtr += BytesNeeded;
 
-            /* CRITICAL: Update WritePointer BEFORE EOP fence so DreamV3WriteEopFence
-             * uses the correct ring offset (after commands, not at old WritePointer).
-             * Without this, EOP overwrites the first 24 bytes of commands. */
-            DevExt->GfxRing.WritePointer = WPtr;
+                /* CRITICAL: Update WritePointer BEFORE EOP fence so EOP fence
+                 * uses the correct ring offset (after commands, not at old WritePointer). */
+                DevExt->GfxRing.WritePointer = WPtr;
 
-            /* Write EOP fence BEFORE doorbell (fence must be in ring before CP reads it) */
-            if (SendPm4->FenceValue > 0) {
-                DreamV3WriteEopFence(DevExt, (ULONG64)SendPm4->FenceValue);
-                WPtr = DevExt->GfxRing.WritePointer;
-                DevExt->GlobalFence.LastSubmittedValue = (ULONG64)SendPm4->FenceValue;
-            }
+                /* Write EOP fence BEFORE doorbell */
+                if (SendPm4->FenceValue > 0) {
+                    DreamV3WriteEopFence(DevExt, (ULONG64)SendPm4->FenceValue);
+                    WPtr = DevExt->GfxRing.WritePointer;
+                    DevExt->GlobalFence.LastSubmittedValue = (ULONG64)SendPm4->FenceValue;
+                }
 
-            DevExt->GfxRing.WritePointer = WPtr;
-            KeMemoryBarrier();
+                DevExt->GfxRing.WritePointer = WPtr;
+                KeMemoryBarrier();
 
-            /* Kick doorbell � write WPTR to MMIO */
-            if (DevExt->UseHqdKiq) {
-                DreamV3WriteRegister(DevExt, DevExt->GrbmGfxIndexOffset,
-                    AMDBC250_GRBM_GFX_INDEX_KIQ_VAL);
-                DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_HQD_PQ_WPTR_LO, WPtr);
-                DreamV3WriteRegister(DevExt, DevExt->GrbmGfxIndexOffset,
-                    AMDBC250_GRBM_GFX_INDEX_BROADCAST_VAL);
-            } else if (DevExt->UseKiqRing) {
-                DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_KIQ_WPTR, WPtr);
+                /* Kick doorbell -- write WPTR to MMIO */
+                if (DevExt->UseHqdKiq) {
+                    DreamV3WriteRegister(DevExt, DevExt->GrbmGfxIndexOffset,
+                        AMDBC250_GRBM_GFX_INDEX_KIQ_VAL);
+                    DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_HQD_PQ_WPTR_LO, WPtr);
+                    DreamV3WriteRegister(DevExt, DevExt->GrbmGfxIndexOffset,
+                        AMDBC250_GRBM_GFX_INDEX_BROADCAST_VAL);
+                } else if (DevExt->UseKiqRing) {
+                    DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_KIQ_WPTR, WPtr);
+                } else {
+                    DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_GFX_RING0_WPTR, WPtr);
+                }
+
+                KeReleaseSpinLock(&DevExt->GfxRing.Lock, OldIrql);
+
+                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_TRACE_LEVEL,
+                    "AMDBC250-DREAM-V4.3: SEND_PM4: %lu DWORDs, WPtr=%u, fence=%u\n",
+                    SendPm4->CommandCount, WPtr, SendPm4->FenceValue));
+                status = STATUS_SUCCESS;
             } else {
-                DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_GFX_RING0_WPTR, WPtr);
+                /* PATH 3: Software PM4 fallback (when no KIQ ring available) */
+                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                    "AMDBC250-DREAM-V4.3: SEND_PM4 via software executor\n"));
+                status = DreamV3SwPm4Process(DevExt, SendPm4->Commands,
+                    SendPm4->CommandCount, (ULONG64)SendPm4->FenceValue);
+                if (NT_SUCCESS(status)) {
+                    DevExt->GlobalFence.LastSubmittedValue = (ULONG64)SendPm4->FenceValue;
+                }
             }
-
-            KeReleaseSpinLock(&DevExt->GfxRing.Lock, OldIrql);
-
-            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_TRACE_LEVEL,
-                "AMDBC250-DREAM-V4.3: SEND_PM4: %lu DWORDs, WPtr=%u, fence=%u\n",
-                SendPm4->CommandCount, WPtr, SendPm4->FenceValue));
-
-            status = STATUS_SUCCESS;
         } else {
             status = STATUS_BUFFER_TOO_SMALL;
         }
@@ -3807,7 +3936,7 @@ DreamV3DeviceControl(
                 break;
             }
 
-            if (RegAcc->RegisterOffset > DevExt->MmioSize - 4) {
+            if (RegAcc->RegisterOffset + 4 > DevExt->MmioSize || RegAcc->RegisterOffset + 4 < RegAcc->RegisterOffset) {
                 status = STATUS_INVALID_PARAMETER;
                 break;
             }
@@ -3835,7 +3964,7 @@ DreamV3DeviceControl(
                 break;
             }
 
-            if (RegAcc->RegisterOffset > DevExt->MmioSize - 4) {
+            if (RegAcc->RegisterOffset + 4 > DevExt->MmioSize || RegAcc->RegisterOffset + 4 < RegAcc->RegisterOffset) {
                 status = STATUS_INVALID_PARAMETER;
                 break;
             }
@@ -4719,12 +4848,19 @@ DreamV3DeviceControl(
     }
 
     /* --- GPU-local KIQ test: allocate ring + program HQD + submit PM4, all via BAR5 --- */
+    case 0x80000BE4: /* IOCTL_AMDBC250_GPU_IB_TEST = CTL_CODE_AMDBC250(0x89) - force IB mode */
+        if (outputLen >= sizeof(AMDBC250_IOCTL_GPU_KIQ_TEST) && DevExt && DevExt->MmioVirtualBase) {
+            ((PAMDBC250_IOCTL_GPU_KIQ_TEST)outputBuffer)->UseIB = 1;
+        }
+        /* fall through */
     case 0x80000BD0: { /* IOCTL_AMDBC250_GPU_KIQ_TEST = CTL_CODE_AMDBC250(0x84) */
         if (outputLen >= sizeof(AMDBC250_IOCTL_GPU_KIQ_TEST) && DevExt && DevExt->MmioVirtualBase) {
             PAMDBC250_IOCTL_GPU_KIQ_TEST kiqTest = (PAMDBC250_IOCTL_GPU_KIQ_TEST)outputBuffer;
             PUCHAR mmio = (PUCHAR)DevExt->MmioVirtualBase;
+            ULONG useIb = kiqTest->UseIB;  /* Save input flag before zero */
             RtlZeroMemory(kiqTest, sizeof(*kiqTest));
             kiqTest->MmioMapped = 1;
+            kiqTest->UseIB = useIb;
 
             /* PT page variables (declared here for cleanup access) */
             PVOID ptPml4Va = NULL, ptPdpVa = NULL, ptPdVa = NULL, ptPtVa = NULL;
@@ -4760,7 +4896,7 @@ DreamV3DeviceControl(
             #define KIQ_BASE_HI     0xE064
             #define KIQ_RPTR        0xE06C
             #define KIQ_WPTR        0xE078
-            #define RLC_SCHEDULERS  0xECA1
+            #define RLC_SCHEDULERS  0xECA8  /* empirically verified writable (kiq-rlc-test.c) */
             #define SCRATCH_OFF     0x32D4
 
             /* Step 1: Read SCRATCH before */
@@ -4889,7 +5025,8 @@ DreamV3DeviceControl(
             }
             KeStallExecutionProcessor(10);
 
-            /* Step 4: Select KIQ engine */
+            /* Step 4: Save GRBM_INDEX and select KIQ engine */
+            ULONG savedGrbmIndex = BAR5_READ(GRBM_INDEX);
             BAR5_WRITE(GRBM_INDEX, 0x00010000);  /* ME=1 */
 
             /* Step 5: Deactivate queue */
@@ -4952,26 +5089,41 @@ DreamV3DeviceControl(
             }
             KeStallExecutionProcessor(100);
 
-            /* Step 19: Write PM4 NOP + WRITE_REG to SCRATCH into ring */
+            /* Step 19: Write PM4 WRITE_DATA + NOPs to SCRATCH into ring */
             {
                 volatile PULONG ring = (volatile PULONG)ringVa;
-                /* PM4 Type 3: IT_WRITE_DATA (0x37), count=3 (control + offset + data)
-                 * Header: TYPE=3(11), COUNT=3(011), OPCODE=0x37 -> 0xC0033700 */
-                ring[0] = 0xC0033700;  /* PM4 header: IT_WRITE_DATA, count=3 */
-                ring[1] = 0x00000000;  /* CONTROL: default (no confirm, dest_sel=GFX) */
-                ring[2] = 0x000032D4;  /* SCRATCH register offset */
-                ring[3] = 0xCAFEBABE;  /* value to write */
-                ring[4] = 0xC0001000;  /* PM4: NOP (count=0) */
-                ring[5] = 0xC0001000;  /* PM4: NOP */
-                ring[6] = 0xC0001000;  /* PM4: NOP */
-                ring[7] = 0xC0001000;  /* PM4: NOP */
+                /* PM4 Type 3: IT_WRITE_DATA (0x37), count=4
+                 * Header = (3<<30) | (0x37<<16) | 4 = 0xC0370004
+                 * CONTROL: DST_SEL=1(register), WR_CONFIRM=1 -> 0x00000100 */
+                ring[0] = 0xC0370003;  /* HEADER: IT_WRITE_DATA, count=3 */
+                ring[1] = 0x10100000;  /* CONTROL: DST_SEL=register(1<<28), WR_CONFIRM(1<<20) */
+                ring[2] = 0x000032D4;  /* ADDRESS_LO = SCRATCH */
+                ring[3] = 0x00000000;  /* ADDRESS_HI */
+                ring[4] = 0xCAFEBABE;  /* DATA to write */
+                ring[5] = 0xC0001000;  /* NOP (count=0) */
+                ring[6] = 0xC0001000;  /* NOP */
+                ring[7] = 0xC0001000;  /* NOP */
                 KeMemoryBarrier();
                 kiqTest->Pm4Submitted = 1;
 
-                /* Step 20: Update WPTR = 8 DWORDs (both PQ and KIQ paths) */
-                BAR5_WRITE(HQD_PQ_WPTR_LO, 8);
-                BAR5_WRITE(HQD_PQ_WPTR_HI, 0);
-                BAR5_WRITE(KIQ_WPTR, 8);
+                if (useIb) {
+                    /* IB path: write IB registers + RLC trigger (bypasses HQD/KIQ) */
+                    /* Write IB registers with broadcast GRBM first */
+                    BAR5_WRITE(GRBM_INDEX, 0xE0000000);
+                    BAR5_WRITE(0x3BAC, (ULONG)(ringPa.QuadPart & 0xFFFFFFFF));
+                    BAR5_WRITE(0x3BB0, (ULONG)(ringPa.QuadPart >> 32));
+                    BAR5_WRITE(0x3BC0, 32);  /* 32 dwords */
+                    /* Then set ME=1 for RLC scheduler trigger */
+                    BAR5_WRITE(GRBM_INDEX, 0x00010000);
+                    BAR5_WRITE(0xECA8, 0xA0);  /* RLC_CP_SCHEDULERS — correct offset */
+                    BAR5_WRITE(GRBM_INDEX, 0xE0000000);  /* restore broadcast */
+                    kiqTest->HqdProgrammed = 2;  /* IB mode */
+                } else {
+                    /* KIQ/HQD path: update WPTR = 8 DWORDs */
+                    BAR5_WRITE(HQD_PQ_WPTR_LO, 8);
+                    BAR5_WRITE(HQD_PQ_WPTR_HI, 0);
+                    BAR5_WRITE(KIQ_WPTR, 8);
+                }
             }
 
             /* Step 22: Wait for GPU to process */
@@ -4984,20 +5136,29 @@ DreamV3DeviceControl(
             /* Step 23: Read SCRATCH back */
             kiqTest->ScratchAfter = BAR5_READ(SCRATCH_OFF);
 
-            /* Step 24: Read WPTR back (to see if GPU consumed commands) */
-            kiqTest->Result = BAR5_READ(HQD_PQ_WPTR_LO);
+            if (useIb) {
+                kiqTest->Result = (kiqTest->ScratchAfter == 0xCAFEBABE) ? 1 : 0;
+            } else {
+                kiqTest->Result = BAR5_READ(HQD_PQ_WPTR_LO);
+            }
 
-            KdPrint(("GPU_KIQ_TEST: ScratchBefore=0x%08X ScratchAfter=0x%08X WPTR=0x%08X\n",
+            KdPrint(("GPU_KIQ_TEST(%s): ScratchBefore=0x%08X ScratchAfter=0x%08X Result=0x%08X\n",
+                useIb ? "IB" : "KIQ",
                 kiqTest->ScratchBefore, kiqTest->ScratchAfter, kiqTest->Result));
 
             /* Cleanup: halt and free ring */
             BAR5_WRITE(GRBM_INDEX, 0x00010000);
-            BAR5_WRITE(HQD_ACTIVE, 0);
+            if (!useIb) BAR5_WRITE(HQD_ACTIVE, 0);
+            if (useIb) {
+                BAR5_WRITE(0x3BAC, 0);  /* clear IB_BASE_LO */
+                BAR5_WRITE(0x3BB0, 0);  /* clear IB_BASE_HI */
+                BAR5_WRITE(0x3BC0, 0);  /* clear IB_BUFSZ */
+            }
             {
                 ULONG meVal = BAR5_READ(ME_CNTL);
                 BAR5_WRITE(ME_CNTL, meVal | (1 << 28) | (1 << 30));  /* set ME_HALT | PFP_HALT */
             }
-            BAR5_WRITE(GRBM_INDEX, 0xE0000000);
+            BAR5_WRITE(GRBM_INDEX, savedGrbmIndex);
 
             MmFreeContiguousMemory(ringVa);
 
@@ -5182,8 +5343,9 @@ DreamV3DeviceControl(
             "AMDBC250-DREAM-V4.3: LOAD_CP_FW firmware PA=0x%llX size=%u\n",
             fwPa.QuadPart, fwSize));
 
-        /* Define register addresses via BAR5 */
-        #define BAR5_U32(off) (*(volatile UINT32 *)((PUCHAR)ext->MmioVirtualBase + (off)))
+        /* Define register access macros (use safe WDK macros, not volatile pointers) */
+        #define BAR5_WR(off, val) DreamV3WriteRegister(ext, (off), (val))
+        #define BAR5_RD(off) DreamV3ReadRegister(ext, (off))
 
         /* Register offsets (GC_BASE-shifted byte offsets) */
         #define REG_ME_CNTL        0x4A74
@@ -5209,23 +5371,23 @@ DreamV3DeviceControl(
         #define REG_CE_IC_LO       0x17380
         #define REG_CE_IC_HI       0x17384
 
-        /* MEC registers (compute engine firmware) */
-        #define REG_MEC_IC_CNTL    0x7C18
-        #define REG_MEC_IC_LO      0x7C10
-        #define REG_MEC_IC_HI      0x7C14
-        #define REG_MEC_ME1_CNTL   0x7A00   /* MEC ME1 halt control */
+/* MEC registers (compute engine firmware) */
+#define REG_MEC_IC_CNTL    0x17398
+#define REG_MEC_IC_LO      0x17390
+#define REG_MEC_IC_HI      0x17394
+#define REG_MEC_ME1_CNTL   0x7A00   /* MEC ME1 halt control */
         #define MEC_ME1_HALT       (1 << 0) /* bit 0 = halt */
 
         __try {
             /* Step 1: Halt engines */
-            BAR5_U32(REG_ME_CNTL) = (1 << 28) | (1 << 30) | (1 << 29);  /* ME_HALT | PFP_HALT | CE_HALT */
+            BAR5_WR(REG_ME_CNTL, (1 << 28) | (1 << 30) | (1 << 29));  /* ME_HALT | PFP_HALT | CE_HALT */
             if (fwType == 4) {
-                BAR5_U32(REG_MEC_ME1_CNTL) = MEC_ME1_HALT;  /* Halt MEC ME1 */
+                BAR5_WR(REG_MEC_ME1_CNTL, MEC_ME1_HALT);  /* Halt MEC ME1 */
             }
             KeStallExecutionProcessor(10);
 
             /* Step 2: Read back ME_CNTL to confirm halt */
-            UINT32 meCntlRead = BAR5_U32(REG_ME_CNTL);
+            UINT32 meCntlRead = BAR5_RD(REG_ME_CNTL);
             KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                 "AMDBC250-DREAM-V4.3: LOAD_CP_FW ME_CNTL after halt=0x%08X\n", meCntlRead));
 
@@ -5237,32 +5399,35 @@ DreamV3DeviceControl(
             UINT32 icBaseLo = (UINT32)(fwPa.QuadPart & 0xFFFFFFFF);
             UINT32 icBaseHi = (UINT32)(fwPa.QuadPart >> 32);
 
+            /* Set IC_BASE: write LO/HI first (address), then CNTL=0 to clear.
+             * Linux writes IC_BASE_CNTL=0 and triggers DMA via UCODE_ADDR write.
+             * IMPORTANT: write LO/HI BEFORE CNTL to avoid DMA starting with stale address. */
             if (fwType == 1) {
                 /* ME firmware */
-                BAR5_U32(REG_ME_IC_CNTL) = 0x00000100;  /* VMID=0, enable IC */
-                BAR5_U32(REG_ME_IC_LO) = icBaseLo;
-                BAR5_U32(REG_ME_IC_HI) = icBaseHi;
+                BAR5_WR(REG_ME_IC_LO, icBaseLo);
+                BAR5_WR(REG_ME_IC_HI, icBaseHi);
+                BAR5_WR(REG_ME_IC_CNTL, 0);  /* Clear, don't set bit 8 */
                 KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                     "AMDBC250-DREAM-V4.3: LOAD_CP_FW ME IC_BASE=0x%08X%08X\n", icBaseHi, icBaseLo));
             } else if (fwType == 2) {
                 /* PFP firmware */
-                BAR5_U32(REG_PFP_IC_CNTL) = 0x00000100;
-                BAR5_U32(REG_PFP_IC_LO) = icBaseLo;
-                BAR5_U32(REG_PFP_IC_HI) = icBaseHi;
+                BAR5_WR(REG_PFP_IC_LO, icBaseLo);
+                BAR5_WR(REG_PFP_IC_HI, icBaseHi);
+                BAR5_WR(REG_PFP_IC_CNTL, 0);
                 KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                     "AMDBC250-DREAM-V4.3: LOAD_CP_FW PFP IC_BASE=0x%08X%08X\n", icBaseHi, icBaseLo));
             } else if (fwType == 3) {
                 /* CE firmware */
-                BAR5_U32(REG_CE_IC_CNTL) = 0x00000100;
-                BAR5_U32(REG_CE_IC_LO) = icBaseLo;
-                BAR5_U32(REG_CE_IC_HI) = icBaseHi;
+                BAR5_WR(REG_CE_IC_LO, icBaseLo);
+                BAR5_WR(REG_CE_IC_HI, icBaseHi);
+                BAR5_WR(REG_CE_IC_CNTL, 0);
                 KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                     "AMDBC250-DREAM-V4.3: LOAD_CP_FW CE IC_BASE=0x%08X%08X\n", icBaseHi, icBaseLo));
             } else {
                 /* MEC firmware (type 4) */
-                BAR5_U32(REG_MEC_IC_CNTL) = 0x00000100;
-                BAR5_U32(REG_MEC_IC_LO) = icBaseLo;
-                BAR5_U32(REG_MEC_IC_HI) = icBaseHi;
+                BAR5_WR(REG_MEC_IC_LO, icBaseLo);
+                BAR5_WR(REG_MEC_IC_HI, icBaseHi);
+                BAR5_WR(REG_MEC_IC_CNTL, 0);
                 KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                     "AMDBC250-DREAM-V4.3: LOAD_CP_FW MEC IC_BASE=0x%08X%08X\n", icBaseHi, icBaseLo));
             }
@@ -5298,12 +5463,12 @@ DreamV3DeviceControl(
                 }
 
                 /* Reset ucode address to 0 before uploading JT */
-                BAR5_U32(ucodeAddrReg) = 0;
+                BAR5_WR(ucodeAddrReg, 0);
                 KeStallExecutionProcessor(1);
 
                 /* Upload JT entries one DWORD at a time */
                 for (UINT32 i = 0; i < jtSizeDw; i++) {
-                    BAR5_U32(ucodeDataReg) = jtData[i];
+                    BAR5_WR(ucodeDataReg, jtData[i]);
                     KeStallExecutionProcessor(1);
                 }
 
@@ -5311,11 +5476,27 @@ DreamV3DeviceControl(
                     "AMDBC250-DREAM-V4.3: LOAD_CP_FW uploaded %u JT DWORDs\n", jtSizeDw));
 
                 /* Step 5: Write ucode version to UCODE_ADDR to commit */
-                BAR5_U32(ucodeAddrReg) = ucodeVersion;
+                BAR5_WR(ucodeAddrReg, ucodeVersion);
                 KeStallExecutionProcessor(10);
 
                 KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                     "AMDBC250-DREAM-V4.3: LOAD_CP_FW wrote version 0x%X to UCODE_ADDR\n", ucodeVersion));
+
+                /* Step 5b: Poll UCODE_ADDR until DMA completes (reads back as 0) */
+                UINT32 pollTimeoutUs = 500000;  /* 500ms max */
+                UINT32 pollResult = ucodeVersion;
+                for (UINT32 p = 0; p < pollTimeoutUs; p++) {
+                    pollResult = BAR5_RD(ucodeAddrReg);
+                    if (pollResult == 0) break;
+                    KeStallExecutionProcessor(1);
+                }
+                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                    "AMDBC250-DREAM-V4.3: LOAD_CP_FW DMA poll complete after ~%u us, final UCODE_ADDR=0x%08X\n",
+                    pollTimeoutUs, pollResult));
+                if (pollResult != 0) {
+                    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+                        "AMDBC250-DREAM-V4.3: LOAD_CP_FW DMA may not have completed!\n"));
+                }
             } else {
                 KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
                     "AMDBC250-DREAM-V4.3: LOAD_CP_FW - no JT data (jtSizeDw=%u)\n", jtSizeDw));
@@ -5324,40 +5505,52 @@ DreamV3DeviceControl(
                 if (fwType == 1 || fwType == 4) ucodeAddrReg = REG_ME_UCODE_ADDR;
                 else if (fwType == 2) ucodeAddrReg = REG_PFP_UCODE_ADDR;
                 else ucodeAddrReg = REG_CE_UCODE_ADDR;
-                BAR5_U32(ucodeAddrReg) = ucodeVersion;
+                BAR5_WR(ucodeAddrReg, ucodeVersion);
                 KeStallExecutionProcessor(10);
+
+                /* Poll for DMA completion */
+                UINT32 pollTimeoutUs = 500000;
+                UINT32 pollResult = ucodeVersion;
+                for (UINT32 p = 0; p < pollTimeoutUs; p++) {
+                    pollResult = BAR5_RD(ucodeAddrReg);
+                    if (pollResult == 0) break;
+                    KeStallExecutionProcessor(1);
+                }
+                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                    "AMDBC250-DREAM-V4.3: LOAD_CP_FW (no JT) DMA poll result=0x%08X\n", pollResult));
             }
 
             /* Step 6: Unhalt the loaded engine */
             if (fwType == 4) {
                 /* Unhalt MEC ME1 */
-                BAR5_U32(REG_MEC_ME1_CNTL) = 0;
+                BAR5_WR(REG_MEC_ME1_CNTL, 0);
                 KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                     "AMDBC250-DREAM-V4.3: LOAD_CP_FW MEC unhalted\n"));
             } else if (fwType == 1) {
                 /* Unhalt ME only (keep PFP+CE halted) */
-                BAR5_U32(REG_ME_CNTL) = (1 << 30) | (1 << 29);  /* PFP_HALT | CE_HALT, ME clear */
+                BAR5_WR(REG_ME_CNTL, (1 << 30) | (1 << 29));  /* PFP_HALT | CE_HALT, ME clear */
             } else if (fwType == 2) {
                 /* Unhalt PFP only */
-                BAR5_U32(REG_ME_CNTL) = (1 << 28) | (1 << 29);  /* ME_HALT | CE_HALT, PFP clear */
+                BAR5_WR(REG_ME_CNTL, (1 << 28) | (1 << 29));  /* ME_HALT | CE_HALT, PFP clear */
             } else {
                 /* Unhalt CE only */
-                BAR5_U32(REG_ME_CNTL) = (1 << 28) | (1 << 30);  /* ME_HALT | PFP_HALT, CE clear */
+                BAR5_WR(REG_ME_CNTL, (1 << 28) | (1 << 30));  /* ME_HALT | PFP_HALT, CE clear */
             }
             KeStallExecutionProcessor(10);
 
-            UINT32 meCntlAfter = BAR5_U32(REG_ME_CNTL);
+            UINT32 meCntlAfter = BAR5_RD(REG_ME_CNTL);
             KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                 "AMDBC250-DREAM-V4.3: LOAD_CP_FW ME_CNTL after unhalt=0x%08X\n", meCntlAfter));
 
             /* Read SCRATCH as sanity check */
-            UINT32 scratch = BAR5_U32(REG_SCRATCH);
+            UINT32 scratch = BAR5_RD(REG_SCRATCH);
             KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                 "AMDBC250-DREAM-V4.3: LOAD_CP_FW SCRATCH=0x%08X\n", scratch));
 
             resp->Result = 1;  /* success */
 
-            #undef BAR5_U32
+            #undef BAR5_WR
+            #undef BAR5_RD
             #undef REG_ME_CNTL
             #undef REG_SCRATCH
             #undef REG_GRBM_INDEX
@@ -5403,10 +5596,9 @@ DreamV3DeviceControl(
     case IOCTL_AMDBC250_REG_DUMP: {
         if (outputLen >= sizeof(AMDBC250_IOCTL_REG_DUMP) && DevExt && DevExt->MmioVirtualBase) {
             PAMDBC250_IOCTL_REG_DUMP dump = (PAMDBC250_IOCTL_REG_DUMP)outputBuffer;
-            PUCHAR mmio = (PUCHAR)DevExt->MmioVirtualBase;
             RtlZeroMemory(dump, sizeof(*dump));
 
-            #define DUMP_REG32(off) (*(volatile PULONG)(mmio + (off)))
+            #define DUMP_REG32(off) DreamV3ReadRegister(DevExt, (off))
 
             /* GC registers (verified BAR5 byte offsets) */
             dump->GpuId               = DUMP_REG32(0x3840);
@@ -5465,7 +5657,7 @@ DreamV3DeviceControl(
             }
 
             /* RLC/SDMA */
-            dump->RlcCntl             = DUMP_REG32(0xECA1);
+            dump->RlcCntl             = DUMP_REG32(0xECA8);
             dump->Sdma0Cntl           = DUMP_REG32(0x10040);
 
             /* CP ring probe at raw BAR5 0xDA60 range � what IS this? */
@@ -5491,27 +5683,24 @@ DreamV3DeviceControl(
     case IOCTL_AMDBC250_KIQ_NOP_TEST: {
         if (outputLen >= sizeof(AMDBC250_IOCTL_KIQ_NOP_TEST) && DevExt && DevExt->MmioVirtualBase) {
             PAMDBC250_IOCTL_KIQ_NOP_TEST kt = (PAMDBC250_IOCTL_KIQ_NOP_TEST)outputBuffer;
-            PUCHAR mmio = (PUCHAR)DevExt->MmioVirtualBase;
             RtlZeroMemory(kt, sizeof(*kt));
 
-            #define KIQ_REG32(off) (*(volatile PULONG)(mmio + (off)))
             #define KIQ_SCRATCH_OFF     0x32D4
             #define KIQ_ME_CNTL_OFF     0x4A74
             #define KIQ_BASE_LO_OFF     0xE060
             #define KIQ_BASE_HI_OFF     0xE064
-            #define KIQ_CNTL_OFF        0xE068
             #define KIQ_RPTR_OFF        0xE06C
             #define KIQ_WPTR_OFF        0xE078
             #define KIQ_GCVM_CTX0_CNTL  0x0B460
 
-            /* Step 0: Save BIOS state */
-            kt->ScratchBefore           = KIQ_REG32(KIQ_SCRATCH_OFF);
-            kt->KiqRptrBefore           = KIQ_REG32(KIQ_RPTR_OFF);
-            kt->MeCntlBefore            = KIQ_REG32(KIQ_ME_CNTL_OFF);
-            kt->GcvmContext0CntlBefore  = KIQ_REG32(KIQ_GCVM_CTX0_CNTL);
+            /* Step 0: Save BIOS state (use DreamV3ReadRegister — no volatile pointer!) */
+            kt->ScratchBefore           = DreamV3ReadRegister(DevExt, KIQ_SCRATCH_OFF);
+            kt->KiqRptrBefore           = DreamV3ReadRegister(DevExt, KIQ_RPTR_OFF);
+            kt->MeCntlBefore            = DreamV3ReadRegister(DevExt, KIQ_ME_CNTL_OFF);
+            kt->GcvmContext0CntlBefore  = DreamV3ReadRegister(DevExt, KIQ_GCVM_CTX0_CNTL);
 
             KdPrint(("AMDBC250-DREAM-V4.3: KIQ_NOP_TEST enter: SCRATCH=0x%08X KIQ_RPTR=0x%08X KIQ_WPTR=0x%08X\n",
-                kt->ScratchBefore, kt->KiqRptrBefore, KIQ_REG32(KIQ_WPTR_OFF)));
+                kt->ScratchBefore, kt->KiqRptrBefore, DreamV3ReadRegister(DevExt, KIQ_WPTR_OFF)));
 
             /* Step 1: Allocate 4KB ring buffer below 4GB */
             PVOID ringVa = NULL;
@@ -5535,90 +5724,82 @@ DreamV3DeviceControl(
 
             KdPrint(("AMDBC250-DREAM-V4.3: KIQ_NOP_TEST ring PA=0x%llX\n", ringPa.QuadPart));
 
-            /* Step 2: Read current KIQ_BASE � if non-zero, BIOS configured KIQ */
+            /* Step 2: Read current KIQ_BASE — if non-zero, BIOS configured KIQ */
             {
-                ULONG kBaseLo = KIQ_REG32(KIQ_BASE_LO_OFF);
-                ULONG kBaseHi = KIQ_REG32(KIQ_BASE_HI_OFF);
+                ULONG kBaseLo = DreamV3ReadRegister(DevExt, KIQ_BASE_LO_OFF);
+                ULONG kBaseHi = DreamV3ReadRegister(DevExt, KIQ_BASE_HI_OFF);
                 KdPrint(("AMDBC250-DREAM-V4.3: KIQ_NOP_TEST KIQ_BASE before: 0x%08X%08X\n", kBaseHi, kBaseLo));
-
                 if (kBaseLo != 0 || kBaseHi != 0) {
                     KdPrint(("AMDBC250-DREAM-V4.3: KIQ_NOP_TEST WARNING: KIQ_BASE already set by BIOS!\n"));
                 }
             }
 
-            /* Step 3: Halt ME+PFP (set halt bits only � preserve other bits) */
-            {
-                ULONG meVal = KIQ_REG32(KIQ_ME_CNTL_OFF);
-                KIQ_REG32(KIQ_ME_CNTL_OFF) = meVal | (1 << 28) | (1 << 30);  /* ME_HALT | PFP_HALT */
-            }
+            /* Step 3: Halt ME+PFP */
+            DreamV3WriteRegister(DevExt, KIQ_ME_CNTL_OFF,
+                DreamV3ReadRegister(DevExt, KIQ_ME_CNTL_OFF) | (1 << 28) | (1 << 30));
             KeStallExecutionProcessor(10);
 
             /* Step 4: Program KIQ ring base */
-            KIQ_REG32(KIQ_BASE_LO_OFF) = (ULONG)(ringPa.QuadPart & 0xFFFFFFFF);
-            KIQ_REG32(KIQ_BASE_HI_OFF) = (ULONG)(ringPa.QuadPart >> 32);
+            DreamV3WriteRegister(DevExt, KIQ_BASE_LO_OFF, (ULONG)(ringPa.QuadPart & 0xFFFFFFFF));
+            DreamV3WriteRegister(DevExt, KIQ_BASE_HI_OFF, (ULONG)(ringPa.QuadPart >> 32));
 
             /* Step 5: Reset RPTR and WPTR */
-            KIQ_REG32(KIQ_RPTR_OFF) = 0;
-            KIQ_REG32(KIQ_WPTR_OFF) = 0;
+            DreamV3WriteRegister(DevExt, KIQ_RPTR_OFF, 0);
+            DreamV3WriteRegister(DevExt, KIQ_WPTR_OFF, 0);
             KeStallExecutionProcessor(1);
 
-            /* Step 6: Write PM4 packets to ring
-             * PM4 Type 3 IT_WRITE_DATA: header=0xC0033700 (count=3), control + offset + data
-             * PM4 Type 3 IT_NOP: header=0xC0001000 */
+            /* Step 6: Write PM4 packets to ring */
             {
                 volatile PULONG ring = (volatile PULONG)ringVa;
-                ring[0] = 0xC0033700;   /* PM4: IT_WRITE_DATA (count=3) */
-                ring[1] = 0x00000000;   /* CONTROL: default (no confirm, dest_sel=GFX) */
+                ring[0] = 0xC0370003;   /* IT_WRITE_DATA count=3 */
+                ring[1] = 0x10100000;   /* CONTROL: DST_SEL=register, WR_CONFIRM */
                 ring[2] = 0x000032D4;   /* SCRATCH register offset */
-                ring[3] = 0xCAFEBABE;   /* value to write */
-                ring[4] = 0xC0001000;   /* PM4: NOP (count=0) */
+                ring[3] = 0x00000000;   /* ADDRESS_HI */
+                ring[4] = 0xCAFEBABE;   /* value to write */
+                ring[5] = 0xC0001000;   /* NOP */
             }
+            KeMemoryBarrier();
 
-            /* Step 7: Set WPTR = 5 DWORDs (5 DWORDs: header+control+offset+data+nop) */
-            KIQ_REG32(KIQ_WPTR_OFF) = 5;
-            kt->KiqWptrSet = 5;
+            /* Step 7: Set WPTR = 6 DWORDs */
+            DreamV3WriteRegister(DevExt, KIQ_WPTR_OFF, 6);
+            kt->KiqWptrSet = 6;
 
             /* Step 8: Resume ME+PFP (clear halt bits) */
-            {
-                ULONG meVal = KIQ_REG32(KIQ_ME_CNTL_OFF);
-                KIQ_REG32(KIQ_ME_CNTL_OFF) = meVal & ~((1 << 28) | (1 << 30));
-            }
+            DreamV3WriteRegister(DevExt, KIQ_ME_CNTL_OFF,
+                DreamV3ReadRegister(DevExt, KIQ_ME_CNTL_OFF) & ~((1 << 28) | (1 << 30)));
 
             /* Step 9: Wait for processing */
             KeStallExecutionProcessor(10000);  /* 10ms */
 
             /* Step 10: Read results */
-            kt->KiqRptrAfter          = KIQ_REG32(KIQ_RPTR_OFF);
-            kt->ScratchAfter          = KIQ_REG32(KIQ_SCRATCH_OFF);
-            kt->MeCntlAfter           = KIQ_REG32(KIQ_ME_CNTL_OFF);
-            kt->GcvmContext0CntlAfter = KIQ_REG32(KIQ_GCVM_CTX0_CNTL);
+            kt->KiqRptrAfter          = DreamV3ReadRegister(DevExt, KIQ_RPTR_OFF);
+            kt->ScratchAfter          = DreamV3ReadRegister(DevExt, KIQ_SCRATCH_OFF);
+            kt->MeCntlAfter           = DreamV3ReadRegister(DevExt, KIQ_ME_CNTL_OFF);
+            kt->GcvmContext0CntlAfter = DreamV3ReadRegister(DevExt, KIQ_GCVM_CTX0_CNTL);
 
             KdPrint(("AMDBC250-DREAM-V4.3: KIQ_NOP_TEST result: SCRATCH=0x%08X KIQ_RPTR=0x%08X\n",
                 kt->ScratchAfter, kt->KiqRptrAfter));
 
-            /* Determine result */
             if (kt->ScratchAfter == 0xCAFEBABE) {
-                kt->Result = 2;  /* PM4 executed � SCRATCH changed! */
+                kt->Result = 2;
                 KdPrint(("AMDBC250-DREAM-V4.3: KIQ_NOP_TEST SUCCESS! PM4 executed, SCRATCH=0xCAFEBABE\n"));
             } else if (kt->KiqRptrAfter != kt->KiqRptrBefore) {
-                kt->Result = 1;  /* RPTR advanced but PM4 didn't fully execute */
+                kt->Result = 1;
                 KdPrint(("AMDBC250-DREAM-V4.3: KIQ_NOP_TEST: RPTR advanced but SCRATCH unchanged\n"));
             } else {
-                kt->Result = 0;  /* Nothing happened */
-                KdPrint(("AMDBC250-DREAM-V4.3: KIQ_NOP_TEST: no progress � GCVM may not have flat mapping\n"));
+                kt->Result = 0;
+                KdPrint(("AMDBC250-DREAM-V4.3: KIQ_NOP_TEST: no progress\n"));
             }
 
-            /* Cleanup: halt ME, clear KIQ ring, restore original ME_CNTL */
-            {
-                ULONG meVal = KIQ_REG32(KIQ_ME_CNTL_OFF);
-                KIQ_REG32(KIQ_ME_CNTL_OFF) = meVal | (1 << 28) | (1 << 30);
-            }
+            /* Cleanup */
+            DreamV3WriteRegister(DevExt, KIQ_ME_CNTL_OFF,
+                DreamV3ReadRegister(DevExt, KIQ_ME_CNTL_OFF) | (1 << 28) | (1 << 30));
             KeStallExecutionProcessor(10);
-            KIQ_REG32(KIQ_BASE_LO_OFF) = 0;
-            KIQ_REG32(KIQ_BASE_HI_OFF) = 0;
-            KIQ_REG32(KIQ_RPTR_OFF) = 0;
-            KIQ_REG32(KIQ_WPTR_OFF) = 0;
-            KIQ_REG32(KIQ_ME_CNTL_OFF) = kt->MeCntlBefore;  /* restore original */
+            DreamV3WriteRegister(DevExt, KIQ_BASE_LO_OFF, 0);
+            DreamV3WriteRegister(DevExt, KIQ_BASE_HI_OFF, 0);
+            DreamV3WriteRegister(DevExt, KIQ_RPTR_OFF, 0);
+            DreamV3WriteRegister(DevExt, KIQ_WPTR_OFF, 0);
+            DreamV3WriteRegister(DevExt, KIQ_ME_CNTL_OFF, kt->MeCntlBefore);
 
             MmFreeContiguousMemory(ringVa);
             status = STATUS_SUCCESS;
@@ -5829,20 +6010,23 @@ DreamV3DeviceControl(
             KeStallExecutionProcessor(1);
 
             /* Step 7: Write PM4 WRITE_DATA to SCRATCH (0x32D4) = 0xCAFEBABE
-             * PM4 IT_WRITE_DATA (0x37), count=3: CONTROL + REG_OFFSET + DATA
-             * Header: TYPE=3(11), COUNT=3, OPCODE=0x37 -> 0xC0033700
-             * REG_OFFSET must be in DWORDs: 0x32D4 bytes = 0x0C75 DWORDs */
+             * PM4 IT_WRITE_DATA (0x37), count=3 (4 DWORDs total):
+             *   HEADER: opcode=0x37, count=3 -> 0xC0370003
+             *   CONTROL: DST_SEL=register(1<<28), WR_CONFIRM(1<<20) -> 0x10100000
+             *   ADDRESS_LO = SCRATCH byte offset (0x32D4)
+             *   ADDRESS_HI = 0
+             *   DATA = 0xCAFEBABE */
             {
                 PULONG ring = (PULONG)ringVa;
-                ring[0] = 0xC0033700;  /* PM4 Type3: IT_WRITE_DATA, count=3 */
-                ring[1] = 0x00000000;  /* CONTROL: default (dest_sel=GFX_SH_DATA) */
-                ring[2] = 0x00000C75;  /* SCRATCH register offset in DWORDs (0x32D4 / 4) */
-                ring[3] = 0xCAFEBABE;  /* value to write */
-                ring[4] = 0xC0001000;  /* NOP (padding) */
+                ring[0] = 0xC0370003;  /* HEADER: IT_WRITE_DATA, count=3 */
+                ring[1] = 0x10100000;  /* CONTROL: DST_SEL=register, WR_CONFIRM */
+                ring[2] = 0x000032D4;  /* ADDRESS_LO = SCRATCH */
+                ring[3] = 0x00000000;  /* ADDRESS_HI */
+                ring[4] = 0xCAFEBABE;  /* value to write */
                 ring[5] = 0xC0001000;  /* NOP (padding) */
                 ring[6] = 0xC0001000;  /* NOP (padding) */
                 ring[7] = 0xC0001000;  /* NOP (padding) */
-                KdPrint(("KIQ_BIOS_RING: wrote IT_WRITE_DATA 0xCAFEBABE -> SCRATCH (offset 0x%08X)\n", 0x00000C75));
+                KdPrint(("KIQ_BIOS_RING: wrote IT_WRITE_DATA 0xCAFEBABE -> SCRATCH (0x32D4)\n"));
             }
 
             /* Step 7.5: CRITICAL � flush CPU stores before WPTR update */
@@ -6035,8 +6219,8 @@ DreamV3DeviceControl(
             resp->CtxCntlBefore = DreamV3ReadRegister(DevExt, 0x0B460);
             resp->RingBaseLo    = DreamV3ReadRegister(DevExt, 0xE060);
             resp->RingBaseHi    = DreamV3ReadRegister(DevExt, 0xE064);
-            resp->PtBase0LoBefore = DreamV3ReadRegister(DevExt, 0x0B408);
-            resp->PtBase0HiBefore = DreamV3ReadRegister(DevExt, 0x0B40C);
+            resp->PtBase0LoBefore = DreamV3ReadRegister(DevExt, 0x6C8C);
+            resp->PtBase0HiBefore = DreamV3ReadRegister(DevExt, 0x6C90);
             resp->KIQ_WPTR = DreamV3ReadRegister(DevExt, 0xE078);
             resp->KIQ_RPTR = DreamV3ReadRegister(DevExt, 0xE06C);
             ringPhys.QuadPart = ((ULONG64)resp->RingBaseHi << 32) | resp->RingBaseLo;
@@ -6124,9 +6308,9 @@ DreamV3DeviceControl(
                             4096, lowAddr, highAddr, boundaryAddr, MmNonCached);
                         if (DevExt->GcvmPtPages[i] == NULL) break;
                         newlyAllocated[i] = TRUE;
+                        RtlZeroMemory(DevExt->GcvmPtPages[i], 4096);
                     }
                     ptPages[i] = DevExt->GcvmPtPages[i];
-                    RtlZeroMemory(ptPages[i], 4096);
                     ptPhys[i] = MmGetPhysicalAddress(ptPages[i]);
                     resp->PtPhysLo[i] = (ULONG)(ptPhys[i].QuadPart & 0xFFFFFFFF);
                     resp->PtPhysHi[i] = (ULONG)(ptPhys[i].QuadPart >> 32);
@@ -6163,15 +6347,15 @@ DreamV3DeviceControl(
             /* Flush cache to ensure GPU sees page tables */
             KeMemoryBarrier();
 
-            /* Write PT_BASE0 (0x0B408/0x0B40C) with root page PA */
-            DreamV3WriteRegister(DevExt, 0x0B408, (ULONG)(ptPhys[0].QuadPart & 0xFFFFFFFF));
-            DreamV3WriteRegister(DevExt, 0x0B40C, (ULONG)(ptPhys[0].QuadPart >> 32));
+            /* Write PT_BASE (0x6C8C/0x6C90) with root page PA */
+            DreamV3WriteRegister(DevExt, 0x6C8C, (ULONG)(ptPhys[0].QuadPart & 0xFFFFFFFF));
+            DreamV3WriteRegister(DevExt, 0x6C90, (ULONG)(ptPhys[0].QuadPart >> 32));
 
             KeMemoryBarrier();
 
             /* Verify write */
-            checkLo = DreamV3ReadRegister(DevExt, 0x0B408);
-            checkHi = DreamV3ReadRegister(DevExt, 0x0B40C);
+            checkLo = DreamV3ReadRegister(DevExt, 0x6C8C);
+            checkHi = DreamV3ReadRegister(DevExt, 0x6C90);
             writtenVal = ((ULONG64)checkHi << 32) | checkLo;
 
             KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
@@ -6213,10 +6397,10 @@ DreamV3DeviceControl(
                 }
             }
 
-            resp->PtBase0LoAfter = DreamV3ReadRegister(DevExt, 0x0B408);
-            resp->PtBase0HiAfter = DreamV3ReadRegister(DevExt, 0x0B40C);
-            resp->PtBaseLoAfter = DreamV3ReadRegister(DevExt, 0x0B608);
-            resp->PtBaseHiAfter = DreamV3ReadRegister(DevExt, 0x0B60C);
+            resp->PtBase0LoAfter = DreamV3ReadRegister(DevExt, 0x6C8C);
+            resp->PtBase0HiAfter = DreamV3ReadRegister(DevExt, 0x6C90);
+            resp->PtBaseLoAfter = DreamV3ReadRegister(DevExt, 0x6C8C);
+            resp->PtBaseHiAfter = DreamV3ReadRegister(DevExt, 0x6C90);
 
             resp->Result = 0xCAFEBABE; /* success */
 

@@ -78,22 +78,22 @@ int main(void) {
     printf("\n--- Preparing PM4 Commands for KIQ Submit ---\n");
     PSP_KIQ_SUBMIT_REQUEST req;
     ZeroMemory(&req, sizeof(req));
-    req.CommandCount = 5;     // 5 DWORDs: header + control + offset + data + nop
+    req.CommandCount = 5;     // 5 DWORDs: header + control + addr_lo + addr_hi + data
     
     // PM4 IT_WRITE_DATA to SCRATCH (0x32D4) = 0xCAFEBABE
-    // Header: TYPE=3(11), COUNT=3, OPCODE=0x37 -> 0xC0033700
-    req.Commands[0] = 0xC0033700;   // PM4: IT_WRITE_DATA (count=3)
-    req.Commands[1] = 0x00000000;   // CONTROL: default (no confirm, dest_sel=GFX)
-    req.Commands[2] = 0x000032D4;   // SCRATCH register offset in DWORDs (0x32D4 / 4)
-    req.Commands[3] = 0xCAFEBABE;   // value to write
-    req.Commands[4] = 0xC0001000;   // PM4: NOP (count=0) - padding
+    // Header: TYPE=3(11), COUNT=3, OPCODE=0x37 -> 0xC0370003
+    req.Commands[0] = 0xC0370003;   // PM4: IT_WRITE_DATA (count=3)
+    req.Commands[1] = 0x10100000;   // CONTROL: DST_SEL=register, WR_CONFIRM
+    req.Commands[2] = 0x000032D4;   // ADDR_LO = SCRATCH register byte offset
+    req.Commands[3] = 0x00000000;   // ADDR_HI
+    req.Commands[4] = 0xCAFEBABE;   // DATA
     
     printf("Prepared %d DWORDs of PM4 commands\n", req.CommandCount);
     printf("  CMD[0] = 0x%08X (IT_WRITE_DATA)\n", req.Commands[0]);
     printf("  CMD[1] = 0x%08X (CONTROL)\n", req.Commands[1]);
     printf("  CMD[2] = 0x%08X (SCRATCH offset = 0x32D4)\n", req.Commands[2]);
-    printf("  CMD[3] = 0x%08X (VALUE = 0xCAFEBABE)\n", req.Commands[3]);
-    printf("  CMD[4] = 0x%08X (NOP)\n", req.Commands[4]);
+    printf("  CMD[3] = 0x%08X (ADDR_HI = 0)\n", req.Commands[3]);
+    printf("  CMD[4] = 0x%08X (DATA = 0xCAFEBABE)\n", req.Commands[4]);
 
     /* Step 6: Submit via PSP KIQ */
     printf("\n--- Submitting via PSP KIQ (IOCTL_PSP_KIQ_SUBMIT) ---\n");

@@ -3,10 +3,13 @@
 int main() {
   HANDLE h = CreateFileW(L"\\\\.\\AMDBC250DreamV43", GENERIC_READ|GENERIC_WRITE,0,NULL,OPEN_EXISTING,0,NULL);
   if (h == INVALID_HANDLE_VALUE) { printf("No driver\n"); return 1; }
-  UINT64 mm[4]={0xFE800000ULL,0x80000,0xC0000000ULL,0x40000000}; DWORD r;
-  DeviceIoControl(h, (DWORD)0x80000B80, mm, sizeof(mm), NULL, 0, &r, NULL);
+  UINT32 init[8]={0,0,0,0,0,0,0,0};
+  *(UINT64*)(init+0)=0xFE800000ULL; init[2]=0x00080000; init[3]=1; /* Flags=1 NBIO_MAP */
+  *(UINT64*)(init+4)=0xC0000000ULL; init[6]=0x40000000;
+  DWORD r;
+  DeviceIoControl(h, (DWORD)0x80000B80, init, sizeof(init), NULL, 0, &r, NULL);
   
-  UINT32 x[4]; x[0]=0x2004; x[1]=0;
+  UINT32 x[4];   x[0]=0x2004; x[1]=0;
   DeviceIoControl(h, (DWORD)0x80000B88, x, sizeof(x), x, sizeof(x), &r, NULL);
   printf("GRBM=0x%08X\n", x[1]);
 
@@ -26,8 +29,8 @@ int main() {
   }
 
   // Scratch test
-  x[0]=0x2074; DeviceIoControl(h, (DWORD)0x80000B88, x, sizeof(x), x, sizeof(x), &r, NULL);
-  printf("Scratch[0x2074]=0x%08X\n", x[1]);
+  x[0]=0x32D4; DeviceIoControl(h, (DWORD)0x80000B88, x, sizeof(x), x, sizeof(x), &r, NULL);
+  printf("Scratch[0x32D4]=0x%08X\n", x[1]);
 
   CloseHandle(h);
   return 0;

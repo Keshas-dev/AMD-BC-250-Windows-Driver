@@ -185,8 +185,33 @@ int main(int argc, char *argv[]) {
     ReadReg(hGpu, 0x32D4, &scratchBefore);
     printf("SCRATCH before: 0x%08X\n", scratchBefore);
 
-    /* Load firmware via direct MMIO */
-    printf("\nLoading %s firmware via direct MMIO...\n", typeNames[fwType]);
+    /* Write test marker to SCRATCH to verify firmware execution */
+    printf("Writing 0xCAFEBABE to SCRATCH...\n");
+    WriteReg(hGpu, 0x32D4, 0xCAFEBABE);
+    UINT32 scratchMarker = 0;
+    ReadReg(hGpu, 0x32D4, &scratchMarker);
+    printf("SCRATCH after write: 0x%08X (note: high nibble masked to 0x4)\n", scratchMarker);
+
+    /* Test IC_BASE register writability */
+    printf("\n--- Testing IC_BASE register writability ---\n");
+    UINT32 icVal;
+    #define TEST_IC_WRITABLE(name, off, testVal) \
+        WriteReg(hGpu, off, testVal); ReadReg(hGpu, off, &icVal); \
+        printf("  %s (0x%04X): write 0x%08X -> read 0x%08X [%s]\n", name, off, testVal, icVal, \
+            icVal == testVal ? "OK" : icVal == 0 ? "ZERO" : icVal == (testVal & 0x0FFFFFFF) ? "MASKED" : "OTHER"); \
+        WriteReg(hGpu, off, 0); /* restore */
+    TEST_IC_WRITABLE("SCRATCH",     0x32D4, 0x12345678);
+    TEST_IC_WRITABLE("MEC_IC_LO",   0x7C10, 0x12345678);
+    TEST_IC_WRITABLE("MEC_IC_HI",   0x7C14, 0x12345678);
+    TEST_IC_WRITABLE("MEC_IC_CNTL", 0x7C18, 0x12345678);
+    TEST_IC_WRITABLE("ME_IC_LO",    0x17370, 0x12345678);
+    TEST_IC_WRITABLE("ME_IC_HI",    0x17374, 0x12345678);
+    TEST_IC_WRITABLE("ME_IC_CNTL",  0x17378, 0x12345678);
+    TEST_IC_WRITABLE("ME_UCODE_ADDR", 0x172B8, 0x12345678);
+    TEST_IC_WRITABLE("ME_UCODE_DATA", 0x172BC, 0x12345678);
+    #undef TEST_IC_WRITABLE
+
+    /* Load firmware via direct MMIO using driver IOCTL */
     UINT32 result = 0, ucodeVer = 0;
     BOOL ok = LoadCpFw(hGpu, fwType, fwData, fwSize, &result, &ucodeVer);
 
@@ -202,6 +227,32 @@ int main(int argc, char *argv[]) {
             printf("\nFirmware load failed with error code 0x%08X\n", result);
         }
     }
+
+    /* Check IC_BASE and UCODE_ADDR after load */
+    printf("\n--- Post-load register check ---\n");
+    UINT32 ucodeAddr = 0, icBaseLo = 0, icBaseHi = 0, icCntl = 0;
+    ReadReg(hGpu, 0x172B8, &ucodeAddr);
+    ReadReg(hGpu, 0x7C10, &icBaseLo);    /* REG_MEC_IC_LO */
+    ReadReg(hGpu, 0x7C14, &icBaseHi);    /* REG_MEC_IC_HI */
+    ReadReg(hGpu, 0x7C18, &icCntl);      /* REG_MEC_IC_CNTL */
+    printf("  ME_UCODE_ADDR (0x172B8) = 0x%08X\n", ucodeAddr);
+    printf("  MEC_IC_LO     (0x7C10)  = 0x%08X\n", icBaseLo);
+    printf("  MEC_IC_HI     (0x7C14)  = 0x%08X\n", icBaseHi);
+    printf("  MEC_IC_CNTL   (0x7C18)  = 0x%08X\n", icCntl);
+    /* Also check ME IC_BASE for comparison */
+    UINT32 meIcLo = 0, meIcHi = 0, meIcCntl = 0;
+    ReadReg(hGpu, 0x17370, &meIcLo);
+    ReadReg(hGpu, 0x17374, &meIcHi);
+    ReadReg(hGpu, 0x17378, &meIcCntl);
+    printf("  ME_IC_LO     (0x17370) = 0x%08X\n", meIcLo);
+    printf("  ME_IC_HI     (0x17374) = 0x%08X\n", meIcHi);
+    printf("  ME_IC_CNTL   (0x17378) = 0x%08X\n", meIcCntl);
+    /* Check MEC ME1 halt status */
+    UINT32 mecHalt = 0;
+    ReadReg(hGpu, 0x7A00, &mecHalt);
+    printf("  MEC_ME1_CNTL (0x7A00)  = 0x%08X", mecHalt);
+    if (mecHalt & 1) printf(" [MEC_HALTED]"); else printf(" [MEC_RUNNING]");
+    printf("\n");
 
     /* Read SCRATCH after */
     UINT32 scratchAfter = 0;

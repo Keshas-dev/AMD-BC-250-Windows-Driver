@@ -83,9 +83,9 @@ Environment:
 
 /* MEC registers (compute engine) */
 #define REG_MEC_ME1_CNTL        0x7A00   /* MEC ME1 control (GC_BASE shifted) */
-#define REG_MEC_IC_CNTL         0x7C18   /* MEC IC control */
-#define REG_MEC_IC_LO           0x7C10   /* MEC IC base low */
-#define REG_MEC_IC_HI           0x7C14   /* MEC IC base high */
+#define REG_MEC_IC_CNTL         0x17398   /* MEC IC control */
+#define REG_MEC_IC_LO           0x17390   /* MEC IC base low */
+#define REG_MEC_IC_HI           0x17394   /* MEC IC base high */
 
 /* RLC registers */
 #define REG_RLC_CNTL            0x3A00   /* RLC control */
@@ -232,42 +232,36 @@ DreamV3LoadSingleFirmware(
         
         switch (FwType) {
         case FW_TYPE_ME:
-            BAR5_U32(REG_ME_IC_CNTL) = IC_CNTL__ENABLE;
             BAR5_U32(REG_ME_IC_LO) = IcBaseLo;
             BAR5_U32(REG_ME_IC_HI) = IcBaseHi;
+            BAR5_U32(REG_ME_IC_CNTL) = 0;
             KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                 "AMDBC250-FW: ME IC_BASE=0x%08X%08X\n", IcBaseHi, IcBaseLo));
             break;
             
         case FW_TYPE_PFP:
-            BAR5_U32(REG_PFP_IC_CNTL) = IC_CNTL__ENABLE;
             BAR5_U32(REG_PFP_IC_LO) = IcBaseLo;
             BAR5_U32(REG_PFP_IC_HI) = IcBaseHi;
+            BAR5_U32(REG_PFP_IC_CNTL) = 0;
             KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                 "AMDBC250-FW: PFP IC_BASE=0x%08X%08X\n", IcBaseHi, IcBaseLo));
             break;
             
         case FW_TYPE_CE:
-            BAR5_U32(REG_CE_IC_CNTL) = IC_CNTL__ENABLE;
             BAR5_U32(REG_CE_IC_LO) = IcBaseLo;
             BAR5_U32(REG_CE_IC_HI) = IcBaseHi;
+            BAR5_U32(REG_CE_IC_CNTL) = 0;
             KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                 "AMDBC250-FW: CE IC_BASE=0x%08X%08X\n", IcBaseHi, IcBaseLo));
             break;
             
         case FW_TYPE_MEC:
-            BAR5_U32(REG_MEC_IC_CNTL) = IC_CNTL__ENABLE;
             BAR5_U32(REG_MEC_IC_LO) = IcBaseLo;
             BAR5_U32(REG_MEC_IC_HI) = IcBaseHi;
+            BAR5_U32(REG_MEC_IC_CNTL) = 0;
             KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                 "AMDBC250-FW: MEC IC_BASE=0x%08X%08X\n", IcBaseHi, IcBaseLo));
             break;
-
-        default:
-            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
-                "AMDBC250-FW: Unknown firmware type %u\n", FwType));
-            Status = STATUS_INVALID_PARAMETER;
-            goto cleanup;
         }
         
         /* Step 3: Upload Jump Table via UCODE_DATA registers */
@@ -314,6 +308,20 @@ DreamV3LoadSingleFirmware(
         
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
             "AMDBC250-FW: Wrote version 0x%X to UCODE_ADDR\n", Hdr->UcodeVersion));
+        
+        /* Step 4b: Poll UCODE_ADDR until DMA completes (reads back as 0) */
+        {
+            UINT32 pollTimeoutUs = 500000;  /* 500ms max */
+            UINT32 pollResult = Hdr->UcodeVersion;
+            for (UINT32 p = 0; p < pollTimeoutUs; p++) {
+                pollResult = BAR5_U32(UcodeAddrReg);
+                if (pollResult == 0) break;
+                KeStallExecutionProcessor(1);
+            }
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                "AMDBC250-FW: DMA poll complete after ~%u us, final UCODE_ADDR=0x%08X\n",
+                pollTimeoutUs, pollResult));
+        }
         
         /* Step 5: Unhalt the loaded engine (keep others halted) */
         switch (FwType) {

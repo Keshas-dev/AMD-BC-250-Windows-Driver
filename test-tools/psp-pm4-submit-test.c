@@ -138,12 +138,13 @@ int main(void) {
         RtlZeroMemory(&resp, sizeof(resp));
 
         /* IT_WRITE_DATA to SCRATCH = 0xCAFEBABE */
-        req.CommandCount = 4;
+        req.CommandCount = 5;
         req.WaitMs = 100;
-        req.Commands[0] = 0xC0023700;  /* PM4 header: IT_WRITE_DATA */
-        req.Commands[1] = 0x00000001;  /* control: ENGINE_ME, DST_MEMORY */
-        req.Commands[2] = 0x000032D4;  /* SCRATCH register offset */
-        req.Commands[3] = 0xCAFEBABE;  /* value to write */
+        req.Commands[0] = 0xC0370003;  /* PM4 header: IT_WRITE_DATA */
+        req.Commands[1] = 0x10100000;  /* control: DST_SEL=register, WR_CONFIRM */
+        req.Commands[2] = 0x000032D4;  /* ADDR_LO = SCRATCH */
+        req.Commands[3] = 0x00000000;  /* ADDR_HI */
+        req.Commands[4] = 0xCAFEBABE;  /* DATA */
 
         BOOL ok = DeviceIoControl(hPsp, IOCTL_PSP_GPU_PM4_SUBMIT, &req, sizeof(req), &resp, sizeof(resp), &br, NULL);
         Log("IOCTL_PSP_GPU_PM4_SUBMIT: ok=%d error=%lu\n", ok, GetLastError());
@@ -182,12 +183,13 @@ int main(void) {
         DWORD br = 0;
         RtlZeroMemory(&req, sizeof(req));
         RtlZeroMemory(&resp, sizeof(resp));
-        req.CommandCount = 4;
+        req.CommandCount = 5;
         req.WaitMs = 100;
-        req.Commands[0] = 0xC0023700;  /* IT_WRITE_DATA */
-        req.Commands[1] = 0x00010001;  /* control: ENGINE_ME=1, DST_MEMORY=1, SELECT_EN=1 */
-        req.Commands[2] = 0x000032D4;  /* SCRATCH register offset */
-        req.Commands[3] = 0xDEADBEEF;  /* value to write */
+        req.Commands[0] = 0xC0370003;  /* IT_WRITE_DATA */
+        req.Commands[1] = 0x10100000;  /* control: DST_SEL=register, WR_CONFIRM */
+        req.Commands[2] = 0x000032D4;  /* ADDR_LO = SCRATCH */
+        req.Commands[3] = 0x00000000;  /* ADDR_HI */
+        req.Commands[4] = 0xDEADBEEF;  /* DATA */
 
         BOOL ok = DeviceIoControl(hPsp, IOCTL_PSP_GPU_PM4_SUBMIT, &req, sizeof(req), &resp, sizeof(resp), &br, NULL);
         if (ok) {

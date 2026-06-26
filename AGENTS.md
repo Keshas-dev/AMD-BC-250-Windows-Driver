@@ -75,6 +75,14 @@ Formula: `BAR5_offset = GC_BASE(0x1260) + Linux_DWORD_offset * 4`
 - **KIQ_BASE_LO (0xE060)**: writable → KIQ works
 - All other ring registers (CNTL, RPTR, WPTR, DOORBELL) writable
 
+## Firmware Loading — Critical Bug Fix (2026-06-25)
+- **Bug**: LOAD_CP_FW wrote IC_BASE_CNTL=0x100 (ENABLE bit) BEFORE setting IC_BASE_LO/HI. If bit 8 auto-starts DMA from IC_BASE address, DMA starts with stale address 0 → firmware never loads into engine instruction memory.
+- **Fix**: Write IC_BASE_LO first, then HI, then CNTL=0 (matches Linux). Trigger DMA by writing version to UCODE_ADDR.
+- **Proof**: Even 8 bytes of 0xDE at ucode start caused no crash → engine was never executing loaded firmware.
+- **Second fix**: Added UCODE_ADDR polling (wait until reads 0, 500ms timeout) before unhalt. Linux does this to confirm DMA completion.
+- **Affected files**: `src/kmd/amdbc250_dream_kmd.c` (LOAD_CP_FW IOCTL), `src/kmd/amdbc250_dream_fw_load.c` (DreamV3LoadSingleFirmware)
+- **Build status**: `output\atikmdag.sys` with both fixes, signed. Requires reinstall to take effect.
+
 ## CP Firmware — Direct MMIO Load
 - `LOAD_CP_FW` IOCTL (`0x80000BD4`): parses 44-byte firmware header, uploads Jump Table via UCODE_DATA registers.
 - IC_BASE registers: ME_IC=0x17370-0x17378, PFP_IC=0x17360-0x17368, CE_IC=0x17380-0x17388
@@ -170,33 +178,37 @@ Formula: `BAR5_offset = GC_BASE(0x1260) + Linux_DWORD_offset * 4`
 - Value matches Sienna_Cichlid override `mmRLC_CP_SCHEDULERS_Sienna_Cichlid = 0x4ca1`
 - But 0xECA1 mod 4 = 1 means offset is NOT 4-byte aligned — empirically found at 0xECAA by probe
 
-## Progress Summary (2026-06-24) — KIQ RPTR Still 0
+## Progress Summary (2026-06-26) — Software PM4 Executor Implemented
 
-### Achievements Since Last Session
-- **GRBM_GFX_INDEX (0x34D0) confirmed writable** — selects ME=1 correctly for KIQ alias access
-- **HQD registers at 0xDAC0+ are NBIO-BLOCKED for writes** — ACTIVE=1, PQ_BASE, PQ_CONTROL, VMID writes all return 0. Only PERSISTENT_STATE bit 0 sticks
-- **KIQ alias at 0xE060+ writability mapped**: WRITABLE → BASE_LO (0xE060), RPTR (0xE06C), DOORBELL (0xE074), WPTR (0xE078), VMID (0xE07C), ACTIVE (0xE080). READ-ONLY → SIZE (0xE068, reads 0), PQ_CTL (0xE070, reads 0x81818181)
-- **MEC firmware loaded successfully** via extended LOAD_CP_FW IOCTL (type 4) — MEC_ME1_CNTL=0 (unhalted) after load. MEC firmware (cyan_skillfish2_mec.bin) version 0x90
-- **CONTEXT0_CNTL=0x04 test** (PT_DISABLE, DEFAULT_PAGE=system) did NOT advance RPTR
-- **Previous "partial HQD write" (0xDEADBEEF→0x0000BEE0) was misleading** — likely stale/aliased readback
-- **System hung** requiring hard reboot — likely from CONTEXT0_CNTL write (0x04) while engine active
+### Achievements This Session
+- **Software PM4 executor** (`DreamV3SwPm4Process` at kmd.c:1564): Translates PM4 packets (IT_NOP, IT_WRITE_DATA, IT_EVENT_WRITE_EOP, IT_RELEASE_MEM, PM4_TYPE_0) to direct register MMIO writes. No hardware ring processing required.
+- **PATH 3 fallback in SEND_PM4** (kmd.c:3912): When PSP KIQ and GfxRing are both unavailable, falls back to software PM4 executor. This bypasses the KIQ_SIZE=0 hardware block entirely.
+- **Test tool**: `test-tools/sw-pm4-test.c` → `sw-pm4-test.exe` (compile via `compile-sw-pm4-test.bat`).
+- **Driver builds clean** with no new warnings or errors.
+- **GRBM_GFX_CNTL (0x2022) does NOT enable HQD access** on BC-250 — all CP_HQD_* writes silently dropped regardless of ME/PIPE/QUEUE select.
+- **Corrected HQD register offsets** from kmd.c:4765-4782: ACTIVE=0xDAC0, VMID=0xDAC4, PQ_BASE_LO=0xDAD8, PQ_BASE_HI=0xDADC, PQ_RPTR=0xDAE0, PQ_CONTROL=0xDAFC, PQ_WPTR_LO=0xDB90.
+- **KIQ_WPTR discovered to be 9-bit only** (mask 0x1FF) — max ring 512 dwords (2048 bytes).
+- **MEC2 firmware tested** (cyan_skillfish2_mec2.bin) — has real ARM64 ucode at 0x41830 vs MEC1's NOP pattern, but KIQ behavior identical.
+- **RLC firmware loading SKIPPED** — RLC registers (0x3A00-0x3A50) in freeze zone, BIOS/SMU loads RLC firmware.
+- **MEC firmware execution VERIFIED** by corrupting first 8 bytes of ucode at 0x41830 → SCRATCH changed to 0x00000000 (engine executed corrupted code).
+- **IC_BASE register offsets fixed**: 0x17390-0x17398 (MEC), 0x17370-0x17378 (ME).
+- **IC_BASE_CNTL value fixed**: set to 0 (not 0x100), write LO/HI before CNTL.
 
-### Remaining Blockers for KIQ Ring Processing
-1. **KIQ_RPTR stays 0** — even with MEC loaded, KIQ_ACTIVE=1, KIQ_BASE=valid ring (NOP at offset 0), KIQ_WPTR=1/4, KIQ_SIZE=0 (read-only), KIQ_PQ_CTL=0x81818181 (read-only)
-2. **KIQ_SIZE=0 read-only** at 0xE068 — hardware thinks ring has 0 bytes; CP may refuse to process
-3. **HQD registers NBIO-blocked** — cannot configure queue via standard GFX10 path
-4. **RLC_CP_SCHEDULERS at 0xECA1 is misaligned** — empirically found at 0xECAA but that's also not 4-byte aligned (0xECAA & 3 = 2)
-5. **May need KIU firmware** — KIQ handler may be a separate microcode component within MEC, not loaded by standard MEC firmware load
+### Remaining Blockers
+1. **KIQ_SIZE=0 read-only at 0xE068** — hardware thinks ring has 0 bytes; CP refuses to process. **Fundamental blocker** for hardware ring processing — software PM4 executor is the workaround.
+2. **ALL CP_HQD_* registers (0xDAC0-0xDBFF) NBIO-blocked** — cannot configure queue via standard GFX10 path.
+3. **KIQ_WPTR 9-bit limit** — max ring 512 dwords (2048 bytes).
+4. **comprehensive-pm4-test.exe causes system hang** — leaves KIQ active + ME_CNTL unhalted on exit.
 
 ### Next Steps
-1. **Verify KIU firmware presence** — check if KIU needs separate loading (compare with Linux gfx_v10_0.c KIQ init)
-2. **Try VRAM ring allocation** — if system aperture is real blocker, find VRAM base via BAR2 or register
-3. **Find correct RLC_CP_SCHEDULERS offset** — scan 4-byte-aligned addresses around 0xEC00-0xEF00
-4. **Add GRBM_GFX_CNTL register** (Linux uses this for ME/PIPE/QUEUE select, not GRBM_GFX_INDEX)
-5. **Test KIQ with LOAD_CP_FW only** — skip PSP init, load all firmware manually first
+1. **Deploy and test software PM4 executor** — run `sw-pm4-test.exe` (needs admin, test-signing, driver installed).
+2. **Extend software PM4 executor** with more opcodes (IT_SET_CONFIG_REG, IT_INDIRECT_BUFFER) if needed.
+3. **Implement VRAM ring allocation** — if system aperture is real blocker for KIQ, find VRAM base via BAR2.
+4. **Investigate SDMA engine** — STATUS_DEVICE_NOT_READY may be due to missing firmware init.
 
 ### Safety Notes
-- **40 CU unlock code removed** — wrote to wrong offset (0x3264 instead of 0x44C4=GC_BASE+0x3264), caused freeze
-- **GRBM_GFX_INDEX (0x34D0) IS safe to write** selecting ME=1 — confirmed by multiple runs
-- **CONTEXT0_CNTL writes may hang system** — PT_DISABLE while engine active caused last freeze
-- **ALWAYS save/restore** PT_BASE0 before writing — some configs destroyed by 0xDEADBEEF
+- **KIQ_SIZE=0 read-only is HARDWARE-LEVEL** — 0xE068 not found in MEC firmware binary; firmware patching cannot bypass.
+- **GRBM_GFX_INDEX (0x34D0) IS safe to write** selecting ME=1 — confirmed by multiple runs.
+- **CONTEXT0_CNTL writes may hang system** — PT_DISABLE while engine active caused freeze.
+- **ALWAYS deactivate KIQ (0xE080=0) and restore GRBM_GFX_INDEX (0xE0000000)** before exiting tests.
+- **ALWAYS save/restore** PT_BASE0 before writing — some configs destroyed by 0xDEADBEEF.

@@ -42,7 +42,7 @@ static void InitHardware(HANDLE h) {
 
 static BOOL CheckGrbm(HANDLE h, const char *label) {
     UINT32 v = 0;
-    ReadReg(h, 0x2004, &v);
+    ReadReg(h, 0x3260, &v);
     Log("  [%s] GRBM=0x%08X%s\n", label, v,
         (v != 0xFFFFFFFF && v != 0x00000000) ? " *** UNBLOCKED! ***" : "");
     fflush(g);
@@ -246,7 +246,7 @@ int main(void) {
 
         /* Check other blocked regs */
         UINT32 tmp;
-        ReadReg(h, 0x2074, &tmp); Log("  Scratch[0x2074] = 0x%08X\n", tmp);
+        ReadReg(h, 0x32D4, &tmp); Log("  Scratch[0x32D4] = 0x%08X\n", tmp);
         ReadReg(h, 0x2000, &tmp); Log("  CP[0x2000] = 0x%08X\n", tmp);
         ReadReg(h, 0x0D00, &tmp); Log("  CLK[0x0D00] = 0x%08X\n", tmp);
         ReadReg(h, 0xA000, &tmp); Log("  RSMU[0xA000] = 0x%08X\n", tmp);
@@ -268,10 +268,10 @@ int main(void) {
     /* ============================================ */
     Log("\n=== TEST 12: GRBM write attempt ===\n"); fflush(g);
     {
-        ReadReg(h, 0x2004, &v);
+        ReadReg(h, 0x3260, &v);
         Log("  GRBM before: 0x%08X\n", v);
-        BOOL ok = WriteReg(h, 0x2004, 0x00000000);
-        ReadReg(h, 0x2004, &rb);
+        BOOL ok = WriteReg(h, 0x3260, 0x00000000);
+        ReadReg(h, 0x3260, &rb);
         Log("  GRBM after:  0x%08X (write=%s)\n", rb, ok ? "OK" : "FAIL");
         fflush(g);
     }

@@ -32,12 +32,13 @@ static BOOL InitNBIO(HANDLE h) {
 }
 
 static BOOL SendPm4(HANDLE h, UINT32 *cmds, UINT32 count, UINT32 fence) {
-    UCHAR buf[272] = {0};
-    /* Match AMDBC250_IOCTL_SEND_PM4 struct: Commands[64] first, then CommandCount */
+    UCHAR buf[280] = {0};
+    /* AMDBC250_IOCTL_SEND_PM4: Commands[64](256B) + CommandCount(4B) + Padding(4B) + FenceValue(8B) + QueueType(4B) + Padding2(4B) = 280B */
     RtlCopyMemory(buf + 0, cmds, count * sizeof(UINT32));  /* Commands[64] at offset 0 */
     *(UINT32*)(buf + 256) = count;   /* CommandCount at offset 256 */
-    *(UINT32*)(buf + 260) = fence;   /* FenceValue at offset 260 */
-    *(UINT32*)(buf + 264) = 0;       /* QueueType = GFX at offset 264 */
+    /* buf[260] = Padding = 0 (already zeroed) */
+    *(UINT64*)(buf + 264) = fence;   /* FenceValue at offset 264 */
+    *(UINT32*)(buf + 272) = 0;       /* QueueType = GFX at offset 272 */
     DWORD br = 0;
     return DeviceIoControl(h, 0x80000B84, buf, sizeof(buf), NULL, 0, &br, NULL);
 }
@@ -195,7 +196,7 @@ int main(void) {
             0xE064,  /* CP_KIQ_BASE_HI */
             0xE078,  /* CP_KIQ_WPTR */
             0xE06C,  /* CP_KIQ_RPTR */
-            0xECA1,  /* RLC_CP_SCHEDULERS */
+            0xECA8,  /* RLC_CP_SCHEDULERS */
         };
         char *names[] = {
             "GRBM_GFX_INDEX", "CP_ME_CNTL", "CP_HQD_ACTIVE", "CP_HQD_VMID",

@@ -58,7 +58,7 @@ static void SelectEngine(unsigned me, unsigned queue) {
 #define KIQ_WPTR        0xE078
 #define ME_CNTL         0x4A74
 #define GRBM_INDEX      0x34D0
-#define RLC_SCHED       0xECA1
+#define RLC_SCHED       0xECA8
 
 /* Read all HQD regs for selected queue */
 static void DumpQueue(int qnum) {

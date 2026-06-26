@@ -1,0 +1,19 @@
+Session: 2026-06-26 — Software PM4 Executor + RLC skip
+
+Key changes:
+1. src/kmd/amdbc250_dream_kmd.c:
+   - Added DreamV3SwPm4Process() at line 1564 — parses PM4 packets (IT_NOP, IT_WRITE_DATA,
+     IT_EVENT_WRITE_EOP, IT_RELEASE_MEM, PM4_TYPE_0) and executes via direct MMIO register writes.
+     No hardware ring processing required — bypasses KIQ_SIZE=0 hardware block.
+   - Added PATH 3 in SEND_PM4 handler (line 3912): When PSP KIQ and GfxRing are both unavailable,
+     falls back to software PM4 executor. Writes fences to GlobalFence.VirtualAddress.
+2. test-tools/sw-pm4-test.c — test tool for software PM4 executor
+3. test-tools/compile-sw-pm4-test.bat — compile script
+
+Key findings:
+- RLC firmware loading from fw_load.c is SKIPPED — RLC registers (0x3A00-0x3A50) in freeze zone.
+- ALL CP_HQD_* registers NBIO-blocked — confirmed with correct offsets.
+- KIQ_WPTR is 9-bit only (mask 0x1FF).
+- MEC2 firmware has real ucode but KIQ behavior identical to MEC1.
+- KIQ_SIZE=0 is HARDWARE-LEVEL check — not patchable in MEC firmware.
+- build.bat works, driver signed clean.

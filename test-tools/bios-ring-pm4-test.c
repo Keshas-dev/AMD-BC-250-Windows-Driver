@@ -151,13 +151,13 @@ int main(int argc, char *argv[]) {
     /* Step 4: Send PM4 via SEND_PM4 IOCTL (PATH 1: PSP KIQ) */
     printf("\n--- Step 4: Send PM4 via PSP KIQ ---\n");
     UINT32 pm4[8];
-    /* PM4 Type 3: IT_WRITE_DATA (0x37), count=3 (control + offset + data)
-     * header = (3 << 30) | (3 << 16) | (0x37 << 8) = 0xC0033700 */
-    pm4[0] = 0xC0033700;  /* IT_WRITE_DATA */
-    pm4[1] = 0x00000000;  /* CONTROL: default (dest_sel=GFX, no confirm) */
-    pm4[2] = 0x000032D4;  /* SCRATCH register offset */
-    pm4[3] = 0xCAFEBABE;  /* value to write */
-    pm4[4] = 0xC0001000;  /* NOP */
+    /* PM4 Type 3: IT_WRITE_DATA (0x37), count=3 (addr_lo + addr_hi + data)
+     * header = 0xC0370003 */
+    pm4[0] = 0xC0370003;  /* IT_WRITE_DATA */
+    pm4[1] = 0x10100000;  /* CONTROL: DST_SEL=register, WR_CONFIRM */
+    pm4[2] = 0x000032D4;  /* ADDR_LO = SCRATCH */
+    pm4[3] = 0x00000000;  /* ADDR_HI */
+    pm4[4] = 0xCAFEBABE;  /* DATA */
     pm4[5] = 0xC0001000;  /* NOP */
     pm4[6] = 0xC0001000;  /* NOP */
     pm4[7] = 0xC0001000;  /* NOP */

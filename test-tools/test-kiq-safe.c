@@ -46,12 +46,14 @@ int main(void) {
     if (h == INVALID_HANDLE_VALUE) { Log("Open failed\n"); if(g) fclose(g); return 1; }
 
     /* INIT_HARDWARE — match driver struct size (28 bytes) */
-    struct { unsigned __int64 mmio; unsigned size; unsigned flags; } ih = {0};
-    ih.mmio = 0xFE800000ULL;
-    ih.size = 0x00080000;
-    ih.flags = 1;
+    UCHAR ih[32] = {0};
+    *(unsigned __int64*)(ih + 0)  = 0xFE800000ULL;
+    *(unsigned*)(ih + 8)          = 0x00080000;
+    *(unsigned*)(ih + 12)         = 1;
+    *(unsigned __int64*)(ih + 16) = 0xC0000000ULL;
+    *(unsigned*)(ih + 24)         = 0x10000000;
     DWORD br = 0;
-    if (!DeviceIoControl(h, 0x80000B80, &ih, sizeof(ih), NULL, 0, &br, NULL)) {
+    if (!DeviceIoControl(h, 0x80000B80, ih, sizeof(ih), NULL, 0, &br, NULL)) {
         Log("INIT_HARDWARE failed (err=%lu) — BAR5 may not be mapped\n", GetLastError());
     }
 

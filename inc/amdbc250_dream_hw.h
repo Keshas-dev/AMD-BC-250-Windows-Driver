@@ -1,6 +1,6 @@
 /*++
 
-Copyright (c) 2026 AMD BC-250 "Dream Drivers" Project — Version 3.0
+Copyright (c) 2026 AMD BC-250 "Dream Drivers" Project ??? Version 3.0
 
 Module Name:
     amdbc250_dream_hw.h
@@ -13,25 +13,25 @@ Abstract:
     ========================================
     
     PREVIOUS VERSIONS (v1.0, v2.0) WERE WRONG:
-    - ❌ v1.0: Claimed "RDNA2 / Cyan Skillfish" but used wrong registers
-    - ❌ v2.0: Claimed "Kaveri / GCN 1.1" — COMPLETELY WRONG
+    - ??? v1.0: Claimed "RDNA2 / Cyan Skillfish" but used wrong registers
+    - ??? v2.0: Claimed "Kaveri / GCN 1.1" ??? COMPLETELY WRONG
     
-    VERSION 3.0 — CORRECT INFORMATION:
-    - ✅ BC-250 is a CUT-DOWN PS5 APU variant
-    - ✅ Codename: "Cyan Skillfish"
-    - ✅ Architecture: RDNA 1.5 (GFX1013)
-    - ✅ GPU: 24 RDNA2 Compute Units (1536 shaders)
-    - ✅ Memory: 16GB GDDR6 (shared CPU/GPU)
-    - ✅ PCI Device ID: 0x13FE
-    - ✅ Has dedicated Ray Tracing cores (early generation)
-    - ✅ TDP: 220W
-    - ✅ CPU: 6× Zen 2 cores @ ~3.5GHz
+    VERSION 3.0 ??? CORRECT INFORMATION:
+    - ??? BC-250 is a CUT-DOWN PS5 APU variant
+    - ??? Codename: "Cyan Skillfish"
+    - ??? Architecture: RDNA 1.5 (GFX1013)
+    - ??? GPU: 24 RDNA2 Compute Units (1536 shaders)
+    - ??? Memory: 16GB GDDR6 (shared CPU/GPU)
+    - ??? PCI Device ID: 0x13FE
+    - ??? Has dedicated Ray Tracing cores (early generation)
+    - ??? TDP: 220W
+    - ??? CPU: 6?? Zen 2 cores @ ~3.5GHz
     
     Linux Support:
     - Kernel: amdgpu (5.15+)
     - Vulkan: RADV (Mesa 25.1+)
     - OpenGL: radeonsi
-    - Windows: NO OFFICIAL DRIVER — this is our target!
+    - Windows: NO OFFICIAL DRIVER ??? this is our target!
     
     Based on:
     - Linux amdgpu driver: drivers/gpu/drm/amd/amdgpu/
@@ -51,12 +51,12 @@ Environment:
 
 #include <ntddk.h>
 
-/* Forward declaration — defined in amdbc250_dream_kmd.h */
+/* Forward declaration ??? defined in amdbc250_dream_kmd.h */
 struct _DREAM_V3_DEVICE_EXTENSION;
 typedef struct _DREAM_V3_DEVICE_EXTENSION *PDREAM_V3_DEVICE_EXTENSION;
 
 /*===========================================================================
-  PCI Identifiers — AMD BC-250 / Cyan Skillfish (GFX1013)
+  PCI Identifiers ??? AMD BC-250 / Cyan Skillfish (GFX1013)
   
   Vendor ID: 0x1002 (Advanced Micro Devices, Inc.)
   Device ID: 0x13FE (BC-250 specific)
@@ -115,7 +115,7 @@ typedef struct _DREAM_V3_DEVICE_EXTENSION *PDREAM_V3_DEVICE_EXTENSION;
 
 /* --- Compute Units and Shaders --- */
 #define AMDBC250_MAX_COMPUTE_UNITS      24      /* 24 RDNA2 CUs            */
-#define AMDBC250_STREAM_PROCESSORS      1536    /* 24 × 64 = 1536          */
+#define AMDBC250_STREAM_PROCESSORS      1536    /* 24 ?? 64 = 1536          */
 #define AMDBC250_SHADER_ENGINES         2       /* 2 shader engines        */
 #define AMDBC250_SHADER_ARRAYS          2       /* 2 shader arrays         */
 #define AMDBC250_CU_PER_SE              6       /* 6 CUs per SE (per SA)   */
@@ -133,7 +133,7 @@ typedef struct _DREAM_V3_DEVICE_EXTENSION *PDREAM_V3_DEVICE_EXTENSION;
 #define AMDBC250_L2_CACHE_SIZE_KB       2048    /* L2 (2 MB total)         */
 #define AMDBC250_CACHE_LINE_SIZE        128     /* RDNA2: 128B lines       */
 
-/* --- Memory Configuration (GDDR6 — Shared UMA) ---
+/* --- Memory Configuration (GDDR6 ??? Shared UMA) ---
   
   IMPORTANT: BC-250 uses Unified Memory Architecture (UMA).
   The 16GB GDDR6 is SHARED between CPU and GPU.
@@ -147,7 +147,7 @@ typedef struct _DREAM_V3_DEVICE_EXTENSION *PDREAM_V3_DEVICE_EXTENSION;
   - Balanced:      8 GB GPU / 8 GB CPU
   - GPU-heavy:     12 GB GPU / 4 GB CPU
   
-  Bandwidth: 256-bit bus × 14 Gbps = ~448 GB/s
+  Bandwidth: 256-bit bus ?? 14 Gbps = ~448 GB/s
 ============================================================================*/
 
 #define AMDBC250_MEMORY_TYPE            "GDDR6"
@@ -178,7 +178,7 @@ typedef struct _DREAM_V3_DEVICE_EXTENSION *PDREAM_V3_DEVICE_EXTENSION;
 #define AMDBC250_PSU_REQUIREMENT_WATTS  300     /* Recommended PSU         */
 
 /*===========================================================================
-  MMIO Register Offsets — GFX10 (RDNA2 / Navi family)
+  MMIO Register Offsets ??? GFX10 (RDNA2 / Navi family)
   
   Based on:
   - Linux amdgpu: drivers/gpu/drm/amd/include/navi10_enum.h
@@ -255,6 +255,9 @@ typedef struct _DREAM_V3_DEVICE_EXTENSION *PDREAM_V3_DEVICE_EXTENSION;
 #define AMDBC250_REG_CP_CE_IC_BASE_CNTL     (AMDBC250_GC_BASE + 0x00016128)  /* 0x17388 */
 #define AMDBC250_REG_CP_CE_IC_BASE_LO       (AMDBC250_GC_BASE + 0x00016120)  /* 0x17380 */
 #define AMDBC250_REG_CP_CE_IC_BASE_HI       (AMDBC250_GC_BASE + 0x00016124)  /* 0x17384 */
+#define AMDBC250_REG_CP_MEC_IC_BASE_LO      (AMDBC250_GC_BASE + 0x00016130)  /* 0x17390 */
+#define AMDBC250_REG_CP_MEC_IC_BASE_HI      (AMDBC250_GC_BASE + 0x00016134)  /* 0x17394 */
+#define AMDBC250_REG_CP_MEC_IC_BASE_CNTL    (AMDBC250_GC_BASE + 0x00016138)  /* 0x17398 */
 
 /* --- GFX10 Ring Buffer (GFX10 style, BC-250: shift by GC_BASE=0x1260) --- */
 #define AMDBC250_REG_CP_GFX_RING0_BASE_LO   (AMDBC250_GC_BASE + 0x0000C800)  /* 0xDA60 */
@@ -306,7 +309,7 @@ typedef struct _DREAM_V3_DEVICE_EXTENSION *PDREAM_V3_DEVICE_EXTENSION;
 /* --- GRBM / SRBM Selection (BC-250) --- */
 /* GRBM_GFX_INDEX confirmed at GC_BASE(0x1260) + 0x2270 = 0x34D0 (Navi10 byte offset).
  * Probe result: returns 0xBA062100 (QUEUE_BROADCAST=1, PIPE_BROADCAST=1, WRITABLE).
- * Sienna_Cichlid Seg1 alias (0xA000+0x2200*4=0x12800) NOT used — BC-250 uses Navi10 layout. */
+ * Sienna_Cichlid Seg1 alias (0xA000+0x2200*4=0x12800) NOT used ??? BC-250 uses Navi10 layout. */
 #define AMDBC250_REG_GRBM_GFX_INDEX        (AMDBC250_GC_BASE + 0x00002270)  /* 0x34D0 */
 
 /* GRBM_GFX_INDEX bit fields (Linux soc15 layout from soc15.h):
@@ -363,11 +366,14 @@ typedef struct _DREAM_V3_DEVICE_EXTENSION *PDREAM_V3_DEVICE_EXTENSION;
 /* --- RLC / Scheduler (Sienna_Cichlid override: mm=0x4CA1, BASE_IDX=1) --- */
 /* From Linux gfx_v10_0.c: #define mmRLC_CP_SCHEDULERS_Sienna_Cichlid 0x4ca1 BASE_IDX=1
  * BAR5 = GC_BASE_SEG1(0xA000) + 0x4CA1 = 0xECA1 (theoretical Sienna_Cichlid offset)
- * NOTE: Probe empirically found this register at 0xECAA (returns 0x002000E4).
- *       0xECAA = 0xA000 + 0x4CAA = +9 bytes from Sienna_Cichlid offset.
- *       Both aliases may work; 0xECA1 is the canonical Linux definition.
+ * EMPIRICALLY FOUND at 0xECAA returns 0x002000E4 (kiq-hqd-init.c).
+ * Test tools successfully written 0xA0 at 0xECA8 (kiq-rlc-test.c).
+ * Both 0xECA1, 0xECA8, and 0xECAA may be aliases for the same register.
+ * 0xECA8 is used in test tools (kiq-rlc-test.c, ib-direct-test.c).
+ * 0xECA1 is the canonical Linux definition (may not be aligned to 4 bytes).
  * Value format: bit7=enable, bits5:6=ME, bits3:4=pipe, bits0:2=queue */
-#define AMDBC250_REG_RLC_CP_SCHEDULERS      (AMDBC250_GC_BASE_SEG1 + 0x00004CA1)  /* 0xECA1 */
+#define AMDBC250_REG_RLC_CP_SCHEDULERS      (0x0000ECA8)  /* empirically confirmed writable */
+#define AMDBC250_REG_RLC_CP_SCHEDULERS_LEGACY (AMDBC250_GC_BASE_SEG1 + 0x00004CA1)  /* 0xECA1 ??? Linux mmRLC_CP_SCHEDULERS, NOT 4-byte aligned, read-only */
 #define AMDBC250_RLC_CP_SCHEDULERS_ENABLE   0x80
 #define AMDBC250_RLC_CP_SCHEDULERS_ME_SHIFT 5
 #define AMDBC250_RLC_CP_SCHEDULERS_PIPE_SHIFT 3
@@ -407,17 +413,23 @@ typedef struct _DREAM_V3_DEVICE_EXTENSION *PDREAM_V3_DEVICE_EXTENSION;
 #define AMDBC250_REG_RLC_PG_ALWAYS_ON_WGP_MASK  (AMDBC250_GC_BASE + 0x00002B04)     /* 0x3D64 */
 
 /* --- KIQ (Kernel Interface Queue, BC-250: shift by GC_BASE=0x1260) --- */
-/* KIQ_BASE_LO at 0xE060 is WRITABLE — only writable BASE register found on BC-250.
- * KIQ_CNTL at 0xE068 is READ-ONLY (writes silently ignored).
+/* KIQ_BASE_LO at 0xE060 is WRITABLE ??? only writable BASE register found on BC-250.
+ * KIQ_CNTL at 0xE068 is READ-ONLY (writes silently ignored, reads 0).
  * KIQ_RPTR/WPTR at 0xE06C/0xE078 are WRITABLE.
+ * KIQ_VMID at 0xE07C is writable.
+ * KIQ_ACTIVE at 0xE080 is writable.
  * Native NBIO offsets (0xCE00+) are all read-only. */
 #define AMDBC250_REG_CP_KIQ_BASE_LO      (AMDBC250_GC_BASE + 0x0000CE00)  /* 0xE060, WRITABLE */
 #define AMDBC250_REG_CP_KIQ_BASE_HI      (AMDBC250_GC_BASE + 0x0000CE04)  /* 0xE064 */
-#define AMDBC250_REG_CP_KIQ_CNTL         (AMDBC250_GC_BASE + 0x0000CE08)  /* 0xE068, readonly */
+#define AMDBC250_REG_CP_KIQ_CNTL         (AMDBC250_GC_BASE + 0x0000CE08)  /* 0xE068, READONLY=0 */
 #define AMDBC250_REG_CP_KIQ_RPTR         (AMDBC250_GC_BASE + 0x0000CE0C)  /* 0xE06C, WRITABLE */
+#define AMDBC250_REG_CP_KIQ_PQ_CTL       (AMDBC250_GC_BASE + 0x0000CE10)  /* 0xE070, READONLY=0x81818181 */
+#define AMDBC250_REG_CP_KIQ_DOORBELL     (AMDBC250_GC_BASE + 0x0000CE14)  /* 0xE074, WRITABLE */
 #define AMDBC250_REG_CP_KIQ_WPTR         (AMDBC250_GC_BASE + 0x0000CE18)  /* 0xE078, WRITABLE */
+#define AMDBC250_REG_CP_KIQ_VMID         (AMDBC250_GC_BASE + 0x0000CE1C)  /* 0xE07C, WRITABLE */
+#define AMDBC250_REG_CP_KIQ_ACTIVE       (AMDBC250_GC_BASE + 0x0000CE20)  /* 0xE080, WRITABLE */
 
-/* --- Interrupt Handler (IH) — GFX10 style --- */
+/* --- Interrupt Handler (IH) ??? GFX10 style --- */
 #define AMDBC250_REG_IH_RB_BASE_LO          0x00003800  /* IH ring base low  */
 #define AMDBC250_REG_IH_RB_BASE_HI          0x00003804  /* IH ring base high */
 #define AMDBC250_REG_IH_RB_CNTL             0x00003808  /* IH ring control   */
@@ -426,7 +438,7 @@ typedef struct _DREAM_V3_DEVICE_EXTENSION *PDREAM_V3_DEVICE_EXTENSION;
 #define AMDBC250_REG_IH_RB_WPTR_POLL_CNTL   0x00003818  /* WPTR poll control */
 #define AMDBC250_REG_IH_CNTL                0x00003820  /* IH control        */
 
-/* --- Memory Controller (MC) — GFX10 --- */
+/* --- Memory Controller (MC) ??? GFX10 --- */
 #define AMDBC250_REG_MC_VM_FB_OFFSET        0x00000000  /* FB offset         */
 #define AMDBC250_REG_MC_VM_FB_LOCATION_BASE 0x00000520  /* FB location base  */
 #define AMDBC250_REG_MC_VM_FB_LOCATION_TOP  0x00000524  /* FB location top   */
@@ -438,7 +450,7 @@ typedef struct _DREAM_V3_DEVICE_EXTENSION *PDREAM_V3_DEVICE_EXTENSION;
 #define AMDBC250_REG_MC_VM_SYSTEM_APERTURE_HIGH_ADDR  0x00000544
 #define AMDBC250_REG_MC_VM_SYSTEM_APERTURE_DEFAULT_ADDR 0x00000548
 
-/* --- GCVM (GFX Hub GPU Virtual Memory) — GC_BASE-shifted --- */
+/* --- GCVM (GFX Hub GPU Virtual Memory) ??? GC_BASE-shifted --- */
 /* Formula: BAR5_offset = GC_BASE(0x1260) + Linux_DWORD_offset * 4 */
 /* CRITICAL: These are GFX Hub registers, NOT MMHUB registers! */
 /* The MMHUB VM block at 0x1B400-0x1B600 is DEAD on BC-250. */
@@ -451,7 +463,7 @@ typedef struct _DREAM_V3_DEVICE_EXTENSION *PDREAM_V3_DEVICE_EXTENSION;
 #define AMDBC250_REG_GCVM_CONTEXT0_PT_BASE_LO           0x00000B608
 #define AMDBC250_REG_GCVM_CONTEXT0_PT_BASE_HI           0x00000B60C
 
-/* TLB entries (Context0 page table — WRITABLE, format unknown) */
+/* TLB entries (Context0 page table ??? WRITABLE, format unknown) */
 #define AMDBC250_REG_GCVM_CTX0_TLB_ENTRY_0              0x00000B408
 #define AMDBC250_REG_GCVM_CTX0_TLB_ENTRY_19             0x00000B454
 
@@ -459,23 +471,23 @@ typedef struct _DREAM_V3_DEVICE_EXTENSION *PDREAM_V3_DEVICE_EXTENSION;
 #define AMDBC250_REG_GCVM_CTX0_CFG_0                    0x00000B4C0
 #define AMDBC250_REG_GCVM_CTX0_CFG_5                    0x00000B4D4
 
-/* GCVM Invalidate — verified working offsets:
+/* GCVM Invalidate ??? verified working offsets:
  * REQ at 0x6C0C, ACK at 0x6C10.
  * Protocol: write 1 to ACK (clear), write 1 to REQ (request), poll ACK bit 0.
  * NOTE: hw.h previously had 0x0B51C/0x0B520 which are WRONG (dead registers). */
 #define AMDBC250_REG_GCVM_INVALIDATE_ENG0_REQ            0x000006C0C
 #define AMDBC250_REG_GCVM_INVALIDATE_ENG0_ACK            0x000006C10
 
-/* --- MMHUB VM (Memory Hub) — WRONG on BC-250, DO NOT USE --- */
+/* --- MMHUB VM (Memory Hub) ??? WRONG on BC-250, DO NOT USE --- */
 /* These are MMHUB MMEA registers (memory controller), NOT VM registers */
 /* MMHUB VM block at 0x1B400-0x1B600 is DEAD (0xFFFFFFFF / 0x0) */
-/* Kept for reference only — do not use in active code */
+/* Kept for reference only ??? do not use in active code */
 #if 0
 #define AMDBC250_REG_MMHUB_VM_CONTEXT0_CNTL              0x00001A00  /* MMEA, NOT VM */
 #define AMDBC250_REG_MMHUB_VM_PT_BASE_LO                 0x00001A04  /* MMEA, NOT VM */
 #endif
 
-/* --- HDP (Host Data Path) — CRITICAL for coherency --- */
+/* --- HDP (Host Data Path) ??? CRITICAL for coherency --- */
 #define AMDBC250_REG_HDP_MEM_COHERENCY_FLUSH_CNTL   0x000012A0  /* FLUSH!    */
 #define AMDBC250_REG_HDP_DEBUG0                     0x000012B0  /* Invalidate */
 #define AMDBC250_REG_HDP_NONSURFACE_INFO            0x000012C0
@@ -493,7 +505,7 @@ typedef struct _DREAM_V3_DEVICE_EXTENSION *PDREAM_V3_DEVICE_EXTENSION;
 #define AMDBC250_REG_HUBPREQ0_DCSURF_PRI_VIEWPORT_START  0x0000509C
 #define AMDBC250_REG_HUBPREQ0_DCSURF_PRI_VIEWPORT_DIMENSION 0x000050A0
 
-/* --- OTG (Output Timing Generator) — DCN 2.1 --- */
+/* --- OTG (Output Timing Generator) ??? DCN 2.1 --- */
 #define AMDBC250_REG_OTG0_OTG_CONTROL                 0x00006000  /* OTG ctrl */
 #define AMDBC250_REG_OTG0_OTG_INTERLACE_CONTROL       0x00006004
 #define AMDBC250_REG_OTG0_OTG_CRTC_V_TOTAL            0x00006010  /* V total  */
@@ -504,7 +516,7 @@ typedef struct _DREAM_V3_DEVICE_EXTENSION *PDREAM_V3_DEVICE_EXTENSION;
 #define AMDBC250_REG_OTG0_OTG_CRTC_H_SYNC_START_END   0x00006024  /* H sync   */
 #define AMDBC250_REG_OTG0_OTG_CRTC_STATUS             0x00006028  /* Status   */
 
-/* --- DMCUB (Display Microcontroller Unit) — GFX10 uses DMCUB --- */
+/* --- DMCUB (Display Microcontroller Unit) ??? GFX10 uses DMCUB --- */
 #define AMDBC250_REG_DMCUB_SCRATCH0               0x00007000
 #define AMDBC250_REG_DMCUB_SCRATCH1               0x00007004
 #define AMDBC250_REG_DMCUB_INBOX0_RPTR            0x00007010
@@ -512,7 +524,7 @@ typedef struct _DREAM_V3_DEVICE_EXTENSION *PDREAM_V3_DEVICE_EXTENSION;
 #define AMDBC250_REG_DMCUB_INBOX0_BASE_ADDR       0x00007018
 #define AMDBC250_REG_DMCUB_INBOX0_SIZE            0x0000701C
 
-/* --- SMU (System Management Unit) — GFX10 power management ---
+/* --- SMU (System Management Unit) ??? GFX10 power management ---
  *
  * CORRECTED offsets for BC-250 (Cyan Skillfish):
  * MP1_BASE__INST0_SEG0 = 0x16000 (byte offset in BAR5)
@@ -522,15 +534,15 @@ typedef struct _DREAM_V3_DEVICE_EXTENSION *PDREAM_V3_DEVICE_EXTENSION;
  * Linux equivalent: SOC15_REG_OFFSET(MP1, 0, mmMP1_SMN_C2PMSG_n)
  */
 #define AMDBC250_REG_MP1_SMN_C2PMSG_33            0x00016984  /* C2P msg 33  (0x16000 + 0x0261*4) */
-#define AMDBC250_REG_MP1_SMN_C2PMSG_66            0x00016A08  /* C2P msg 66  — message ID (0x16000 + 0x0282*4) */
-#define AMDBC250_REG_MP1_SMN_C2PMSG_82            0x00016A48  /* C2P msg 82  — argument (0x16000 + 0x0292*4) */
+#define AMDBC250_REG_MP1_SMN_C2PMSG_66            0x00016A08  /* C2P msg 66  ??? message ID (0x16000 + 0x0282*4) */
+#define AMDBC250_REG_MP1_SMN_C2PMSG_82            0x00016A48  /* C2P msg 82  ??? argument (0x16000 + 0x0292*4) */
 #define AMDBC250_REG_MP1_SMN_C2PMSG_83            0x00016A4C  /* C2P msg 83 (0x16000 + 0x0293*4) */
-#define AMDBC250_REG_MP1_SMN_C2PMSG_90            0x00016A68  /* C2P msg 90  — response status (0x16000 + 0x029A*4) */
+#define AMDBC250_REG_MP1_SMN_C2PMSG_90            0x00016A68  /* C2P msg 90  ??? response status (0x16000 + 0x029A*4) */
 
-/* --- Thermal Sensor — GFX10 ---
+/* --- Thermal Sensor ??? GFX10 ---
  *
  * BC-250 verified offsets:
- * THM_BASE = 0x8000 (confirmed via write-back test — register at 0x8000 is writable)
+ * THM_BASE = 0x8000 (confirmed via write-back test ??? register at 0x8000 is writable)
  * Linux thm_11_0_2_offset.h suggests 0x16600 but this is WRONG on BC-250 P4.00G BIOS.
  * Hardware test: 0x8000 returns 0x18 (writable), 0x8008 returns temperature.
  */
@@ -538,12 +550,12 @@ typedef struct _DREAM_V3_DEVICE_EXTENSION *PDREAM_V3_DEVICE_EXTENSION;
 #define AMDBC250_REG_THM_CURRENT_TEMP             0x00008008  /* THM current temp (read-only) */
 #define AMDBC250_REG_THM_THERMAL_INT_ENA          0x00008050  /* THM interrupt enable (separate from CTRL, Linux offset 0x14*4) */
 
-/* --- GB (Graphics Backend) Address Config — GFX10 --- */
+/* --- GB (Graphics Backend) Address Config ??? GFX10 --- */
 #define AMDBC250_REG_GB_ADDR_CONFIG               0x00009800  /* Addr config   */
 #define AMDBC250_REG_GB_ADDR_CONFIG_READ          0x00009804  /* Addr config r */
 
 /*===========================================================================
-  Register Bit Fields — GFX10 (RDNA2 / Cyan Skillfish)
+  Register Bit Fields ??? GFX10 (RDNA2 / Cyan Skillfish)
 ===========================================================================*/
 
 /* CP_ME_CNTL bits (GFX10) */
@@ -561,7 +573,7 @@ typedef struct _DREAM_V3_DEVICE_EXTENSION *PDREAM_V3_DEVICE_EXTENSION;
 #define IH_CNTL__ENABLE_INTR                      (1 << 0)
 #define IH_CNTL__RPTR_REARM                       (1 << 1)
 
-/* HDP coherency — CRITICAL! */
+/* HDP coherency ??? CRITICAL! */
 #define HDP_MEM_COHERENCY_FLUSH_CNTL__FLUSH_CACHE (1 << 0)
 #define HDP_DEBUG0__INVALIDATE_CACHE              (1 << 0)
 
@@ -570,7 +582,7 @@ typedef struct _DREAM_V3_DEVICE_EXTENSION *PDREAM_V3_DEVICE_EXTENSION;
 #define OTG_CNTL__CRTC_DISP_READ_REQUEST_DISABLE  (1 << 24)
 
 /*===========================================================================
-  PM4 Command Packet Format — GFX10 (RDNA2)
+  PM4 Command Packet Format ??? GFX10 (RDNA2)
   
   Based on: GFX10 PM4 Programming Reference
   (Reverse-engineered by open-source community from Mesa/AMDGPU)
@@ -633,7 +645,7 @@ typedef struct _DREAM_V3_DEVICE_EXTENSION *PDREAM_V3_DEVICE_EXTENSION;
 #define RELEASE_MEM__DATA_SEL__DATA_64          0x03
 
 /*===========================================================================
-  Interrupt Handler Constants — GFX10
+  Interrupt Handler Constants ??? GFX10
 ===========================================================================*/
 
 /* IH client IDs (GFX10) */
@@ -649,7 +661,7 @@ typedef struct _DREAM_V3_DEVICE_EXTENSION *PDREAM_V3_DEVICE_EXTENSION;
 #define IH_RING_SIZE_BYTES                        (256 * 1024)  /* 256 KB ring */
 
 /*===========================================================================
-  SDMA (System DMA) Engine — GFX10
+  SDMA (System DMA) Engine ??? GFX10
 ===========================================================================*/
 
 #define AMDBC250_REG_SDMA0_GFX_RB_BASE_LO         0x0000E000
@@ -671,7 +683,7 @@ typedef struct _DREAM_V3_DEVICE_EXTENSION *PDREAM_V3_DEVICE_EXTENSION;
 #define SDMA_OP_CONST_WRITE                       0x07
 
 /*===========================================================================
-  Ray Tracing Accelerator — GFX1013
+  Ray Tracing Accelerator ??? GFX1013
   
   BC-250 has dedicated RT cores (early generation).
   Performance is poor compared to RDNA3 RT.
@@ -690,7 +702,7 @@ typedef struct _DREAM_V3_DEVICE_EXTENSION *PDREAM_V3_DEVICE_EXTENSION;
 #define IT_INTERSECT_TRIANGLE                     0x5F    /* Intersect triangle*/
 
 /*===========================================================================
-  Memory Alignment Requirements — GFX10
+  Memory Alignment Requirements ??? GFX10
 ===========================================================================*/
 
 #define AMDBC250_RING_ALIGNMENT                   4096    /* 4 KB              */
@@ -724,7 +736,7 @@ typedef struct _DREAM_V3_DEVICE_EXTENSION *PDREAM_V3_DEVICE_EXTENSION;
 #define AMDBC250_MAX_VMIDS                        16      /* VMID 0-15         */
 #define AMDBC250_MAX_VM_CONTEXTS                  16      /* Max VM contexts   */
 
-/* PTE flags — MUST match Linux amdgpu_vm.h GFX10 format */
+/* PTE flags ??? MUST match Linux amdgpu_vm.h GFX10 format */
 #define AMDBC250_PTE_VALID                         (1ULL << 0)
 #define AMDBC250_PTE_SYSTEM                        (1ULL << 1)
 #define AMDBC250_PTE_SNOOP                         (1ULL << 2)
@@ -755,7 +767,7 @@ typedef struct _DREAM_V3_DEVICE_EXTENSION *PDREAM_V3_DEVICE_EXTENSION;
 #define AMDBC250_VMID_MAX_USER                    15      /* Max VMID          */
 
 /*===========================================================================
-  Display Configuration — DCN 2.1
+  Display Configuration ??? DCN 2.1
 ===========================================================================*/
 
 #define AMDBC250_NUM_DISPLAY_PIPES                4       /* DCN 2.1: 4 pipes  */

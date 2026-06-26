@@ -189,7 +189,7 @@ int main(void) {
     /* === 7. RLC registers === */
     Log("\n--- 7. RLC Registers ---\n");
     Log("  RLC_CNTL [0xE090]=0x%08X\n", ReadReg(0xE090));
-    Log("  RLC_CP_SCHEDULERS [0xECA1]=0x%08X\n", ReadReg(0xECA1));
+    Log("  RLC_CP_SCHEDULERS [0xECA8]=0x%08X\n", ReadReg(0xECA8));
     Log("  RLC_SERDES_CU_MASTER [0xECA4]=0x%08X\n", ReadReg(0xECA4));
 
     /* === 8. CP fence/doorbell === */

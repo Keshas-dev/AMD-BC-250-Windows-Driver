@@ -57,8 +57,8 @@ int main(void) {
     printf("  ME_CNTL (0x4A74)   = 0x%08X\n", R(h, 0x4A74));
     printf("  SCRATCH (0x32D4)   = 0x%08X\n", R(h, 0x32D4));
     printf("  KIQ_BASE (0xE060)  = 0x%08X\n", R(h, 0xE060));
-    printf("  KIQ_WPTR (0xE07C)  = 0x%08X\n", R(h, 0xE07C));
-    printf("  KIQ_RPTR (0xE078)  = 0x%08X\n", R(h, 0xE078));
+    printf("  KIQ_RPTR (0xE06C)  = 0x%08X\n", R(h, 0xE06C));
+    printf("  KIQ_WPTR (0xE078)  = 0x%08X\n", R(h, 0xE078));
     printf("  HQD_ACTIVE (0xDAC0)= 0x%08X\n", R(h, 0xDAC0));
     printf("  HQD_PQ_BASE(0xDAD8)= 0x%08X\n", R(h, 0xDAD8));
 
@@ -121,8 +121,8 @@ int main(void) {
     /* Step 6: Check final GPU state */
     printf("\n--- Step 6: Final GPU state ---\n");
     printf("  SCRATCH (0x32D4)   = 0x%08X\n", R(h, 0x32D4));
-    printf("  KIQ_WPTR (0xE07C)  = 0x%08X\n", R(h, 0xE07C));
-    printf("  KIQ_RPTR (0xE078)  = 0x%08X\n", R(h, 0xE078));
+    printf("  KIQ_RPTR (0xE06C)  = 0x%08X\n", R(h, 0xE06C));
+    printf("  KIQ_WPTR (0xE078)  = 0x%08X\n", R(h, 0xE078));
     printf("  ME_CNTL (0x4A74)   = 0x%08X\n", R(h, 0x4A74));
 
     /* Step 7: Try writing SCRATCH directly to test GPU access */

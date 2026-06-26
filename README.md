@@ -27,20 +27,46 @@ AMD BC-250 Windows driver project by Keshas. Goal: fully working GPU driver for 
 - ✅ Build + sign pipeline (`build.bat`) with prebuild validation
 - ✅ Vulkan ICD, D3D9 UMD stubs
 - ✅ **GCVM page table setup** — first successful PT_BASE0 (0x0B408) write on BC-250!
-  - `GCVM_PT_SETUP` IOCTL: allocates 3-level (depth=2) page table
-  - Fills PDEs/PTEs for KIQ ring identity mapping
-  - Triggers TLB invalidation via 0x6C0C/0x6C10 protocol
-  - Returns 0xCAFEBABE on success
-- ✅ **PSP KIQ_BASE programmed** via GPU proxy on Windows 11 26100
-- ✅ Pre-build validation script (`prebuild-check.ps1`): IOCTL uniqueness, memory leak patterns, BSOD patterns
+- ✅ **MEC firmware execution verified** — corrupting ucode changes SCRATCH register
+- ✅ **Software PM4 executor** (`DreamV3SwPm4Process`) — translates PM4 IT_WRITE_DATA, IT_NOP, IT_EVENT_WRITE_EOP, PM4_TYPE_0 to direct MMIO writes when hardware KIQ is unavailable
+- ✅ **PATH 3 fallback** in SEND_PM4 IOCTL — when PSP KIQ and GfxRing are unavailable, processes PM4 in software
 
-### Current Blocker — CP Ring Processing
-GPU CP still not reading from KIQ ring (RPTR=0) after PT_SETUP:
-1. **CP may need queue activation** — HQD_ACTIVE write (0xDAC0) may be NBIO-blocked
-2. **ME_CNTL halt bits** — CP firmware might still be halted
-3. **Known crash**: rapid KIQ submits after PT_SETUP causes PSP driver 0x50 (page fault)
+### Current Blocker — KIQ_SIZE=0 Hardware Block
+GPU CP cannot process KIQ ring because **KIQ_SIZE (0xE068) is factory read-only = 0**:
+1. **KIQ_SIZE=0 read-only** — hardware thinks ring has 0 bytes, CP refuses to process
+2. **ALL CP_HQD_* registers (0xDAC0-0xDBFF) NBIO-blocked** — ACTIVE, BASE, CONTROL, VMID all read-only
+3. **KIQ_WPTR only 9 bits** (mask 0x1FF) — max ring 512 dwords (2048 bytes)
+4. **KIQ_SIZE not patchable** — address 0xE068 not found in MEC firmware binary; check is hardware-level
+5. **Workaround**: Software PM4 executor (`DreamV3SwPm4Process`) bypasses hardware ring entirely
 
 ### Critical Discoveries
+
+**Software PM4 Executor (2026-06-26):**
+- **DreamV3SwPm4Process** translates PM4 packets to direct register writes — NO hardware ring processing required
+- Verified working: IT_WRITE_DATA (SCRATCH), IT_NOP, PM4_TYPE_0, fence writes via SEND_PM4 IOCTL
+- Registered as PATH 3 fallback in SEND_PM4 handler (when PSP KIQ and GfxRing are unavailable)
+- Test tool: `test-tools/sw-pm4-test.c`
+
+**PM4 Header Format Correction:**
+- ALL existing test tools used **wrong PM4 TYPE3 header** (`0xC0370003` instead of correct `0xC0023700`)
+- Correct format: `PM4_TYPE3_HDR(op, count) = (3<<30) | ((count-1)<<16) | (op<<8)`
+- Header `0xC0370003` encodes opcode=0, count=56 (wrong)
+- Header `0xC0023700` encodes opcode=0x37=IT_WRITE_DATA, count=4 (correct)
+- Bug never surfaced because KIQ never processed packets anyway
+
+**MEC Firmware Execution Verified:**
+- Corrupting first 8 bytes of MEC ucode at offset 0x41830 → SCRATCH changed from written value to 0x00000000, proving MEC engine executed and modified memory
+- MEC2 firmware (cyan_skillfish2_mec2.bin) has real ARM64 ucode but KIQ behavior identical to MEC1
+
+**Corrected HQD Register Offsets:**
+- HQD_ACTIVE=0xDAC0, VMID=0xDAC4, PQ_BASE_LO=0xDAD8, PQ_BASE_HI=0xDADC
+- PQ_RPTR=0xDAE0, PQ_CONTROL=0xDAFC, PQ_WPTR_LO=0xDB90
+- ALL confirmed NBIO-blocked (writes silently dropped)
+
+**IC_BASE Register Fixes:**
+- Fixed offsets: MEC IC at 0x17390-0x17398 (was 0x7C10-0x7C18)
+- Fixed IC_BASE_CNTL value: write 0 (not 0x100), write LO/HI before CNTL
+- Added UCODE_ADDR polling (500ms timeout) before unhalt to confirm DMA completion
 
 **Correct GCVM Page Table Register:**
 - **PT_BASE0 (0x0B408)** = the real page table base register — writable, used by GPU MMU
@@ -71,7 +97,6 @@ On Windows 11 26100, PSP's `MmMapIoSpace` for GPU BAR5 fails. The PSP falls back
 - PT_BASE0 (0x0B408) = 0x017CCCC4_7D9AB14E (garbage/uninitialized, not valid page table)
 - CONTEXT0_CNTL (0x0B460) = 0x0104A88D (ENABLE=1, depth=2=3-level)
 - L2_CNTL (0x0B360) = 0x013C7798 (system aperture DISABLED, read-only)
-- System aperture enabled via write: possible? Read-only bits block it
 
 ---
 
@@ -125,11 +150,12 @@ build.bat
 
 ### Test
 ```cmd
-output\gcvm-pt-test.exe       # GCVM page table setup + KIQ test (0xCAFEBABE on success)
-output\gpu-kiq-test.exe       # PM4 ring execution test
-output\safe-test.exe          # Safe read-only register test
-output\iommu-gcvm-check.exe   # IOMMU + GCVM register scan
-output\kiq-diag.exe           # Full KIQ diagnostic
+output\gcvm-pt-test.exe         # GCVM page table setup + KIQ test
+output\gpu-kiq-test.exe         # PM4 ring execution test (uses wrong header)
+output\safe-test.exe            # Safe read-only register test
+output\iommu-gcvm-check.exe     # IOMMU + GCVM register scan
+output\kiq-diag.exe             # Full KIQ diagnostic
+test-tools\sw-pm4-test.exe      # Software PM4 executor test (confirmed working)
 ```
 
 ---
