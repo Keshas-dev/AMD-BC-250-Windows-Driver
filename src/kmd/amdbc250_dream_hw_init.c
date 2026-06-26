@@ -663,6 +663,19 @@ DreamV3HwInitSdmaRing(_In_ PDREAM_V3_DEVICE_EXTENSION DevExt)
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                "AMDBC250-DREAM-V4.3: InitSdmaRing\n"));
 
+    /* Unmap existing SDMA ring if already initialized (prevents leak on re-init) */
+    if (DevExt->SdmaRing.VirtualAddress != NULL) {
+        if (DevExt->SdmaRing.MappedIo) {
+            MmUnmapIoSpace(DevExt->SdmaRing.VirtualAddress,
+                           DevExt->SdmaRing.SizeInBytes);
+        } else {
+            DreamV3FreeContiguousMemory(DevExt->SdmaRing.VirtualAddress,
+                                         DevExt->SdmaRing.SizeInBytes);
+        }
+        DevExt->SdmaRing.VirtualAddress = NULL;
+        DevExt->SdmaRing.Initialized = FALSE;
+    }
+
     /* Read hardware ring base registers (BASE_LO is read-only on BC-250) */
     baseLo = DreamV3ReadRegister(DevExt, AMDBC250_REG_SDMA0_GFX_RB_BASE_LO);
     baseHi = DreamV3ReadRegister(DevExt, AMDBC250_REG_SDMA0_GFX_RB_BASE_HI);

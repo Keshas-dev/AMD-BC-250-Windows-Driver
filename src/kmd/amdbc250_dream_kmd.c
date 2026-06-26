@@ -1564,8 +1564,9 @@ DreamV3WriteEopFence(
 /*
  * Software PM4 executor — translate PM4 packets to direct register writes.
  *
- * Handles IT_NOP, IT_WRITE_DATA (DST_SEL=register only), and IT_EVENT_WRITE_EOP.
- * Other opcodes are skipped (not supported in software mode).
+ * Handles: IT_NOP, IT_WRITE_DATA, IT_EVENT_WRITE_EOP, IT_RELEASE_MEM,
+ *          IT_SET_CONFIG_REG, IT_SET_CONTEXT_REG, IT_SET_SH_REG, PM4_TYPE_0,
+ *          and IT_INDIRECT_BUFFER (maps physical address and recurses).
  *
  * This is a FALLBACK path when hardware KIQ ring processing is unavailable
  * (KIQ_SIZE=0 blocks all CP ring processing on BC-250).
@@ -1575,10 +1576,16 @@ DreamV3SwPm4Process(
     _In_ PDREAM_V3_DEVICE_EXTENSION DevExt,
     _In_reads_(CommandCount) const ULONG *Commands,
     _In_ ULONG CommandCount,
-    _In_ ULONG64 FenceValue
+    _In_ ULONG64 FenceValue,
+    _In_ ULONG Depth
     )
 {
     ULONG i = 0;
+
+    /* Depth guard — prevent stack overflow from nested IT_INDIRECT_BUFFER */
+    if (Depth == 0) {
+        return STATUS_ALERTED;
+    }
 
     while (i < CommandCount) {
         ULONG header = Commands[i];
@@ -1615,25 +1622,21 @@ DreamV3SwPm4Process(
 
             switch (opcode) {
             case IT_NOP:
-                /* NOP: skip payload (count = padding DWORDs) */
                 i += count;
                 break;
 
             case IT_WRITE_DATA: {
                 if (count < 3) {
-                    i += count;  /* malformed, skip */
+                    i += count;
                     break;
                 }
                 ULONG control = Commands[i + 0];
                 ULONG addrLo  = Commands[i + 1];
                 ULONG addrHi  = Commands[i + 2];
-                /* GFX10 DST_SEL: bit 28 = 1 means register write */
                 BOOLEAN isReg = ((control >> 28) & 1) != 0;
                 ULONG wrOne   = (control >> 25) & 0x1;
                 ULONG dataDwCount = count - 3;
 
-                /* Always attempt register write in software mode (DST_SEL checked
-                 * but not strictly required — MMIO range writes work regardless) */
                 if (isReg || (addrLo < 0x200000)) {
                     for (ULONG d = 0; d < dataDwCount; d++) {
                         DreamV3WriteRegister(DevExt, addrLo + (wrOne ? 0 : d * 4), Commands[i + 3 + d]);
@@ -1645,7 +1648,6 @@ DreamV3SwPm4Process(
 
             case IT_EVENT_WRITE_EOP:
             case IT_RELEASE_MEM: {
-                /* Write fence value to GlobalFence address */
                 if (count >= 5 && FenceValue > 0 && DevExt->GlobalFence.VirtualAddress != NULL) {
                     *DevExt->GlobalFence.VirtualAddress = FenceValue;
                     KeMemoryBarrier();
@@ -1655,8 +1657,79 @@ DreamV3SwPm4Process(
                 break;
             }
 
+            case IT_SET_CONFIG_REG: {
+                /* Config register space: HW decodes register from DWORD1 as:
+                 *   internalReg = (DWORD1 << 2) + 0x8000  (32-bit unsigned wrap)
+                 * On BC-250, GC registers are GC_BASE-shifted in BAR5, so:
+                 *   BAR5_offset = AMDBC250_GC_BASE + internalReg
+                 * Remaining DWORDs = register values (written consecutively). */
+                if (count >= 1) {
+                    ULONG hwOff = Commands[i];
+                    ULONG numRegs = count - 1;
+                    ULONG baseReg = AMDBC250_GC_BASE + (hwOff << 2) + 0x8000;
+                    for (ULONG r = 0; r < numRegs; r++) {
+                        DreamV3WriteRegister(DevExt, baseReg + r * 4, Commands[i + 1 + r]);
+                    }
+                }
+                i += count;
+                break;
+            }
+
+            case IT_SET_CONTEXT_REG: {
+                /* Context register space: HW decodes as:
+                 *   internalReg = (DWORD1 << 2) + 0x28000
+                 * BAR5_offset = AMDBC250_GC_BASE + internalReg */
+                if (count >= 1) {
+                    ULONG hwOff = Commands[i];
+                    ULONG numRegs = count - 1;
+                    ULONG baseReg = AMDBC250_GC_BASE + (hwOff << 2) + 0x28000;
+                    for (ULONG r = 0; r < numRegs; r++) {
+                        DreamV3WriteRegister(DevExt, baseReg + r * 4, Commands[i + 1 + r]);
+                    }
+                }
+                i += count;
+                break;
+            }
+
+            case IT_SET_SH_REG: {
+                /* SH register space: HW decodes as:
+                 *   internalReg = (DWORD1 << 2) + 0x2C000
+                 * BAR5_offset = AMDBC250_GC_BASE + internalReg */
+                if (count >= 1) {
+                    ULONG hwOff = Commands[i];
+                    ULONG numRegs = count - 1;
+                    ULONG baseReg = AMDBC250_GC_BASE + (hwOff << 2) + 0x2C000;
+                    for (ULONG r = 0; r < numRegs; r++) {
+                        DreamV3WriteRegister(DevExt, baseReg + r * 4, Commands[i + 1 + r]);
+                    }
+                }
+                i += count;
+                break;
+            }
+
+            case IT_INDIRECT_BUFFER: {
+                /* IB format: DWORD1=addrLo, DWORD2=addrHi, DWORD3=sizeDwords.
+                 * Map the physical address and recursively process. */
+                if (count >= 3) {
+                    PHYSICAL_ADDRESS ibAddr;
+                    ULONG ibSizeDwords = Commands[i + 2];
+                    ibAddr.LowPart = Commands[i + 0] & 0xFFFFFFFC;
+                    ibAddr.HighPart = Commands[i + 1];
+                    if (ibSizeDwords > 0 && ibSizeDwords <= 4096) {
+                        PVOID ibVa = MmMapIoSpace(ibAddr, ibSizeDwords * sizeof(ULONG),
+                                                   MmNonCached);
+                        if (ibVa != NULL) {
+                            DreamV3SwPm4Process(DevExt, (PULONG)ibVa, ibSizeDwords,
+                                                FenceValue, Depth - 1);
+                            MmUnmapIoSpace(ibVa, ibSizeDwords * sizeof(ULONG));
+                        }
+                    }
+                }
+                i += count;
+                break;
+            }
+
             default:
-                /* Unknown opcode — skip payload */
                 i += count;
                 break;
             }
@@ -3716,9 +3789,18 @@ DreamV3DeviceControl(
                         "AMDBC250-DREAM-V4.3: KIQ init FAILED in NBIO_MAP mode\n"));
                 }
 
-                /* SDMA ring init DISABLED for debugging (check BSOD source) */
-                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-                    "AMDBC250-DREAM-V4.3: SDMA ring init SKIPPED (debug)\n"));
+                /* SDMA ring init — re-enabled after NBIO_MAP fix. Gracefully fails
+                 * if SDMA registers at 0xE000 are dead. */
+                {
+                    NTSTATUS sdmaStatus = DreamV3HwInitSdmaRing(DevExt);
+                    if (NT_SUCCESS(sdmaStatus)) {
+                        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                            "AMDBC250-DREAM-V4.3: SDMA ring init OK\n"));
+                    } else {
+                        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+                            "AMDBC250-DREAM-V4.3: SDMA ring init failed (non-fatal): 0x%08X\n", sdmaStatus));
+                    }
+                }
 
                 status = STATUS_SUCCESS;
                 break;
@@ -3914,7 +3996,7 @@ DreamV3DeviceControl(
                 KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                     "AMDBC250-DREAM-V4.3: SEND_PM4 via software executor\n"));
                 status = DreamV3SwPm4Process(DevExt, SendPm4->Commands,
-                    SendPm4->CommandCount, (ULONG64)SendPm4->FenceValue);
+                    SendPm4->CommandCount, (ULONG64)SendPm4->FenceValue, 32);
                 if (NT_SUCCESS(status)) {
                     DevExt->GlobalFence.LastSubmittedValue = (ULONG64)SendPm4->FenceValue;
                 }
