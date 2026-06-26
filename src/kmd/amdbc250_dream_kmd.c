@@ -3936,8 +3936,8 @@ DreamV3DeviceControl(
                 ULONG EopSize = 6 * sizeof(ULONG); /* EOP packet is 6 DWORDs */
                 ULONG TotalBytes = BytesNeeded + (SendPm4->FenceValue > 0 ? EopSize : 0);
 
-                /* Ring wrap if needed (including space for EOP) */
-                if (WPtr + TotalBytes > RingSize) {
+                /* Ring wrap if needed (including space for EOP) — use 64-bit to avoid overflow */
+                if ((ULONG64)WPtr + TotalBytes > RingSize) {
                     ULONG NopCount = (RingSize - WPtr) / sizeof(ULONG);
                     for (ULONG i = 0; i < NopCount; i++) {
                         Ring[WPtr / sizeof(ULONG) + i] = PM4_TYPE2_NOP;
@@ -4010,7 +4010,7 @@ DreamV3DeviceControl(
                 break;
             }
 
-            if (RegAcc->RegisterOffset + 4 > DevExt->MmioSize || RegAcc->RegisterOffset + 4 < RegAcc->RegisterOffset) {
+            if (RegAcc->RegisterOffset > DevExt->MmioSize - 4) {
                 status = STATUS_INVALID_PARAMETER;
                 break;
             }
@@ -4038,7 +4038,7 @@ DreamV3DeviceControl(
                 break;
             }
 
-            if (RegAcc->RegisterOffset + 4 > DevExt->MmioSize || RegAcc->RegisterOffset + 4 < RegAcc->RegisterOffset) {
+            if (RegAcc->RegisterOffset > DevExt->MmioSize - 4) {
                 status = STATUS_INVALID_PARAMETER;
                 break;
             }
@@ -5385,8 +5385,9 @@ DreamV3DeviceControl(
             "AMDBC250-DREAM-V4.3: LOAD_CP_FW header: total=%u hdrSize=%u ver=%u ucodeSize=%u ucodeOff=%u jtOffDw=%u jtSizeDw=%u\n",
             totalSize, hdrSizeBytes, ucodeVersion, ucodeSize, ucodeOffset, jtOffsetDw, jtSizeDw));
 
-        /* Validate header fields */
-        if (ucodeSize == 0 || ucodeOffset < hdrSizeBytes || (ucodeOffset + ucodeSize) > fwSize) {
+        /* Validate header fields — avoid integer overflow */
+        if (ucodeSize == 0 || ucodeOffset < hdrSizeBytes || 
+            ucodeSize > fwSize || ucodeOffset > fwSize - ucodeSize) {
             KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
                 "AMDBC250-DREAM-V4.3: LOAD_CP_FW - invalid header fields\n"));
             resp->Result = 0xDEAD0014;
@@ -5453,10 +5454,13 @@ DreamV3DeviceControl(
         #define MEC_ME1_HALT       (1 << 0) /* bit 0 = halt */
 
         __try {
-            /* Step 1: Halt engines */
-            BAR5_WR(REG_ME_CNTL, (1 << 28) | (1 << 30) | (1 << 29));  /* ME_HALT | PFP_HALT | CE_HALT */
+            /* Step 1: Halt — only halt target engine */
             if (fwType == 4) {
-                BAR5_WR(REG_MEC_ME1_CNTL, MEC_ME1_HALT);  /* Halt MEC ME1 */
+                /* MEC only: don't halt GFX engines */
+                BAR5_WR(REG_MEC_ME1_CNTL, MEC_ME1_HALT);
+            } else {
+                BAR5_WR(REG_ME_CNTL, (1 << 28) | (1 << 30) | (1 << 29));  /* ME_HALT | PFP_HALT | CE_HALT */
+                BAR5_WR(REG_MEC_ME1_CNTL, MEC_ME1_HALT);  /* Also halt MEC */
             }
             KeStallExecutionProcessor(10);
 

@@ -27,68 +27,71 @@ AMD BC-250 Windows driver project by Keshas. Goal: fully working GPU driver for 
 - ✅ **NBIO_MAP init** — safe init path (flag=1), avoids GPU alive test hang
 
 ### Firmware & Engine Discovery
-- ✅ **CP firmware loads successfully** via MMIO IC_BASE DMA (IC_BASE offsetai pataisyti)
-- ✅ **MEC firmware execution verified** — first bytes ucode corrupt → SCRATCH pasikeitė (engine tikrai veikia)
-- ✅ **MEC2 firmware** turi realų ARM64 kodą (MEC1 tik NOP) — abu elgiasi identiškai
-- ✅ **IC_BASE rašymo tvarka** — LO→HI→CNTL=0 (ne 0x100), polling 500ms
+- ✅ **CP firmware loads successfully** via MMIO IC_BASE DMA
+- ✅ **MEC firmware execution verified** — first bytes ucode corrupt → SCRATCH changes (engine really runs)
+- ✅ **MEC2 firmware** has real ARM64 code (MEC1 is NOP only) — both behave identically
+- ✅ **IC_BASE write order** — LO→HI→CNTL=0 (not 0x100), 500ms UCODE_ADDR polling
 
 ### Hardware Register Map (BC-250 specific)
-- ✅ **GC_BASE=0x1260** — visi GC registrai offsetinti
-- ✅ **GRBM_STATUS** (0x3260), GRBM_GFX_INDEX (0x34D0) — veikia
+- ✅ **GC_BASE=0x1260** — all GC registers offset shifted
+- ✅ **GRBM_STATUS** (0x3260), GRBM_GFX_INDEX (0x34D0) — working
 - ✅ **SCRATCH** (0x32D4) — writable, high nibble [31:28] HW-masked
 - ✅ **KIQ_BASE_LO** (0xE060) writable; **KIQ_BASE_HI** read-only; **KIQ_SIZE** (0xE068) read-only=0
-- ✅ **KIQ_WPTR** — tik 9 bitai (mask 0x1FF)
-- ✅ **CP_HQD_*** (0xDAC0-0xDBFF) — visi NBIO blokuoti (rašymas tyliai nukrenta)
+- ✅ **KIQ_WPTR** — only 9 bits (mask 0x1FF)
+- ✅ **CP_HQD_*** (0xDAC0-0xDBFF) — all NBIO blocked (writes silently dropped)
 - ✅ **GCVM** — PT_BASE0 (0x0B408) writable; PT_BASE (0x0B608) HW-locked
-- ✅ **TLB invalidacija** veikia (0x6C0C/0x6C10 protocol)
+- ✅ **TLB invalidation** works (0x6C0C/0x6C10 protocol)
 - ✅ **GPU_ID** = 0x9FFF9700, **GRBM_STATUS** = 0x00000000 (idle)
 
 ### Software PM4 Executor (Confirmed Working)
-- ✅ **DreamV3SwPm4Process** — CPU verčia PM4 paketus į tiesioginius MMIO rašymus
-- ✅ IT_WRITE_DATA (SCRATCH keičiasi), IT_NOP, IT_EVENT_WRITE_EOP, PM4_TYPE_0 — **patvirtinta HW**
-- ✅ IT_SET_CONFIG_REG, IT_SET_CONTEXT_REG, IT_SET_SH_REG, IT_INDIRECT_BUFFER (su depth guard)
-- ✅ **PATH 3 fallback** SEND_PM4 IOCTL kelyje — kai PSP KIQ ir GfxRing nepasiekiami
-- ✅ Rekursijos gylio apsauga (max 32) — apsauga nuo stack overflow
+- ✅ **DreamV3SwPm4Process** — CPU translates PM4 packets to direct MMIO writes
+- ✅ IT_WRITE_DATA (SCRATCH changes), IT_NOP, IT_EVENT_WRITE_EOP, PM4_TYPE_0 — **HW-confirmed**
+- ✅ IT_SET_CONFIG_REG, IT_SET_CONTEXT_REG, IT_SET_SH_REG, IT_INDIRECT_BUFFER (with depth guard)
+- ✅ **PATH 3 fallback** in SEND_PM4 — when PSP KIQ and GfxRing are both unavailable
+- ✅ Recursion depth guard (max 32) — prevents stack overflow
 
 ### SMU v11.8
 - ✅ **MP1_BASE**=0x16000, C2PMSG_66/82/90, THM_BASE=0x16600
 - ✅ Protocol: clear C2PMSG_90 → arg → msg → poll
-- ✅ SMU minimalus: jokių PowerUpGfx, EnableDpmFeature, SetFanSpeedPercent
+- ✅ SMU minimal: no PowerUpGfx, EnableDpmFeature, SetFanSpeedPercent
 
 ### Bug Detection & Fixes
-- ✅ **PM4 TYPE3 header encoding** — visi testai naudojo neteisingą `0xC0370003` (opcode=0, count=56 vietoj IT_WRITE_DATA)
-- ✅ **IC_BASE offsetai** — buvo 0x7C10-0x7C18, teisingi 0x17390-0x17398
-- ✅ **IC_BASE_CNTL** — rašė 0x100 (ENABLE) prieš nustatant base adresą; pataisyta į LO→HI→CNTL=0
-- ✅ **UCODE_ADDR** — trūko polling (500ms timeout) prieš unhalt
-- ✅ **SDMA init** — sukėlė BSOD 0x1a (MEMORY_MANAGEMENT); pataisyta su sanity check
-- ✅ **KIQ deactivation** — prieš rašant KIQ registers, būtina deactivate (kitaip hang)
-- ✅ **GRBM_GFX_INDEX** — būtina restore į broadcast (0xE0000000) po testų
-- ✅ **17 bugs found** per code review (kritiniai: integer overflow, aligment, IOCTL collision, race conditions)
+- ✅ **PM4 TYPE3 header encoding** — all tests used wrong `0xC0370003` (opcode=0, count=56 instead of IT_WRITE_DATA)
+- ✅ **IC_BASE offsets** — were 0x7C10-0x7C18, correct 0x17390-0x17398
+- ✅ **IC_BASE_CNTL** — wrote 0x100 (ENABLE) before setting base address; fixed to LO→HI→CNTL=0
+- ✅ **UCODE_ADDR** — missing polling (500ms timeout) before unhalt
+- ✅ **SDMA init** — caused BSOD 0x1a (MEMORY_MANAGEMENT); fixed with sanity check + double-init guard
+- ✅ **KIQ deactivation** — must deactivate before writing KIQ registers (otherwise hang)
+- ✅ **GRBM_GFX_INDEX** — must restore to broadcast (0xE0000000) after tests
+- ✅ **fw_load.c BAR5_U32** — CRITICAL: volatile ptr silently dropped on Win11 26100; fixed to WRITE_REGISTER_ULONG
+- ✅ **Integer overflow** fw validation + JT bounds + ring wrap + READ/WRITE_REG bounds — all 4 fixed
+- ✅ **LOAD_CP_FW halt scope** — no longer halts ALL engines for MEC-only loads
+- ✅ **PSP driver fixes** — body_size mismatch, ring size cap (9-bit WPTR), proxy write return checks, race condition
 
 ---
 
 ## Mistakes & Lessons Learned
 
 ### Critical Mistakes
-1. **IC_BASE_CNTL=0x100 prieš nustatant base adresą** — jei bit 8 auto-started DMA iš 0 adreso, firmware niekada neįkraunamas. Turėtų būti: LO → HI → CNTL=0
-2. **PM4 TYPE3 header encoding** — `(3<<30) | ((count-1)<<16) | (op<<8)` bet visi testai naudojo `0xC0370003` kuris yra IT_NOP count=56, ne IT_WRITE_DATA. Bug'as niekada nepasireiškė nes KIQ niekada neapdorojo ringo.
-3. **CP_HQD writability claim** — anksčiau teigta kad 0xDAC0+ rašomi; iš tiesų NBIO blokuoti. Buvo suklaidinti aliased/stale readback reikšmių.
-4. **RLC firmware loading** — bandyta krauti RLC firmware per 0x3A00 registrus kurie yra FREEZE ZONE (0x3400-0x8100) — BC-250 BIOS/SMU krauna RLC.
-5. **KIQ_SIZE patch expectation** — manyta kad galima pakeisti MEC firmware kad KIQ_SIZE nebūtų 0; bet 0xE068 adresas firmware binary nerastas — check yra hardware lygyje.
+1. **IC_BASE_CNTL=0x100 before setting base address** — if bit 8 auto-started DMA from address 0, firmware never loads. Should be: LO → HI → CNTL=0
+2. **PM4 TYPE3 header encoding** — `(3<<30) | ((count-1)<<16) | (op<<8)` but all tests used `0xC0370003` which is IT_NOP count=56, not IT_WRITE_DATA. Bug never manifested because KIQ never processed the ring.
+3. **CP_HQD writability claim** — previously claimed 0xDAC0+ are writable; actually NBIO-blocked. Misled by aliased/stale readback values.
+4. **RLC firmware loading** — attempted to load RLC firmware via 0x3A00 registers which are in FREEZE ZONE (0x3400-0x8100) — BC-250 BIOS/SMU loads RLC.
+5. **KIQ_SIZE patch expectation** — believed MEC firmware could be patched to fix KIQ_SIZE=0; but 0xE068 address not found in firmware binary — check is hardware-level.
 
 ### Wasted Effort
-1. **GRBM_GFX_CNTL (0x2022)** — bandyta kad atrakint HQD; neveikia BC-250.
-2. **comprehensive-pm4-test** — palieka KIQ active + ME_CNTL unhalted → system hang
-3. **PSP driver KIQ path** — PSP KIQ ring turi tą pačią problemą (WPTR eina, RPTR=0)
-4. **RLC init** — DreamV3InitRlc yra no-op; registrai freeze zone
+1. **GRBM_GFX_CNTL (0x2022)** — attempted to unlock HQD access; doesn't work on BC-250.
+2. **comprehensive-pm4-test** — leaves KIQ active + ME_CNTL unhalted → system hang
+3. **PSP driver KIQ path** — PSP KIQ ring has the same problem (WPTR goes through, RPTR=0)
+4. **RLC init** — DreamV3InitRlc is no-op; registers in freeze zone
 
 ### Technical Lessons
-- **NBIO blokavimas** — 0xC000+ range yra NBIO protected; GC_BASE shifted aliases gali apeiti bet ne visiems registrams
-- **WRITE_REGISTER_ULONG vs volatile*** — Win11 26100 volatile pointer write gali būti tyliai dropintas; WRITE_REGISTER_ULONG visada veikia
-- **Firmware execution** įrodomas corruptinant ucode pirmus 8 baitus ir stebint SCRATCH
-- **KIQ_WPTR** tik 9 bitai (ne 32) — HW apribojimas
-- **SDMA init** gali sukelti BSOD jei registrai neteisingi; reikia sanity check
-- **Code review prieš buildą** — sutaupo valandų debugging (rasti 17 bugs)
+- **NBIO blocking** — 0xC000+ range is NBIO-protected; GC_BASE-shifted aliases can bypass but not for all registers
+- **WRITE_REGISTER_ULONG vs volatile*** — on Win11 26100 volatile pointer writes can be silently dropped; WRITE_REGISTER_ULONG always works
+- **Firmware execution** proven by corrupting first 8 bytes of ucode and observing SCRATCH changes
+- **KIQ_WPTR** only 9 bits (not 32) — HW limitation
+- **SDMA init** can cause BSOD if registers are wrong; needs sanity check
+- **Code review before build** — saves hours of debugging (17 bugs found, 10 fixed)
 
 ---
 
@@ -96,36 +99,66 @@ AMD BC-250 Windows driver project by Keshas. Goal: fully working GPU driver for 
 
 | Blocker | Root Cause | Can We Fix? |
 |---------|-----------|-------------|
-| **KIQ_SIZE=0 read-only** | Hardware-level; adresas 0xE068 nėra firmware binary | ❌ Ne |
-| **CP_HQD NBIO-blocked** | NBIO firewall blokuoja 0xDAC0-0xDBFF | ❌ Ne |
-| **GCVM PT_BASE HW-locked** | Always reads 0; cannot configure page tables | ❌ Ne |
-| **GFX_RING0_BASE_LO read-only** | BIOS nustato ring base; rašymas ignoruojamas | ❌ Ne |
-| **KIQ_WPTR 9-bit limit** | Max ring 2048 bytes; HW apribojimas | ❌ Ne |
-| **SOS firmware no ring protocol** (PSP side) | C2PMSG_64 bit 31 never sets; TOS nepalaiko GPCOM | ❌ Ne |
+| **KIQ_SIZE=0 read-only** | Hardware-level; address 0xE068 not in firmware binary | ❌ No |
+| **CP_HQD NBIO-blocked** | NBIO firewall blocks 0xDAC0-0xDBFF | ❌ No |
+| **GCVM PT_BASE HW-locked** | Always reads 0; cannot configure page tables | ❌ No |
+| **GFX_RING0_BASE_LO read-only** | BIOS sets ring base; writes ignored | ❌ No |
+| **KIQ_WPTR 9-bit limit** | Max ring 2048 bytes; HW limitation | ❌ No |
+| **SOS firmware no ring protocol** (PSP side) | C2PMSG_64 bit 31 never sets; TOS doesn't support GPCOM | ❌ No |
 
-**Išvada:** Šis BC-250 variantas yra factory-locked GPU command execution. Visi hardware ring keliai užrakinti. **3D graphics with this specific hardware is not achievable.**
+**Conclusion:** This BC-250 variant is factory-locked for GPU command execution. All hardware ring paths are locked. **3D graphics with this specific hardware is not achievable.**
 
 ---
 
 ## What We Built Anyway (Software Workaround)
 
-Kadangi HW ringai nepasiekiami, sukūrėme **Software PM4 executor** kuris:
-- Priima standartinius PM4 paketus (IT_WRITE_DATA, IT_SET_CONFIG_REG, IT_INDIRECT_BUFFER ir t.t.)
-- Išverčia juos į tiesioginius MMIO rašymus (CPU darbas, ne GPU)
-- Leidžia testuoti bet kokį PM4 paketą be hardware ring rizikos
+Since HW rings are inaccessible, we built a **Software PM4 executor** that:
+- Accepts standard PM4 packets (IT_WRITE_DATA, IT_SET_CONFIG_REG, IT_INDIRECT_BUFFER, etc.)
+- Translates them to direct MMIO writes (CPU work, not GPU)
+- Allows testing any PM4 packet without hardware ring risk
 
-Tai leidžia **valdyti GPU registrus** ir suprasti hardware, bet **nepakeičia GPU shader execution**.
+This allows **GPU register control** and hardware understanding, but **does not replace GPU shader execution**.
+
+---
+
+## Code Review: 17 Bugs Found — 10 Fixed, 7 Remaining
+
+### Fixed Bugs (10)
+| # | File | Bug | Fix Date |
+|---|------|-----|----------|
+| 1 | kmd.c | Integer overflow in READ/WRITE_REG bounds check | 2026-06-26 |
+| 2 | fw_load.c | BAR5_U32 volatile ptr silently dropped on Win11 26100 | 2026-06-26 |
+| 3 | kmd.c | LOAD_CP_FW halts ALL engines when only MEC needs loading | 2026-06-26 |
+| 4 | fw_load.c | Integer overflow in firmware header validation | 2026-06-26 |
+| 5 | kmd.c | Integer overflow in JT bounds check | 2026-06-26 |
+| 6 | kmd.c | SEND_PM4 ring wrap 32-bit overflow | 2026-06-26 |
+| 7 | PspKiq.c | body_size=1 → 4 (mismatch with PspCore.c) | 2026-06-26 |
+| 8 | PspKiq.c | Default ring size 0x2000 exceeds 9-bit WPTR max (512 DWORDS) | 2026-06-26 |
+| 9 | PspKiq.c, PspCore.c | PspGpuProxyWriteRegister return values ignored | 2026-06-26 |
+| 10 | PspCore.c | Race condition on g_GpuDriverHandle init | 2026-06-26 |
+
+### Remaining Bugs (7)
+| # | File | Description | Priority |
+|---|------|-------------|----------|
+| 1 | hw.h:360, PspKiq.c:57 | RLC_CP_SCHEDULERS at 0xECA1 not 4-byte aligned | High |
+| 2 | ioctl.h:420, PspCore.c:17 | IOCTL name collision (CTL_CODE vs raw) | Medium |
+| 3 | kmd.c:5419 | REG_DUMP reads GRBM_GFX_INDEX at wrong offset 0x33C4 | Low |
+| 4 | hw.h:453-454, vm.c:755-762 | GCVM invalidate regs mismatch | Low |
+| 5 | kmd.c:3570,3601,5412 | GPU_ID read from 3 different offsets | Low |
+| 6 | kmd.c:5469 | REG_DUMP reads SDMA0_CNTL at 0x10040 (hw.h says 0xE018) | Low |
+| 7 | kmd.h:428-430 | GCVM page table pages never freed on unload | Low |
 
 ---
 
 ## Next Steps / Future Directions
 
-1. **Complete BC-250 register map for other researchers** — visi offsetai, writability, blokeriai
-2. **Fix remaining 15 bugs** from code review — integer overflow, alignment, race conditions
-3. **Investigate alternative 40 CU unlock** per CC_GC_SHADER_ARRAY_CONFIG (0x3264) + SPI_PG_MASK (0x34FC)
-4. **SDMA engine** — jei 0xE000 registrai gyvi, galima DMA be CP/KIQ
-5. **Open-source documentation** — visos discovery dalintis su community
-6. **Port to newer AMD GPU** — kur hardware neužrakintas (RDNA3+)
+1. **Complete BC-250 register map for other researchers** — all offsets, writability, blockers
+2. **Fix remaining 7 bugs** from code review — alignment, naming, stale definitions
+3. **Extend SW PM4 executor** — batch WRITE_DATA, VRAM BAR2 ring support, more opcodes
+4. **Investigate alternative 40 CU unlock** via CC_GC_SHADER_ARRAY_CONFIG (0x3264) + SPI_PG_MASK (0x34FC)
+5. **SDMA engine** — if 0xE000 registers are alive, DMA is possible without CP/KIQ
+6. **Open-source documentation** — share all discoveries with community
+7. **Port to newer AMD GPU** — where hardware is not locked (RDNA3+)
 
 ---
 

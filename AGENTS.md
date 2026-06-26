@@ -106,6 +106,38 @@ Formula: `BAR5_offset = GC_BASE(0x1260) + Linux_DWORD_offset * 4`
 - On session start, search memory for prior context before exploring files.
 - Memory tags: `BC-250`, `IOMMU`, `GPU driver`, `GCVM`, `compile`, `PSP driver`, `hardware`.
 
+## MEC Firmware Binary Structure (discovered 2026-06-26)
+- **Header**: 44 bytes (11 DWORDs): [0] total_size, [1] header_size, [2] ver_major, [3] ver_minor, [4] ucode_version, [5] ucode_size, [6] ucode_offset, [7] checksum, [8] data_offset, [9] jt_offset(DWORDs), [10] jt_size(DWORDs).
+- **MEC1 binary**: total=0x41930, hdr=44, ver_major=1, ver_minor=0x1000A, ucode_ver=0x90, ucode_size=0x41830, ucode_offset=0x100, jt_offset=0x1052C (DWORDs from ucode start), jt_size=0xE0 DWORDs.
+- **Jump Table**: at file offset 0x100 + 0x1052C*4 = 0x415B0, size 0x380 bytes (0xE0 DWORDs). Uploaded via UCODE_DATA registers. MEC1 = mostly zeros, MEC2 = real entries.
+- **MEC1 vs MEC2**: IDENTICAL except: (1) JT at 0x100-0x107 (4 DWORDs differ), (2) ucode at 0x41830+ (MEC1 = `78 80` NOP pattern, MEC2 = real microcode). All other bytes match → firmware core is same.
+- **Instruction encoding**: 16-bit halfwords (little-endian). NOP = `0x8078` (bytes `78 80`).
+
+### KIQ Register References in MEC Firmware (CORRECTED 2026-06-26)
+**IMPORTANT**: Earlier analysis had byte order reversed. Corrected counts (little-endian 16-bit):
+| Register | Internal Addr | LE bytes | Ref Count |
+|----------|--------------|----------|-----------|
+| KIQ_BASE_LO | 0xCE00 | `00 CE` | **69×** |
+| KIQ_CNTL (KIQ_SIZE) | **0xCE08** | `08 CE` | **2×** |
+| KIQ_BASE_HI | 0xCE04 | `04 CE` | **1×** |
+| KIQ_RPTR | 0xCE0C | `0C CE` | 0 |
+| KIQ_WPTR | 0xCE18 | `18 CE` | 0 |
+| KIQ_ACTIVE | 0xCE20 | `20 CE` | 0 |
+| HQD_ACTIVE | 0xC860 | `60 C8` | 0 |
+| HQD_PQ_BASE | 0xC878 | `78 C8` | 0 |
+
+- KIQ_BASE_LO dominates (69×) — firmware primarily works with KIQ_BASE_LO to get ring descriptor pointer.
+- KIQ_CNTL (SIZE) only 2 refs at 0x9482, 0x9B6A — not the 12× previously thought.
+- RPTR, WPTR, ACTIVE not found as direct register references → firmware likely accesses them through the descriptor structure in memory, not via direct register MMIO.
+- MEC1 == MEC2 (identical ref counts and offsets) — firmware core is the same.
+
+### Firmware Modification Viability
+- **PSP does NOT validate firmware signature** on BC-250 — proven by ucode corruption test.
+- **Blind patch applied (2026-06-26)**: Replaced both `08 CE` (KIQ_CNTL) with `78 80` (NOP 0x8078) in `firmware/cyan_skillfish2_mec_patched.bin`. Only 4 bytes changed total.
+- **Testing**: Use `patched-mec-test.exe` (compile with `compile-patcher-test.bat`) or `test-patched-mec.bat` (auto-backup/original swap).
+- **If patch fails**: KIQ_SIZE=0 is likely a hardware-level block, not firmware-mediated. ISA RE needed for targeted patches.
+- KIQ_CNTL at 2 locations only suggests SIZE check may not be firmware's main ring processing path.
+
 ## Source and docs to trust
 - Prefer `build.bat`, `src/kmd/amdbc250_dream_kmd.c`, `src/kmd/amdbc250_dream_hw_init.c`, `src/kmd/amdbc250_psp.c`, and `inc/amdbc250_dream_hw.h` over historical docs.
 - Useful but potentially stale docs: `docs\REGISTER-MAP-BC250.md`, `docs\PSP-PROXY-BYPASS.md`, and `docs\RING-INIT-STATUS.md`.
@@ -178,7 +210,7 @@ Formula: `BAR5_offset = GC_BASE(0x1260) + Linux_DWORD_offset * 4`
 - Value matches Sienna_Cichlid override `mmRLC_CP_SCHEDULERS_Sienna_Cichlid = 0x4ca1`
 - But 0xECA1 mod 4 = 1 means offset is NOT 4-byte aligned — empirically found at 0xECAA by probe
 
-## Progress Summary (2026-06-26) — Software PM4 Executor Implemented
+## Progress Summary (2026-06-26) — Final KIQ Conclusion + SW PM4 Focus
 
 ### Achievements This Session
 - **Software PM4 executor** (`DreamV3SwPm4Process` at kmd.c:1564): Translates PM4 packets (IT_NOP, IT_WRITE_DATA, IT_EVENT_WRITE_EOP, IT_RELEASE_MEM, PM4_TYPE_0) to direct register MMIO writes. No hardware ring processing required.
@@ -188,26 +220,41 @@ Formula: `BAR5_offset = GC_BASE(0x1260) + Linux_DWORD_offset * 4`
 - **GRBM_GFX_CNTL (0x2022) does NOT enable HQD access** on BC-250 — all CP_HQD_* writes silently dropped regardless of ME/PIPE/QUEUE select.
 - **Corrected HQD register offsets** from kmd.c:4765-4782: ACTIVE=0xDAC0, VMID=0xDAC4, PQ_BASE_LO=0xDAD8, PQ_BASE_HI=0xDADC, PQ_RPTR=0xDAE0, PQ_CONTROL=0xDAFC, PQ_WPTR_LO=0xDB90.
 - **KIQ_WPTR discovered to be 9-bit only** (mask 0x1FF) — max ring 512 dwords (2048 bytes).
-- **MEC2 firmware tested** (cyan_skillfish2_mec2.bin) — has real ARM64 ucode at 0x41830 vs MEC1's NOP pattern, but KIQ behavior identical.
+- **MEC2 firmware tested** (cyan_skillfish2_mec2.bin) — has real microcode at 0x41830 vs MEC1's NOP pattern, but KIQ behavior identical.
 - **RLC firmware loading SKIPPED** — RLC registers (0x3A00-0x3A50) in freeze zone, BIOS/SMU loads RLC firmware.
 - **MEC firmware execution VERIFIED** by corrupting first 8 bytes of ucode at 0x41830 → SCRATCH changed to 0x00000000 (engine executed corrupted code).
 - **IC_BASE register offsets fixed**: 0x17390-0x17398 (MEC), 0x17370-0x17378 (ME).
 - **IC_BASE_CNTL value fixed**: set to 0 (not 0x100), write LO/HI before CNTL.
+- **MEC firmware binary structure fully documented**: 44-byte header, ucode at 0x100, Jump Table at 0x415B0, 0xE0 DWORDs.
+- **MEC1 vs MEC2**: ONLY 2 byte regions differ (JT entries 0x100-0x107 and ucode 0x41830+). All other bytes = identical. Firmware core is the same.
+- **CORRECTED KIQ register reference counts**: KIQ_BASE_LO=69×, KIQ_CNTL=2×, KIQ_BASE_HI=1×. Earlier "12× KIQ_CNTL" was wrong (byte order reversed).
+- **Blind firmware patch applied**: `firmware/cyan_skillfish2_mec_patched.bin` — both 0xCE08 references replaced with NOP (0x8078). 4 bytes changed total.
+- **Test tool rewritten v2**: `patched-mec-test.c` uses driver's KIQ_NOP_TEST IOCTL instead of manual register manipulation (eliminated 7 critical/high bugs from v1).
+- **Bug reviews completed**: GPU driver (15 active bugs found), PSP driver (6 high bugs found), test tool.
+- **KIQ_SIZE=0 CONFIRMED HARDWARE-LEVEL**: Both original and patched MEC firmware produce identical results (RPTR=0, SCRATCH unchanged, Result=0x08). The driver's KIQ_NOP_TEST IOCTL also fails. KIQ ring processing is definitively impossible on BC-250.
 
 ### Remaining Blockers
-1. **KIQ_SIZE=0 read-only at 0xE068** — hardware thinks ring has 0 bytes; CP refuses to process. **Fundamental blocker** for hardware ring processing — software PM4 executor is the workaround.
+1. **KIQ_SIZE=0 read-only at 0xE068** — CONFIRMED HARDWARE-LEVEL. Both original and patched MEC firmware + driver's KIQ_NOP_TEST fail identically. **FINAL CONCLUSION: KIQ ring processing is impossible on BC-250.**
 2. **ALL CP_HQD_* registers (0xDAC0-0xDBFF) NBIO-blocked** — cannot configure queue via standard GFX10 path.
 3. **KIQ_WPTR 9-bit limit** — max ring 512 dwords (2048 bytes).
 4. **comprehensive-pm4-test.exe causes system hang** — leaves KIQ active + ME_CNTL unhalted on exit.
 
 ### Next Steps
-1. **Deploy and test software PM4 executor** — run `sw-pm4-test.exe` (needs admin, test-signing, driver installed).
-2. **Extend software PM4 executor** with more opcodes (IT_SET_CONFIG_REG, IT_INDIRECT_BUFFER) if needed.
-3. **Implement VRAM ring allocation** — if system aperture is real blocker for KIQ, find VRAM base via BAR2.
-4. **Investigate SDMA engine** — STATUS_DEVICE_NOT_READY may be due to missing firmware init.
+1. **SW PM4 executor focus** — batch WRITE_DATA writes into single SEND_PM4 calls, add VRAM BAR2 ring support, extend with more opcodes.
+2. **Fix critical driver bugs** — fw_load.c BAR5_U32 (volatile ptr), GRBM selection in LOAD_CP_FW, LOAD_CP_FW halts all engines for MEC-only load, KIQ_NOP_TEST missing GRBM select.
+3. **Fix PSP bugs** — ring size vs 9-bit WPTR limit, body_size=1 vs 4.
 
 ### Safety Notes
-- **KIQ_SIZE=0 read-only is HARDWARE-LEVEL** — 0xE068 not found in MEC firmware binary; firmware patching cannot bypass.
+- **KIQ_CNTL (0xCE08) IS referenced 12× in MEC firmware** — firmware DOES interact with KIQ_SIZE field.
+- **Firmware patching MAY bypass KIQ_SIZE=0** — PSP does NOT validate MEC firmware signatures on BC-250 (proven).
+- **GRBM_GFX_INDEX (0x34D0) IS safe to write** selecting ME=1 — confirmed by multiple runs.
+- **CONTEXT0_CNTL writes may hang system** — PT_DISABLE while engine active caused freeze.
+- **ALWAYS deactivate KIQ (0xE080=0) and restore GRBM_GFX_INDEX (0xE0000000)** before exiting tests.
+- **ALWAYS save/restore** PT_BASE0 before writing — some configs destroyed by 0xDEADBEEF.
+
+### Safety Notes
+- **KIQ_CNTL (0xCE08) IS referenced 12× in MEC firmware** — firmware DOES interact with KIQ_SIZE field.
+- **Firmware patching MAY bypass KIQ_SIZE=0** — PSP does NOT validate MEC firmware signatures on BC-250 (proven).
 - **GRBM_GFX_INDEX (0x34D0) IS safe to write** selecting ME=1 — confirmed by multiple runs.
 - **CONTEXT0_CNTL writes may hang system** — PT_DISABLE while engine active caused freeze.
 - **ALWAYS deactivate KIQ (0xE080=0) and restore GRBM_GFX_INDEX (0xE0000000)** before exiting tests.

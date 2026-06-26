@@ -165,9 +165,6 @@ DreamV3LoadSingleFirmware(
 {
     NTSTATUS Status = STATUS_SUCCESS;
     
-    /* BAR5 access macro */
-    #define BAR5_U32(off) (*(volatile UINT32 *)((PUCHAR)DevExt->MmioVirtualBase + (off)))
-    
     /* Validate firmware header */
     if (FwSize < FW_HEADER_SIZE) {
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
@@ -182,10 +179,10 @@ DreamV3LoadSingleFirmware(
         FwType, Hdr->UcodeVersion, Hdr->UcodeSizeBytes, 
         Hdr->UcodeOffsetBytes, Hdr->JtOffsetDw, Hdr->JtSizeDw));
     
-    /* Validate ucode fields */
+    /* Validate ucode fields — use subtraction to avoid overflow */
     if (Hdr->UcodeSizeBytes == 0 || 
         Hdr->UcodeOffsetBytes < Hdr->HeaderSizeBytes ||
-        (Hdr->UcodeOffsetBytes + Hdr->UcodeSizeBytes) > FwSize) {
+        (Hdr->UcodeSizeBytes > FwSize || Hdr->UcodeOffsetBytes > FwSize - Hdr->UcodeSizeBytes)) {
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
             "AMDBC250-FW: Invalid firmware header fields\n"));
         return STATUS_INVALID_PARAMETER;
@@ -214,15 +211,20 @@ DreamV3LoadSingleFirmware(
         "AMDBC250-FW: Firmware PA=0x%llX size=%u\n", FwPa.QuadPart, FwSize));
     
     __try {
-        /* Step 1: Halt ALL engines */
-        BAR5_U32(REG_CP_ME_CNTL) = ME_CNTL__ME_HALT | ME_CNTL__PFP_HALT | ME_CNTL__CE_HALT;
+        /* Step 1: Halt engines — only halt the target engine */
         if (FwType == FW_TYPE_MEC) {
-            BAR5_U32(REG_MEC_ME1_CNTL) = 1;  /* Halt MEC ME1 */
+            DreamV3WriteRegister(DevExt, REG_MEC_ME1_CNTL, 1);  /* Halt MEC ME1 only */
+        } else {
+            DreamV3WriteRegister(DevExt, REG_CP_ME_CNTL,
+                ME_CNTL__ME_HALT | ME_CNTL__PFP_HALT | ME_CNTL__CE_HALT);
+            if (FwType != FW_TYPE_MEC) {
+                DreamV3WriteRegister(DevExt, REG_MEC_ME1_CNTL, 1);  /* Also halt MEC */
+            }
         }
         KeStallExecutionProcessor(10);
         
         /* Verify halt */
-        UINT32 MeCntlRead = BAR5_U32(REG_CP_ME_CNTL);
+        UINT32 MeCntlRead = DreamV3ReadRegister(DevExt, REG_CP_ME_CNTL);
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
             "AMDBC250-FW: ME_CNTL after halt=0x%08X\n", MeCntlRead));
         
@@ -232,33 +234,33 @@ DreamV3LoadSingleFirmware(
         
         switch (FwType) {
         case FW_TYPE_ME:
-            BAR5_U32(REG_ME_IC_LO) = IcBaseLo;
-            BAR5_U32(REG_ME_IC_HI) = IcBaseHi;
-            BAR5_U32(REG_ME_IC_CNTL) = 0;
+            DreamV3WriteRegister(DevExt, REG_ME_IC_LO, IcBaseLo);
+            DreamV3WriteRegister(DevExt, REG_ME_IC_HI, IcBaseHi);
+            DreamV3WriteRegister(DevExt, REG_ME_IC_CNTL, 0);
             KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                 "AMDBC250-FW: ME IC_BASE=0x%08X%08X\n", IcBaseHi, IcBaseLo));
             break;
             
         case FW_TYPE_PFP:
-            BAR5_U32(REG_PFP_IC_LO) = IcBaseLo;
-            BAR5_U32(REG_PFP_IC_HI) = IcBaseHi;
-            BAR5_U32(REG_PFP_IC_CNTL) = 0;
+            DreamV3WriteRegister(DevExt, REG_PFP_IC_LO, IcBaseLo);
+            DreamV3WriteRegister(DevExt, REG_PFP_IC_HI, IcBaseHi);
+            DreamV3WriteRegister(DevExt, REG_PFP_IC_CNTL, 0);
             KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                 "AMDBC250-FW: PFP IC_BASE=0x%08X%08X\n", IcBaseHi, IcBaseLo));
             break;
             
         case FW_TYPE_CE:
-            BAR5_U32(REG_CE_IC_LO) = IcBaseLo;
-            BAR5_U32(REG_CE_IC_HI) = IcBaseHi;
-            BAR5_U32(REG_CE_IC_CNTL) = 0;
+            DreamV3WriteRegister(DevExt, REG_CE_IC_LO, IcBaseLo);
+            DreamV3WriteRegister(DevExt, REG_CE_IC_HI, IcBaseHi);
+            DreamV3WriteRegister(DevExt, REG_CE_IC_CNTL, 0);
             KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                 "AMDBC250-FW: CE IC_BASE=0x%08X%08X\n", IcBaseHi, IcBaseLo));
             break;
             
         case FW_TYPE_MEC:
-            BAR5_U32(REG_MEC_IC_LO) = IcBaseLo;
-            BAR5_U32(REG_MEC_IC_HI) = IcBaseHi;
-            BAR5_U32(REG_MEC_IC_CNTL) = 0;
+            DreamV3WriteRegister(DevExt, REG_MEC_IC_LO, IcBaseLo);
+            DreamV3WriteRegister(DevExt, REG_MEC_IC_HI, IcBaseHi);
+            DreamV3WriteRegister(DevExt, REG_MEC_IC_CNTL, 0);
             KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                 "AMDBC250-FW: MEC IC_BASE=0x%08X%08X\n", IcBaseHi, IcBaseLo));
             break;
@@ -282,16 +284,16 @@ DreamV3LoadSingleFirmware(
         default: Status = STATUS_INVALID_PARAMETER; goto cleanup;
         }
         
-        if (Hdr->JtSizeDw > 0 && (JtByteOff + JtSizeBytes) <= FwSize) {
+        if (Hdr->JtSizeDw > 0 && (JtSizeBytes <= FwSize && JtByteOff <= FwSize - JtSizeBytes)) {
             const UINT32 *JtData = (const UINT32 *)((PUCHAR)FwVa + JtByteOff);
             
             /* Reset ucode address */
-            BAR5_U32(UcodeAddrReg) = 0;
+            DreamV3WriteRegister(DevExt, UcodeAddrReg, 0);
             KeStallExecutionProcessor(1);
             
             /* Upload JT entries one DWORD at a time */
             for (UINT32 i = 0; i < Hdr->JtSizeDw; i++) {
-                BAR5_U32(UcodeDataReg) = JtData[i];
+                DreamV3WriteRegister(DevExt, UcodeDataReg, JtData[i]);
                 KeStallExecutionProcessor(1);
             }
             
@@ -303,7 +305,7 @@ DreamV3LoadSingleFirmware(
         }
         
         /* Step 4: Write ucode version to UCODE_ADDR to commit */
-        BAR5_U32(UcodeAddrReg) = Hdr->UcodeVersion;
+        DreamV3WriteRegister(DevExt, UcodeAddrReg, Hdr->UcodeVersion);
         KeStallExecutionProcessor(10);
         
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
@@ -314,7 +316,7 @@ DreamV3LoadSingleFirmware(
             UINT32 pollTimeoutUs = 500000;  /* 500ms max */
             UINT32 pollResult = Hdr->UcodeVersion;
             for (UINT32 p = 0; p < pollTimeoutUs; p++) {
-                pollResult = BAR5_U32(UcodeAddrReg);
+                pollResult = DreamV3ReadRegister(DevExt, UcodeAddrReg);
                 if (pollResult == 0) break;
                 KeStallExecutionProcessor(1);
             }
@@ -326,30 +328,29 @@ DreamV3LoadSingleFirmware(
         /* Step 5: Unhalt the loaded engine (keep others halted) */
         switch (FwType) {
         case FW_TYPE_ME:
-            /* Unhalt ME only (keep PFP+CE halted) */
-            BAR5_U32(REG_CP_ME_CNTL) = ME_CNTL__PFP_HALT | ME_CNTL__CE_HALT;
+            DreamV3WriteRegister(DevExt, REG_CP_ME_CNTL,
+                ME_CNTL__PFP_HALT | ME_CNTL__CE_HALT);
             break;
         case FW_TYPE_PFP:
-            /* Unhalt PFP only */
-            BAR5_U32(REG_CP_ME_CNTL) = ME_CNTL__ME_HALT | ME_CNTL__CE_HALT;
+            DreamV3WriteRegister(DevExt, REG_CP_ME_CNTL,
+                ME_CNTL__ME_HALT | ME_CNTL__CE_HALT);
             break;
         case FW_TYPE_CE:
-            /* Unhalt CE only */
-            BAR5_U32(REG_CP_ME_CNTL) = ME_CNTL__ME_HALT | ME_CNTL__PFP_HALT;
+            DreamV3WriteRegister(DevExt, REG_CP_ME_CNTL,
+                ME_CNTL__ME_HALT | ME_CNTL__PFP_HALT);
             break;
         case FW_TYPE_MEC:
-            /* Unhalt MEC ME1 */
-            BAR5_U32(REG_MEC_ME1_CNTL) = 0;
+            DreamV3WriteRegister(DevExt, REG_MEC_ME1_CNTL, 0);
             break;
         }
         KeStallExecutionProcessor(10);
         
-        UINT32 MeCntlAfter = BAR5_U32(REG_CP_ME_CNTL);
+        UINT32 MeCntlAfter = DreamV3ReadRegister(DevExt, REG_CP_ME_CNTL);
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
             "AMDBC250-FW: ME_CNTL after unhalt=0x%08X\n", MeCntlAfter));
         
         /* Read SCRATCH as sanity check */
-        UINT32 Scratch = BAR5_U32(REG_SCRATCH);
+        UINT32 Scratch = DreamV3ReadRegister(DevExt, REG_SCRATCH);
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
             "AMDBC250-FW: SCRATCH=0x%08X\n", Scratch));
         
@@ -363,8 +364,6 @@ DreamV3LoadSingleFirmware(
 cleanup:
     /* Free the contiguous firmware buffer */
     MmFreeContiguousMemory(FwVa);
-    
-    #undef BAR5_U32
     
     return Status;
 }
