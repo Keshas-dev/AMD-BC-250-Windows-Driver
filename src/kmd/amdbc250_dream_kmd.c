@@ -4803,6 +4803,41 @@ DreamV3DeviceControl(
         break;
     }
 
+    /* --- Read Physical Memory (verify write, debug) --- */
+    case 0x80000C14: { /* IOCTL_AMDBC250_READ_PHYSICAL_MEM */
+        /* Input: {PA_lo (ULONG), PA_hi (ULONG), size (ULONG)}
+         * Output: data[0..size-1] */
+        if (inputLen >= sizeof(ULONG) * 3 && outputLen >= 1) {
+            PULONG InData = (PULONG)inputBuffer;
+            PHYSICAL_ADDRESS pa;
+            pa.QuadPart = ((ULONG64)InData[1] << 32) | InData[0];
+            ULONG size = InData[2];
+            if (size > 0 && size <= 4096 && size <= outputLen && pa.QuadPart != 0) {
+                __try {
+                    PHYSICAL_ADDRESS pagePa;
+                    pagePa.QuadPart = pa.QuadPart & ~(ULONG64)0xFFF;
+                    ULONG pageOff = (ULONG)(pa.QuadPart & 0xFFF);
+                    ULONG mapSize = (pageOff + size + 0xFFF) & ~(ULONG)0xFFF;
+                    PUCHAR va = (PUCHAR)MmMapIoSpace(pagePa, mapSize, MmNonCached);
+                    if (va) {
+                        RtlCopyMemory(outputBuffer, va + pageOff, size);
+                        MmUnmapIoSpace(va, mapSize);
+                        bytesReturned = size;
+                    } else {
+                        status = STATUS_INSUFFICIENT_RESOURCES;
+                    }
+                } __except (EXCEPTION_EXECUTE_HANDLER) {
+                    status = STATUS_ACCESS_VIOLATION;
+                }
+            } else {
+                status = STATUS_INVALID_PARAMETER;
+            }
+        } else {
+            status = STATUS_BUFFER_TOO_SMALL;
+        }
+        break;
+    }
+
     /* --- Write Physical Memory (for shader loading on BC-250) --- */
     case 0x80000C10: { /* IOCTL_AMDBC250_WRITE_PHYSICAL_MEM */
         /* Input: {PA_lo (ULONG), PA_hi (ULONG), size (ULONG), data[0..size-1] (BYTE)}
@@ -4823,12 +4858,10 @@ DreamV3DeviceControl(
                     ULONG mapSize = (pageOff + size + 0xFFF) & ~(ULONG)0xFFF;
                     PUCHAR va = (PUCHAR)MmMapIoSpace(pagePa, mapSize, MmNonCached);
                     if (va) {
-                        ProbeForRead((PUCHAR)inputBuffer + inputHdr, size, sizeof(UCHAR));
                         RtlCopyMemory(va + pageOff, (PUCHAR)inputBuffer + inputHdr, size);
-                        MmUnmapIoSpace(va, mapSize);
                         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_TRACE_LEVEL,
-                            "AMDBC250-DREAM-V4.3: WritePhys OK PA=0x%llX sz=%lu\n",
-                            pa.QuadPart, size));
+                            "AMDBC250-DREAM-V4.3: WritePhys OK PA=0x%llX sz=%lu off=%lu mapsz=%lu\n",
+                            pa.QuadPart, size, pageOff, mapSize));
                     } else {
                         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
                             "AMDBC250-DREAM-V4.3: WritePhys MmMapIoSpace FAILED PA=0x%llX\n",
