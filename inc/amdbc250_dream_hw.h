@@ -311,10 +311,22 @@ typedef struct _DREAM_V3_DEVICE_EXTENSION *PDREAM_V3_DEVICE_EXTENSION;
 #define AMDBC250_REG_CP_HQD_PQ_WPTR_HI      (AMDBC250_GC_BASE + 0x0000C934)  /* 0xDB94 */
 
 /* --- GRBM / SRBM Selection (BC-250) --- */
-/* GRBM_GFX_INDEX confirmed at GC_BASE(0x1260) + 0x2270 = 0x34D0 (Navi10 byte offset).
- * Probe result: returns 0xBA062100 (QUEUE_BROADCAST=1, PIPE_BROADCAST=1, WRITABLE).
- * Sienna_Cichlid Seg1 alias (0xA000+0x2200*4=0x12800) NOT used ??? BC-250 uses Navi10 layout. */
+/* GRBM_GFX_INDEX: DWORD offset mmGRBM_GFX_INDEX = 0x2200 → BAR5 = GC_BASE(0x1260) + 0x2200 = 0x34D0
+ * Linux amdgpu uses this for SPM/indexed register access.
+ * Probe result for GRBM_GFX_INDEX: returns 0xBA062100, WRITABLE.
+ * Sienna_Cichlid Seg1 alias (0xA000+0x2200) NOT used on BC-250. */
 #define AMDBC250_REG_GRBM_GFX_INDEX        (AMDBC250_GC_BASE + 0x00002270)  /* 0x34D0 */
+
+/* GRBM_GFX_CNTL: DWORD offset mmGRBM_GFX_CNTL = 0x0dc2 → BAR5 = GC_BASE(0x1260) + 0x0dc2 = 0x2022
+ * Linux amdgpu nv_grbm_select() writes THIS register for ME/PIPE/QUEUE selection,
+ * NOT GRBM_GFX_INDEX (0x34D0). They are DIFFERENT registers.
+ * NOTE: 0x0dc2 is NOT DWORD-aligned! Linux writes this as a BYTE offset. */
+#define AMDBC250_REG_GRBM_GFX_CNTL         (AMDBC250_GC_BASE + 0x00000DC2)  /* 0x2022 */
+#define AMDBC250_GRBM_GFX_CNTL_ME_SHIFT    16
+#define AMDBC250_GRBM_GFX_CNTL_PIPE_SHIFT  8
+#define AMDBC250_GRBM_GFX_CNTL_QUEUE_SHIFT 0
+#define AMDBC250_GRBM_GFX_CNTL_VMID_SHIFT  26
+#define AMDBC250_GRBM_GFX_CNTL_KIQ_VAL     (1 << 16)  /* ME=1, PIPE=0, QUEUE=0, VMID=0 */
 
 /* GRBM_GFX_INDEX bit fields (Linux soc15 layout from soc15.h):
  *   bit 31:   SE_BROADCAST
@@ -357,16 +369,6 @@ typedef struct _DREAM_V3_DEVICE_EXTENSION *PDREAM_V3_DEVICE_EXTENSION;
 /* GFX queue select: ME=0, PIPE=0, QUEUE=0 */
 #define AMDBC250_GRBM_GFX_INDEX_GFX_VAL  0
 
-/* --- GRBM_GFX_CNTL (Linux uses this for ME/PIPE/QUEUE select, NOT GRBM_GFX_INDEX) --- */
-/* Linux nv_grbm_select() uses mmGRBM_GFX_CNTL = 0x0dc2 (BAR5 = GC_BASE + 0x0dc2 = 0x2022)
- * GRBM_GFX_INDEX (0x34D0) may be for SPM/indexed access; GRBM_GFX_CNTL for direct select.
- * Test which one controls KIQ register routing on BC-250. */
-#define AMDBC250_REG_GRBM_GFX_CNTL              (AMDBC250_GC_BASE + 0x00000DC2)  /* 0x2022 */
-#define AMDBC250_GRBM_GFX_CNTL_ME_SHIFT         16
-#define AMDBC250_GRBM_GFX_CNTL_PIPE_SHIFT       8
-#define AMDBC250_GRBM_GFX_CNTL_QUEUE_SHIFT      0
-#define AMDBC250_GRBM_GFX_CNTL_KIQ_VAL          (1 << 16)  /* ME=1, PIPE=0, QUEUE=0 */
-
 /* --- RLC / Scheduler (Sienna_Cichlid override: mm=0x4CA1, BASE_IDX=1) --- */
 /* From Linux gfx_v10_0.c: #define mmRLC_CP_SCHEDULERS_Sienna_Cichlid 0x4ca1 BASE_IDX=1
  * BAR5 = GC_BASE_SEG1(0xA000) + 0x4CA1 = 0xECA1 (theoretical Sienna_Cichlid offset)
@@ -383,10 +385,14 @@ typedef struct _DREAM_V3_DEVICE_EXTENSION *PDREAM_V3_DEVICE_EXTENSION;
 #define AMDBC250_RLC_CP_SCHEDULERS_PIPE_SHIFT 3
 #define AMDBC250_RLC_CP_SCHEDULERS_KIQ_VAL  (AMDBC250_RLC_CP_SCHEDULERS_ENABLE | (1 << 5))
 
-/* --- CP_MEC_CNTL (Sienna_Cichlid override: mm=0x0F55, BASE_IDX=0) --- */
-/* From Linux gfx_v10_0.c: #define mmCP_MEC_CNTL_Sienna_Cichlid 0x0f55 BASE_IDX=0
- * BC-250 moves this from NBIO 0xC0E0 (blocked) to GC_BASE + 0x0F55 = 0x21B5 */
-#define AMDBC250_REG_CP_MEC_CNTL_GC         (AMDBC250_GC_BASE + 0x00000F55)  /* 0x21B5 */
+/* --- CP_MEC_CNTL (Linux mmCP_MEC_CNTL = 0x0e2d for Navi10 / GFX10.1) --- */
+/* From Linux gc_10_1_0_offset.h: mmCP_MEC_CNTL = 0x0e2d (Navi10 / GFX10.1)
+ * BC-250 is GFX10.1.3 (NOT Sienna_Cichlid / GFX10.3), so uses 0x0e2d.
+ * BAR5 = GC_BASE(0x1260) + 0x0e2d*4 = 0x1260 + 0x38B4 = 0x4B14
+ * Bit fields: MEC_ME1_HALT=bit28, MEC_ME2_HALT=bit29 */
+#define AMDBC250_REG_CP_MEC_CNTL_GC         (AMDBC250_GC_BASE + 0x000038B4)  /* 0x4B14 */
+#define AMDBC250_CP_MEC_ME1_HALT            (1 << 28)
+#define AMDBC250_CP_MEC_ME2_HALT            (1 << 29)
 
 /* --- GRBM Status (GC_BASE + 0x2000 = 0x3260, confirmed) --- */
 #define AMDBC250_REG_GRBM_STATUS            (AMDBC250_GC_BASE + 0x00002000)  /* 0x3260 */

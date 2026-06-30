@@ -28,7 +28,7 @@
 
 ## BC-250 hardware facts
 - BC-250 GC registers are shifted by `GC_BASE=0x1260`; use `AMDBC250_REG_*` macros. Navi10 offsets like `0x2000`/`0x2004` read `0xFFFFFFFF` because they are unmapped, not NBIO-blocked.
-- Key corrected offsets: GRBM `0x3260`, CC `0x3264`, scratch `0x32D4`, SPI WGP mask `0x34FC`.
+- Key corrected offsets: GRBM `0x3260`, CC `0x9C1C` (NOT 0x3264 — see bc250-collective), scratch `0x32D4`, SPI WGP mask `0x5C3C` (NOT 0x34FC).
 - NBIO blocks writes in native `0xC000+` ranges such as `CP_ME_CNTL`/`CP_MEC_CNTL`; GC_BASE-shifted ring aliases can bypass NBIO but some BASE registers are hardware read-only.
 - **Linux IP Base Map** (from `cyan_skillfish_ip_offset.h` — full details in `docs/BC250-LINUX-IP-MAP.md`):
   - GC: `0x1260` (+ `0xA000`), NBIO: `0x0000`, HDP: `0x0F20`, MMHUB: `0x1A000`
@@ -37,53 +37,40 @@
   - GC IP version: 10.1.3, NBIO: 2.1.1, MP0/PSP: 11.0.8
   - Linux skips PSP firmware loading entirely for BC-250 (`psp_v11_0_8.c` is minimal)
   - `cg_flags=0`, `pg_flags=0` (no clock/power gating), `external_rev_id = rev_id + 0x82`
-- **40 CU unlock** (from duggasco/bc250-40cu-unlock): Write `CC_GC_SHADER_ARRAY_CONFIG` (0x3264) + `SPI_PG_ENABLE_STATIC_WGP_MASK` (0x34FC) together during `gfx_v10_0_get_cu_info()`
+- **40 CU unlock** (from bc250-collective): Write `CC_GC_SHADER_ARRAY_CONFIG` (0x9C1C) + `SPI_PG_ENABLE_STATIC_WGP_MASK` (0x5C3C) together during `gfx_v10_0_get_cu_info()`. Linux mm* offsets: CC=0x226F*4+0x1260=0x9C1C, SPI=0x1277*4+0x1260=0x5C3C.
+- **GRBM selection**: Linux uses `mmGRBM_GFX_CNTL` (0x0dc2, BAR5=0x2022) for ME/PIPE/QUEUE select, NOT `GRBM_GFX_INDEX` (0x34D0). These are DIFFERENT registers.
+- **CP_MEC_CNTL**: Navi10 offset mmREG=0x0e2d (BAR5=0x4B14), NOT Sienna_Cichlid 0x0f55. BC-250 is GFX10.1.3, not 10.3.x.
 
-## Progress Summary (2026-07-01) — DISPATCH_DIRECT SEG1 + COMPUTE Register Map + WRITE_PHYSICAL_MEM IOCTL
+## Progress Summary (2026-07-01) — Linux amdgpu Research + HW Fixes + Probe Tool
 
 ### What Was Done This Session
-1. **COMPUTE_DISPATCH_DIRECT SEG1 fix** — Register address corrected from dead SEG0 (0x3C60 = 0xFFFFFFFF) to live SEG1 (0xDC60 = valid 0x00008C48). Confirmed by HW test:
-   - SW PM4 DISPATCH_DIRECT write changed 0xDC60 from 0x00000080 to 0x000757FF ✅
-   - COMPUTE_DISPATCH_START (0xDC64) VALID bit is W1C: write of 0x80000000 clears it to 0x00000000
-   - DISPATCH_DIRECT + VALID=1 accepted by HW, GPU stays alive (no hang) ✅
+1. **Linux amdgpu research (gfx_v10_0.c)** — Analyzed COMPUTE init sequence (see below).
 
-2. **COMPUTE register map at SEG1 (0xDC60-0xDC80) fully scanned** — all registers alive:
-   - 0xDC60 DISPATCH_DIRECT (mm0x2A00) — writable, reads back HW-modified values
-   - 0xDC64 DISPATCH_START (mm0x2A04) — HW-managed, validates and clears
-   - 0xDC68 PGM_RSRC1 (mm0x2A08) — writable, field-level bit masking
-   - 0xDC6C PGM_RSRC2 (mm0x2A0C) — writable, field-level bit masking
-   - 0xDC70 PGM_LO (mm0x2A10) — writable, upper bits masked (ADDR[39:8])
-   - 0xDC74 PGM_HI (mm0x2A14) — FULLY writable ✅
-   - 0xDC78 RESOURCE_LIMITS (mm0x2A18) — FULLY writable ✅ (0x000000FF)
-   - 0xDC7C STATIC_THREAD_MGMT_SE0 (mm0x2A1C) — 0x00000000
-   - 0xDC80 MISC_BASE (mm0x2A20) — 0x00000000
+2. **GRBM_GFX_CNTL discovered** — Linux uses `mmGRBM_GFX_CNTL` (0x0dc2→BAR5=0x2022) for ME/PIPE/QUEUE select via `nv_grbm_select()`. This is a DIFFERENT register from `GRBM_GFX_INDEX` (0x34D0). hw.h updated with correct defines.
 
-3. **GCVM state documented** — CONTEXT0_CNTL (0x0B460) = 0x010CA89D (TRANSLATION ON + DEFAULT_PAGE), but PT_BASE (0x6C8C/0x6C90) = 0 → any shader PGM access faults silently.
+3. **CP_MEC_CNTL offset corrected** — Old: Sienna_Cichlid 0x0f55→0x21B5. New: Navi10 0x0e2d→BAR5=0x4B14. BC-250 is GFX10.1.3, NOT 10.3.x. Updated in hw.h.
 
-4. **SDMA_FILL confirmed broken** — IOCTL returns failure (SDMA engine not initialized).
+4. **MQD (Memory Queue Descriptor) architecture understood** — `v10_compute_mqd` is 512-DWORD struct in system memory. Region 1 (DW0-63) = COMPUTE PIPE STATE (PGM_LO, RSRC1, RSRC2, DISPATCH_INITIATOR, dims, etc.). Region 2 (DW128-191) = CP_HQD state. When CP_HQD_ACTIVE is set, HW loads MQD into live registers. Linux NEVER writes COMPUTE_DISPATCH_DIRECT via MMIO — MEC firmware processes ring PM4 and programs these internally.
 
-5. **New IOCTL added: WRITE_PHYSICAL_MEM (0x80000C10)** — writes shader data to any physical address via MmMapIoSpace (page-aligned internally). Initially failed (ERROR_NOACCESS 998) due to MmMapIoSpace page-alignment requirement — FIXED in second build.
+5. **hw.h fixes**: CP_MEC_CNTL→0x4B14, added GRBM_GFX_CNTL, removed duplicate defines, fixed SEG1 offset for RLC_CP_SCHEDULERS.
 
-6. **hw.h defines added** — `AMDBC250_REG_COMPUTE_DISPATCH_DIRECT` (0xDC60), `AMDBC250_REG_COMPUTE_DISPATCH_START` (0xDC64).
+6. **SW PM4 IT_DISPATCH_DIRECT handler fixed** — Now selects ME=1 via GRBM_GFX_INDEX before writing COMPUTE registers, then restores broadcast.
 
-7. **SW PM4 rewrite** — IT_DISPATCH_DIRECT handler uses new hw.h defines.
+7. **Probe tool built** — `mec-probe-test.exe` checks MEC halt (0x4B14), GRBM selects (0x2022 vs 0x34D0), COMPUTE pipe state (0xDC60-0xDC80), SPI/CU power gating (0x5C3C/0x34FC), CC array config (0x9C1C/0x3264), CP_HQD registers, GCVM status. Tests writes with both GRBM selects.
 
-8. **Test tools updated** — `sw-pm4-test.exe` (SEG1 test), `dispatch-shader-test.exe` (full shader pipeline test with WRITE_PHYSICAL_MEM + DISPATCH).
-
-9. **Driver builds cleanly** — Signed `atikmdag.sys` in `output\`.
+8. **Driver builds cleanly** — Signed `atikmdag.sys` in `output\`.
 
 ### Key Discoveries
-- **COMPUTE registers are ALL in SEG1**: formula = `GC_BASE(0x1260) + SEG1(0xA000) + Navi10_mmOffset*4`. SEG0 offsets (0x3C60-0x3C80) read 0xFFFFFFFF (dead).
-- **DISPATCH_DIRECT + VALID=1 accepted by HW** but shader doesn't execute because PGM=0 (page fault with PT_BASE=0).
-- **GCVM TRANSLATION ON with PT_BASE=0** is the fundamental blocker for compute execution.
-- **MmMapIoSpace requires page-aligned physical addresses** — fixed with `pa & ~0xFFF` rounding.
-- **SDMA_FILL IOCTL returns failure** — SDMA engine not usable for VRAM writes.
+- **COMPUTE_DISPATCH_DIRECT (0xDC60) is READ-ONLY** — It's a STATUS SHADOW of the internal pipe register, reflecting current HW state. Writes are silently ignored (unlike earlier reports which showed apparent changes from 0x80 to 0x000757FF — those were HW-state changes, not write-triggered). Only bits[15:0] of config regs (RSRC1/2, PGM_LO/HI, LIMITS) are writable; bits[31:16] are read-only status.
+- **COMPUTE registers use SEG1 formula**: `BAR5 = GC_BASE(0x1260) + SEG1(0xA000) + Navi10_byteOffset`. NOT `GC_BASE + mm*4`.
+- **Linux does not use direct COMPUTE register writes** — All dispatch goes through ring buffer PM4 → MEC firmware. Direct MMIO to COMPUTE registers is a BC-250 Windows-only path.
+- **MQD is the key** — COMPUTE pipe state (PGM, RSRC, dims) can only be loaded via MQD, not written directly via 0xDC60.
+- **MEC firmware must be running** — CP_MEC_CNTL MEC_ME1_HALT (bit28) at 0x4B14 may be set, preventing firmware-based dispatch.
 
 ### Current Blocker
-- WRITE_PHYSICAL_MEM can write shader code to VRAM physical addresses, but GCVM translation (CONTEXT0_CNTL bit0=1) prevents GPU from fetching from physical addresses via PGM_LO/HI. Need to either:
-  a. Disable GCVM translation (clear CONTEXT0_CNTL bit0) so PGM uses physical addresses
-  b. Set up GCVM page tables (PT_BASE + L2_CNTL + TLB entries)
-  c. Load shader into a region the GPU can access without translation (firmware IC_BASE path)
+- WRITE_PHYSICAL_MEM can write shader code to VRAM, but COMPUTE_DISPATCH_DIRECT (0xDC60) is read-only → cannot set dispatch dimensions via direct register write.
+- Need MEC firmware operational + MQD-based activation, or find alternative dispatch entry point.
+- Probe tool (mec-probe-test.exe) needed to determine MEC halt status and GRBM_GFX_CNTL behavior.
 
 ### Code Review Bug Fix Status (all 17 bugs resolved)
 
@@ -242,15 +229,15 @@ All bugs identified in the 2026-06-24 code review have been fixed across session
 
 ### GRBM Selection — Linux Uses Different Register
 - **Our driver** writes `GRBM_GFX_INDEX` (0x34D0) for ME/PIPE/QUEUE select
-- **Linux** writes `mmGRBM_GFX_CNTL` (0x0dc2) via `nv_grbm_select()`
-- 0x34D0 confirmed writable on BC-250 but may not be the intended register
+- **Linux** writes `mmGRBM_GFX_CNTL` (0x0dc2→BAR5=0x2022) via `nv_grbm_select()` — this is a DIFFERENT register from GRBM_GFX_INDEX (0x34D0)
+- Both may work for ME select on BC-250; GRBM_GFX_INDEX (0x34D0) confirmed functional for KIQ register access
 
 ### IC_BASE Registers — MATCH
 - All CP IC_BASE registers (0x17360-0x17388) match Linux: `BAR5 = GC_BASE(0x1260) + mm*4` ✅
 
 ### Halt Bits — MATCH
 - ME_HALT=bit28, PFP_HALT=bit30, CE_HALT=bit29 — identical to Linux ✅
-- CP_MEC_CNTL at 0x21B5 matches Sienna_Cichlid override ✅
+- CP_MEC_CNTL at 0x4B14 matches Navi10 (GFX10.1). BC-250 is NOT GFX10.3, so Sienna_Cichlid override 0x0f55 does not apply.
 
 ### GCVM Registers — Partial Match
 - Our empirically verified offsets (0xB360-0xB60C) do NOT match `GC_BASE + mm*4` formula

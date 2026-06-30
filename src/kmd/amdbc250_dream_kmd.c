@@ -1707,8 +1707,11 @@ DreamV3SwPm4Process(
             case IT_DISPATCH_DIRECT: {
                 /* DISPATCH_DIRECT: dim_x, dim_y, dim_z, dispatch_initiator.
                  * COMPUTE registers are in SEG1 (GC_BASE + 0xA000).
-                 * COMPUTE_DISPATCH_DIRECT at SEG1 + 0x2A00 = BAR5 0xDC60.
-                 * COMPUTE_DISPATCH_START  at SEG1 + 0x2A04 = BAR5 0xDC64. */
+                 * COMPUTE_DISPATCH_DIRECT at SEG1 + 0x2A00 = BAR5 0xDC60 (read-only status).
+                 * COMPUTE_DISPATCH_START  at SEG1 + 0x2A04 = BAR5 0xDC64 (W1C trigger).
+                 *
+                 * Must select ME=1 (MEC/compute) via GRBM_GFX_INDEX before
+                 * writing COMPUTE pipe registers. */
                 if (count >= 4) {
                     ULONG dimX = Commands[i + 0];
                     ULONG dimY = Commands[i + 1];
@@ -1716,8 +1719,16 @@ DreamV3SwPm4Process(
                     ULONG initiator = Commands[i + 3];
                     ULONG packedDim = (dimX & 0xFFF) | ((dimY & 0xFFF) << 12) |
                                       ((dimZ & 0xFF) << 24);
+                    /* Select ME=1 (MEC/compute engine) */
+                    DreamV3WriteRegister(DevExt, DevExt->GrbmGfxIndexOffset,
+                        AMDBC250_GRBM_GFX_INDEX_KIQ_VAL);
+                    /* Write dispatch dimensions (may be read-only status shadow) */
                     DreamV3WriteRegister(DevExt, AMDBC250_REG_COMPUTE_DISPATCH_DIRECT, packedDim);
+                    /* Trigger dispatch with VALID=1 */
                     DreamV3WriteRegister(DevExt, AMDBC250_REG_COMPUTE_DISPATCH_START, initiator);
+                    /* Restore broadcast */
+                    DreamV3WriteRegister(DevExt, DevExt->GrbmGfxIndexOffset,
+                        AMDBC250_GRBM_GFX_INDEX_BROADCAST_VAL);
                 }
                 i += count;
                 break;
