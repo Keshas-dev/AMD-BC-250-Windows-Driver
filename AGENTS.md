@@ -39,20 +39,51 @@
   - `cg_flags=0`, `pg_flags=0` (no clock/power gating), `external_rev_id = rev_id + 0x82`
 - **40 CU unlock** (from duggasco/bc250-40cu-unlock): Write `CC_GC_SHADER_ARRAY_CONFIG` (0x3264) + `SPI_PG_ENABLE_STATIC_WGP_MASK` (0x34FC) together during `gfx_v10_0_get_cu_info()`
 
-## Progress Summary (2026-06-30) — All 17 Code Review Bugs Fixed + DISPATCH_DIRECT + GCVM Investigation
+## Progress Summary (2026-07-01) — DISPATCH_DIRECT SEG1 + COMPUTE Register Map + WRITE_PHYSICAL_MEM IOCTL
 
 ### What Was Done This Session
-1. **IT_DISPATCH_DIRECT handler in SW PM4 executor** — Added opcode 0x15 handler that writes COMPUTE_DISPATCH_DIRECT (BAR5 0x3C60) + COMPUTE_DISPATCH_START (0x3C64) with packed X/Y/Z dimensions and initiator word. Use with `sw-pm4-test.exe`.
+1. **COMPUTE_DISPATCH_DIRECT SEG1 fix** — Register address corrected from dead SEG0 (0x3C60 = 0xFFFFFFFF) to live SEG1 (0xDC60 = valid 0x00008C48). Confirmed by HW test:
+   - SW PM4 DISPATCH_DIRECT write changed 0xDC60 from 0x00000080 to 0x000757FF ✅
+   - COMPUTE_DISPATCH_START (0xDC64) VALID bit is W1C: write of 0x80000000 clears it to 0x00000000
+   - DISPATCH_DIRECT + VALID=1 accepted by HW, GPU stays alive (no hang) ✅
 
-2. **GCVM PT_BASE investigation** — Resolved the "hardware locked" blocker:
-   - `0x0B608` was **misidentified** as PT_BASE — it's a different GCVM register that's read-only
-   - **Correct PT_BASE is at `0x6C8C/0x6C90`** (Linux offset) — fully writable, verified by GCVM_PT_SETUP IOCTL
-   - Fixed REG_DUMP to read PT_BASE from 0x6C8C instead of 0x0B608
-   - Fixed hw.h defines to point to correct PT_BASE at 0x6C8C/0x6C90
+2. **COMPUTE register map at SEG1 (0xDC60-0xDC80) fully scanned** — all registers alive:
+   - 0xDC60 DISPATCH_DIRECT (mm0x2A00) — writable, reads back HW-modified values
+   - 0xDC64 DISPATCH_START (mm0x2A04) — HW-managed, validates and clears
+   - 0xDC68 PGM_RSRC1 (mm0x2A08) — writable, field-level bit masking
+   - 0xDC6C PGM_RSRC2 (mm0x2A0C) — writable, field-level bit masking
+   - 0xDC70 PGM_LO (mm0x2A10) — writable, upper bits masked (ADDR[39:8])
+   - 0xDC74 PGM_HI (mm0x2A14) — FULLY writable ✅
+   - 0xDC78 RESOURCE_LIMITS (mm0x2A18) — FULLY writable ✅ (0x000000FF)
+   - 0xDC7C STATIC_THREAD_MGMT_SE0 (mm0x2A1C) — 0x00000000
+   - 0xDC80 MISC_BASE (mm0x2A20) — 0x00000000
 
-3. **All 17 code review bugs FIXED** (see table below)
+3. **GCVM state documented** — CONTEXT0_CNTL (0x0B460) = 0x010CA89D (TRANSLATION ON + DEFAULT_PAGE), but PT_BASE (0x6C8C/0x6C90) = 0 → any shader PGM access faults silently.
 
-4. **Reinstall script bug fixed** — `reinstall-both-drivers.bat` had `exit` on line 2 preventing execution
+4. **SDMA_FILL confirmed broken** — IOCTL returns failure (SDMA engine not initialized).
+
+5. **New IOCTL added: WRITE_PHYSICAL_MEM (0x80000C10)** — writes shader data to any physical address via MmMapIoSpace (page-aligned internally). Initially failed (ERROR_NOACCESS 998) due to MmMapIoSpace page-alignment requirement — FIXED in second build.
+
+6. **hw.h defines added** — `AMDBC250_REG_COMPUTE_DISPATCH_DIRECT` (0xDC60), `AMDBC250_REG_COMPUTE_DISPATCH_START` (0xDC64).
+
+7. **SW PM4 rewrite** — IT_DISPATCH_DIRECT handler uses new hw.h defines.
+
+8. **Test tools updated** — `sw-pm4-test.exe` (SEG1 test), `dispatch-shader-test.exe` (full shader pipeline test with WRITE_PHYSICAL_MEM + DISPATCH).
+
+9. **Driver builds cleanly** — Signed `atikmdag.sys` in `output\`.
+
+### Key Discoveries
+- **COMPUTE registers are ALL in SEG1**: formula = `GC_BASE(0x1260) + SEG1(0xA000) + Navi10_mmOffset*4`. SEG0 offsets (0x3C60-0x3C80) read 0xFFFFFFFF (dead).
+- **DISPATCH_DIRECT + VALID=1 accepted by HW** but shader doesn't execute because PGM=0 (page fault with PT_BASE=0).
+- **GCVM TRANSLATION ON with PT_BASE=0** is the fundamental blocker for compute execution.
+- **MmMapIoSpace requires page-aligned physical addresses** — fixed with `pa & ~0xFFF` rounding.
+- **SDMA_FILL IOCTL returns failure** — SDMA engine not usable for VRAM writes.
+
+### Current Blocker
+- WRITE_PHYSICAL_MEM can write shader code to VRAM physical addresses, but GCVM translation (CONTEXT0_CNTL bit0=1) prevents GPU from fetching from physical addresses via PGM_LO/HI. Need to either:
+  a. Disable GCVM translation (clear CONTEXT0_CNTL bit0) so PGM uses physical addresses
+  b. Set up GCVM page tables (PT_BASE + L2_CNTL + TLB entries)
+  c. Load shader into a region the GPU can access without translation (firmware IC_BASE path)
 
 ### Code Review Bug Fix Status (all 17 bugs resolved)
 
@@ -85,10 +116,11 @@
 - PSP driver requires Test Signing mode ON (`bcdedit /set testsigning on`) + Secure Boot OFF — self-signed AMD-BC250-Signer cert not from a trusted CA
 
 ### Next Steps
-1. **Install both drivers** (GPU first, then PSP on Win11 26100)
-2. **Test with `sw-pm4-test.exe`** — verify DISPATCH_DIRECT compute dispatch
-3. **Test with `patched-mec-test.exe`** — verify MEC firmware patch
-4. **Test with `reg-dump-and-nop.exe`** — verify REG_DUMP and basic register access
+1. **Install driver** with page-aligned WRITE_PHYSICAL_MEM fix (reinstall required)
+2. **Run `dispatch-shader-test.exe`** — write shader code to VRAM @ 0xC0100000 via WRITE_PHYSICAL_MEM
+3. **Test GCVM disable** — clear CONTEXT0_CNTL bit0 so PGM uses physical addresses, then dispatch
+4. **Test shader execution** — try multiple s_endpgm encodings (0xBF9F0000, 0x9F800000, 0x00000000) and check GRBM_STATUS for compute activity
+5. **If GCVM disable works** — write a real RDNA compute shader that writes output to known VRAM location
 
 ## Current command path and blockers
 - KIQ submit from the GPU driver uses `PSP_IOCTL_KIQ_SUBMIT` (`0x818`) against the PSP driver.

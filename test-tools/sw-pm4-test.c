@@ -113,6 +113,136 @@ int main(void) {
     scratchAfter = R(0x32D4);
     printf("  SEND_PM4 (Type0): SCRATCH=0x%08X\n", scratchAfter);
 
+    /* Scan: find COMPUTE registers at SEG1 */
+    printf("\n--- Scan: COMPUTE registers at SEG1 (0xDC60-0xDC80) ---\n");
+    {
+        struct { UINT32 off; const char* name; } regs[] = {
+            {0x3C60, "DISPATCH_DIRECT SEG0 (dead)"},
+            {0xDC60, "DISPATCH_DIRECT SEG1"},
+            {0xDC64, "DISPATCH_START"},
+            {0xDC68, "PGM_RSRC1"},
+            {0xDC6C, "PGM_RSRC2"},
+            {0xDC70, "PGM_LO"},
+            {0xDC74, "PGM_HI"},
+            {0xDC78, "RESOURCE_LIMITS"},
+            {0xDC7C, "STATIC_THREAD_MGMT_SE0"},
+            {0xDC80, "MISC_BASE"},
+        };
+        for (int i = 0; i < sizeof(regs)/sizeof(regs[0]); i++) {
+            UINT32 v = R(regs[i].off);
+            if (v == 0xFFFFFFFF)
+                printf("  0x%04X %-28s 0x%08X (DEAD)\n", regs[i].off, regs[i].name, v);
+            else
+                printf("  0x%04X %-28s 0x%08X\n", regs[i].off, regs[i].name, v);
+        }
+    }
+
+    /* Test 6a: Verify COMPUTE register writability */
+    printf("\n--- Test 6a: COMPUTE PGM writability check ---\n");
+    {
+        UINT32 savePgmLo = R(0xDC70);
+        UINT32 savePgmHi = R(0xDC74);
+        UINT32 saveRsrc1 = R(0xDC68);
+        UINT32 saveRsrc2 = R(0xDC6C);
+        UINT32 saveLimits = R(0xDC78);
+        printf("  Saving: PGM_LO=0x%08X PGM_HI=0x%08X RSRC1=0x%08X RSRC2=0x%08X LIMITS=0x%08X\n",
+               savePgmLo, savePgmHi, saveRsrc1, saveRsrc2, saveLimits);
+        
+        W(0xDC70, 0xCAFEBABE);
+        W(0xDC74, 0x0000BEEF);
+        W(0xDC68, 0x12345678);
+        W(0xDC6C, 0x87654321);
+        W(0xDC78, 0x000000FF);
+        {
+            UINT32 vLo = R(0xDC70), vHi = R(0xDC74), vR1 = R(0xDC68), vR2 = R(0xDC6C), vLim = R(0xDC78);
+            printf("  Write verify:\n");
+            printf("    PGM_LO: 0xCAFEBABE -> 0x%08X %s\n", vLo, vLo == 0xCAFEBABE ? "MATCH" : "DIFFERENT");
+            printf("    PGM_HI: 0x0000BEEF -> 0x%08X %s\n", vHi, vHi == 0x0000BEEF ? "MATCH" : "DIFFERENT");
+            printf("    RSRC1:  0x12345678 -> 0x%08X %s\n", vR1, vR1 == 0x12345678 ? "MATCH" : "DIFFERENT");
+            printf("    RSRC2:  0x87654321 -> 0x%08X %s\n", vR2, vR2 == 0x87654321 ? "MATCH" : "DIFFERENT");
+            printf("    LIMITS: 0x000000FF -> 0x%08X %s\n", vLim, vLim == 0x000000FF ? "MATCH" : "DIFFERENT");
+        }
+        
+        /* Restore */
+        W(0xDC70, savePgmLo);
+        W(0xDC74, savePgmHi);
+        W(0xDC68, saveRsrc1);
+        W(0xDC6C, saveRsrc2);
+        W(0xDC78, saveLimits);
+        printf("  Restored to original values\n");
+        
+        /* After restore, try DISPATCH_DIRECT with PGM pointing to a safe NOP region */
+        printf("\n  PGM now points to 0. DISPATCH with VALID=1 will NOP or fault silently.\n");
+        printf("  Next: load shader code to known address, set PGM, then dispatch.\n");
+    }
+
+    /* Test 6: Software PM4 - IT_DISPATCH_DIRECT (register write, no trigger) */
+    printf("\n--- Test 6: IT_DISPATCH_DIRECT (SEG1 0xDC60/0xDC64) ---\n");
+    {
+        /* COMPUTE regs are in SEG1: GC_BASE(0x1260) + SEG1(0xA000) + 0x2A00 = 0xDC60 */
+        UINT32 ddBefore = R(0xDC60);
+        UINT32 dsBefore = R(0xDC64);
+        printf("  COMPUTE_DISPATCH_DIRECT (0xDC60) before = 0x%08X\n", ddBefore);
+        printf("  COMPUTE_DISPATCH_START  (0xDC64) before = 0x%08X\n", dsBefore);
+        
+        SPM4 dspm4 = {0};
+        /* IT_DISPATCH_DIRECT opcode=0x15, count=4 */
+        dspm4.Cmds[0] = (3<<30)|((4-1)<<16)|(0x15<<8);  /* TYPE3 HDR: DISPATCH_DIRECT */
+        dspm4.Cmds[1] = 64;   /* dim_x = 64 */
+        dspm4.Cmds[2] = 1;    /* dim_y = 1 */
+        dspm4.Cmds[3] = 1;    /* dim_z = 1 */
+        dspm4.Cmds[4] = 0;    /* initiator = 0 (no VALID trigger - safe without shader) */
+        dspm4.Cnt = 5;
+        ok = DeviceIoControl(gH, IOCTL_SEND_PM4, &dspm4, sizeof(dspm4), NULL, 0, &br, NULL);
+        printf("  SEND_PM4 (DISPATCH_DIRECT): %s (err=%lu)\n", ok ? "OK" : "FAILED", GetLastError());
+        
+        UINT32 ddAfter = R(0xDC60);
+        UINT32 dsAfter = R(0xDC64);
+        printf("  COMPUTE_DISPATCH_DIRECT after  = 0x%08X", ddAfter);
+        UINT32 expDims = (64 & 0xFFF) | ((1 & 0xFFF) << 12) | ((1 & 0xFF) << 24);
+        if (ddAfter == expDims) printf(" *** MATCH (expected 0x%08X)", expDims);
+        printf("\n");
+        printf("  COMPUTE_DISPATCH_START after   = 0x%08X%s\n", dsAfter, dsAfter == 0 ? "" : " (expected 0)");
+    }
+
+    /* Test 7: IT_DISPATCH_DIRECT with VALID=1 (triggers compute) */
+    printf("\n--- Test 7: IT_DISPATCH_DIRECT with VALID=1 ---\n");
+    {
+        UINT32 grbmBefore = R(0x3260);
+        printf("  GRBM_STATUS before = 0x%08X\n", grbmBefore);
+        
+        SPM4 dspm4 = {0};
+        dspm4.Cmds[0] = (3<<30)|((4-1)<<16)|(0x15<<8);  /* TYPE3 HDR: DISPATCH_DIRECT */
+        dspm4.Cmds[1] = 64;   /* dim_x */
+        dspm4.Cmds[2] = 1;    /* dim_y */
+        dspm4.Cmds[3] = 1;    /* dim_z */
+        dspm4.Cmds[4] = 0x80000000;  /* initiator with VALID=bit31 */
+        dspm4.Cnt = 5;
+        ok = DeviceIoControl(gH, IOCTL_SEND_PM4, &dspm4, sizeof(dspm4), NULL, 0, &br, NULL);
+        printf("  SEND_PM4 (DISPATCH_DIRECT+VALID): %s (err=%lu)\n", ok ? "OK" : "FAILED", GetLastError());
+        
+        UINT32 ddAfter = R(0xDC60);
+        UINT32 dsAfter = R(0xDC64);
+        printf("  COMPUTE_DISPATCH_DIRECT after  = 0x%08X\n", ddAfter);
+        printf("  COMPUTE_DISPATCH_START after   = 0x%08X", dsAfter);
+        if (dsAfter == 0) printf(" (VALID cleared by HW)");
+        printf("\n");
+        
+        /* Poll GRBM_STATUS for compute busy (bit17=ME_BUSY, bit16=CP_BUSY, bit22=GUI_ACTIVE) */
+        printf("  Polling GRBM_STATUS...\n");
+        for (int i = 0; i < 50; i++) {
+            UINT32 gs = R(0x3260);
+            if (gs == 0) {
+                printf("  GRBM_STATUS idle after %d polls\n", i + 1);
+                break;
+            }
+            printf("  GRBM_STATUS[%d] = 0x%08X\n", i, gs);
+            Sleep(10);
+        }
+        UINT32 grbmAfter = R(0x3260);
+        printf("  GRBM_STATUS after  = 0x%08X\n", grbmAfter);
+    }
+
     /* Read final HW state */
     printf("\n--- Final HW State ---\n");
     printf("  GPU_ID(0x0000)  = 0x%08X\n", R(0x0000));

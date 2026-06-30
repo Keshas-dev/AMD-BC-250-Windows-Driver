@@ -1706,18 +1706,18 @@ DreamV3SwPm4Process(
 
             case IT_DISPATCH_DIRECT: {
                 /* DISPATCH_DIRECT: dim_x, dim_y, dim_z, dispatch_initiator.
-                 * COMPUTE_DISPATCH_DIRECT (0x2A00) = packed X/Y/Z dimensions.
-                 * COMPUTE_DISPATCH_START  (0x2A04) = initiator (VALID=bit31 triggers). */
+                 * COMPUTE registers are in SEG1 (GC_BASE + 0xA000).
+                 * COMPUTE_DISPATCH_DIRECT at SEG1 + 0x2A00 = BAR5 0xDC60.
+                 * COMPUTE_DISPATCH_START  at SEG1 + 0x2A04 = BAR5 0xDC64. */
                 if (count >= 4) {
                     ULONG dimX = Commands[i + 0];
                     ULONG dimY = Commands[i + 1];
                     ULONG dimZ = Commands[i + 2];
                     ULONG initiator = Commands[i + 3];
-                    ULONG directReg = AMDBC250_GC_BASE + 0x2A00;
                     ULONG packedDim = (dimX & 0xFFF) | ((dimY & 0xFFF) << 12) |
                                       ((dimZ & 0xFF) << 24);
-                    DreamV3WriteRegister(DevExt, directReg, packedDim);
-                    DreamV3WriteRegister(DevExt, directReg + 4, initiator);
+                    DreamV3WriteRegister(DevExt, AMDBC250_REG_COMPUTE_DISPATCH_DIRECT, packedDim);
+                    DreamV3WriteRegister(DevExt, AMDBC250_REG_COMPUTE_DISPATCH_START, initiator);
                 }
                 i += count;
                 break;
@@ -4797,6 +4797,53 @@ DreamV3DeviceControl(
 
             status = STATUS_SUCCESS;
             bytesReturned = 20;
+        } else {
+            status = STATUS_BUFFER_TOO_SMALL;
+        }
+        break;
+    }
+
+    /* --- Write Physical Memory (for shader loading on BC-250) --- */
+    case 0x80000C10: { /* IOCTL_AMDBC250_WRITE_PHYSICAL_MEM */
+        /* Input: {PA_lo (ULONG), PA_hi (ULONG), size (ULONG), data[0..size-1] (BYTE)}
+         * Maps physical address (page-aligned internally), copies data, unmaps. */
+        if (inputLen >= (LONG)(sizeof(ULONG) * 3 + 1)) {
+            PULONG InData = (PULONG)inputBuffer;
+            PHYSICAL_ADDRESS pa;
+            pa.QuadPart = ((ULONG64)InData[1] << 32) | InData[0];
+            ULONG size = InData[2];
+            ULONG inputHdr = sizeof(ULONG) * 3;
+            if (size > 0 && size <= 4096 && pa.QuadPart != 0 &&
+                (LONG)(inputHdr + size) <= inputLen) {
+                __try {
+                    /* MmMapIoSpace requires page-aligned physical address */
+                    PHYSICAL_ADDRESS pagePa;
+                    pagePa.QuadPart = pa.QuadPart & ~(ULONG64)0xFFF;
+                    ULONG pageOff = (ULONG)(pa.QuadPart & 0xFFF);
+                    ULONG mapSize = (pageOff + size + 0xFFF) & ~(ULONG)0xFFF;
+                    PUCHAR va = (PUCHAR)MmMapIoSpace(pagePa, mapSize, MmNonCached);
+                    if (va) {
+                        ProbeForRead((PUCHAR)inputBuffer + inputHdr, size, sizeof(UCHAR));
+                        RtlCopyMemory(va + pageOff, (PUCHAR)inputBuffer + inputHdr, size);
+                        MmUnmapIoSpace(va, mapSize);
+                        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_TRACE_LEVEL,
+                            "AMDBC250-DREAM-V4.3: WritePhys OK PA=0x%llX sz=%lu\n",
+                            pa.QuadPart, size));
+                    } else {
+                        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
+                            "AMDBC250-DREAM-V4.3: WritePhys MmMapIoSpace FAILED PA=0x%llX\n",
+                            pa.QuadPart));
+                        status = STATUS_INSUFFICIENT_RESOURCES;
+                    }
+                } __except (EXCEPTION_EXECUTE_HANDLER) {
+                    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
+                        "AMDBC250-DREAM-V4.3: WritePhys EXCEPTION PA=0x%llX\n",
+                        pa.QuadPart));
+                    status = STATUS_ACCESS_VIOLATION;
+                }
+            } else {
+                status = STATUS_INVALID_PARAMETER;
+            }
         } else {
             status = STATUS_BUFFER_TOO_SMALL;
         }
