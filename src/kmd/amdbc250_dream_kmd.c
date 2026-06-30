@@ -1658,15 +1658,13 @@ DreamV3SwPm4Process(
             }
 
             case IT_SET_CONFIG_REG: {
-                /* Config register space: HW decodes register from DWORD1 as:
-                 *   internalReg = (DWORD1 << 2) + 0x8000  (32-bit unsigned wrap)
-                 * On BC-250, GC registers are GC_BASE-shifted in BAR5, so:
-                 *   BAR5_offset = AMDBC250_GC_BASE + internalReg
+                /* Config register space: hwOff = mmREGISTER (byte offset from GC block).
+                 * On BC-250: BAR5_offset = AMDBC250_GC_BASE + hwOff * 4
                  * Remaining DWORDs = register values (written consecutively). */
                 if (count >= 1) {
                     ULONG hwOff = Commands[i];
                     ULONG numRegs = count - 1;
-                    ULONG baseReg = AMDBC250_GC_BASE + (hwOff << 2) + 0x8000;
+                    ULONG baseReg = AMDBC250_GC_BASE + (hwOff << 2);
                     for (ULONG r = 0; r < numRegs; r++) {
                         DreamV3WriteRegister(DevExt, baseReg + r * 4, Commands[i + 1 + r]);
                     }
@@ -1676,13 +1674,12 @@ DreamV3SwPm4Process(
             }
 
             case IT_SET_CONTEXT_REG: {
-                /* Context register space: HW decodes as:
-                 *   internalReg = (DWORD1 << 2) + 0x28000
-                 * BAR5_offset = AMDBC250_GC_BASE + internalReg */
+                /* Context register space: hwOff = mmREGISTER / 4.
+                 * On BC-250: BAR5_offset = AMDBC250_GC_BASE + hwOff * 4 */
                 if (count >= 1) {
                     ULONG hwOff = Commands[i];
                     ULONG numRegs = count - 1;
-                    ULONG baseReg = AMDBC250_GC_BASE + (hwOff << 2) + 0x28000;
+                    ULONG baseReg = AMDBC250_GC_BASE + (hwOff << 2);
                     for (ULONG r = 0; r < numRegs; r++) {
                         DreamV3WriteRegister(DevExt, baseReg + r * 4, Commands[i + 1 + r]);
                     }
@@ -1692,16 +1689,35 @@ DreamV3SwPm4Process(
             }
 
             case IT_SET_SH_REG: {
-                /* SH register space: HW decodes as:
-                 *   internalReg = (DWORD1 << 2) + 0x2C000
-                 * BAR5_offset = AMDBC250_GC_BASE + internalReg */
+                /* SH register space: hwOff = mmREGISTER / 4.
+                 * On BC-250: BAR5_offset = AMDBC250_GC_BASE + hwOff * 4
+                 * (No +0x2C000 — BC-250's mmREGISTER already encodes GC block offset.) */
                 if (count >= 1) {
                     ULONG hwOff = Commands[i];
                     ULONG numRegs = count - 1;
-                    ULONG baseReg = AMDBC250_GC_BASE + (hwOff << 2) + 0x2C000;
+                    ULONG baseReg = AMDBC250_GC_BASE + (hwOff << 2);
                     for (ULONG r = 0; r < numRegs; r++) {
                         DreamV3WriteRegister(DevExt, baseReg + r * 4, Commands[i + 1 + r]);
                     }
+                }
+                i += count;
+                break;
+            }
+
+            case IT_DISPATCH_DIRECT: {
+                /* DISPATCH_DIRECT: dim_x, dim_y, dim_z, dispatch_initiator.
+                 * COMPUTE_DISPATCH_DIRECT (0x2A00) = packed X/Y/Z dimensions.
+                 * COMPUTE_DISPATCH_START  (0x2A04) = initiator (VALID=bit31 triggers). */
+                if (count >= 4) {
+                    ULONG dimX = Commands[i + 0];
+                    ULONG dimY = Commands[i + 1];
+                    ULONG dimZ = Commands[i + 2];
+                    ULONG initiator = Commands[i + 3];
+                    ULONG directReg = AMDBC250_GC_BASE + 0x2A00;
+                    ULONG packedDim = (dimX & 0xFFF) | ((dimY & 0xFFF) << 12) |
+                                      ((dimZ & 0xFF) << 24);
+                    DreamV3WriteRegister(DevExt, directReg, packedDim);
+                    DreamV3WriteRegister(DevExt, directReg + 4, initiator);
                 }
                 i += count;
                 break;
@@ -3265,7 +3281,7 @@ DreamV3DeviceControl(
                 ULONG NeededSpace = 4 * sizeof(ULONG);
 
                 /* Ring wrap if needed */
-                if (WPtr + NeededSpace > RingSize) {
+        if ((ULONG64)WPtr + NeededSpace > RingSize) {
                     WPtr = 0;
                 }
 
@@ -4010,7 +4026,7 @@ DreamV3DeviceControl(
                 break;
             }
 
-            if (RegAcc->RegisterOffset > DevExt->MmioSize - 4) {
+            if (DevExt->MmioSize < 4 || RegAcc->RegisterOffset > DevExt->MmioSize - 4) {
                 status = STATUS_INVALID_PARAMETER;
                 break;
             }
@@ -4038,7 +4054,7 @@ DreamV3DeviceControl(
                 break;
             }
 
-            if (RegAcc->RegisterOffset > DevExt->MmioSize - 4) {
+            if (DevExt->MmioSize < 4 || RegAcc->RegisterOffset > DevExt->MmioSize - 4) {
                 status = STATUS_INVALID_PARAMETER;
                 break;
             }
@@ -4852,7 +4868,7 @@ DreamV3DeviceControl(
             PULONG outValue = (PULONG)outputBuffer;
             ULONG offset = *inOffset;
             
-            if (DevExt && DevExt->MmioVirtualBase && offset + sizeof(ULONG) <= 0x80000) {
+            if (DevExt && DevExt->MmioVirtualBase && offset <= 0x80000 - sizeof(ULONG)) {
                 PUCHAR mmioBase = (PUCHAR)DevExt->MmioVirtualBase;
                 __try {
                     *outValue = READ_REGISTER_ULONG((PULONG)(mmioBase + offset));
@@ -4883,7 +4899,7 @@ DreamV3DeviceControl(
             ULONG offset = params[0];
             ULONG value = params[1];
             
-            if (offset + sizeof(ULONG) <= 0x80000) {
+            if (offset <= 0x80000 - sizeof(ULONG)) {
                 PUCHAR mmioBase = (PUCHAR)DevExt->MmioVirtualBase;
                 __try {
                     WRITE_REGISTER_ULONG((PULONG)(mmioBase + offset), value);
@@ -5000,10 +5016,10 @@ DreamV3DeviceControl(
             }
 
             /* Step 2b: Set up GCVM page tables for identity mapping
-             * GCVM registers are at GC_BASE(0x1260) + Linux_DWORD_offset*4
-             * GCVM_CONTEXT0_CNTL  = 0x0B460
-             * GCVM_CONTEXT0_PT_BASE_LO = 0x0B608
-             * GCVM_CONTEXT0_PT_BASE_HI = 0x0B60C
+             * Verified writable registers (BAR5 offsets):
+             *   GCVM_CONTEXT0_CNTL   = 0x0B460
+             *   GCVM_CONTEXT0_PT_BASE_LO = 0x6C8C  (Linux offset, NOT 0x0B608!)
+             *   GCVM_CONTEXT0_PT_BASE_HI = 0x6C90
              *
              * RDNA2 4-level page table: PML4 ? PDP ? PD ? PT
              * Each level: 512 entries � 8 bytes = 4KB per page
@@ -5011,10 +5027,6 @@ DreamV3DeviceControl(
              *   flags: bit0=VALID bit5=READABLE bit6=WRITABLE
              *
              * We create identity mapping (VA=PA) for the ring buffer page.
-             */
-            /* OLD offsets = correct for BC-250 hardware (verified writable 2026-06-21)
-             * Linux offsets: 0x6C8C/0x6C90 = PT_BASE (writable), 0x6AE0 = CTX_CNTL (READ-ONLY!)
-             * OLD offsets:   0x0B460 = CTX_CNTL (WRITABLE), 0x0B360 = L2_CNTL (WRITABLE)
              */
             #define GCVM_CONTEXT0_CNTL_REG     0x0B460   /* OLD offset � verified WRITABLE */
             #define GCVM_CONTEXT0_PT_BASE_LO   0x6C8C    /* Linux offset � verified WRITABLE */
@@ -5451,7 +5463,7 @@ DreamV3DeviceControl(
 #define REG_MEC_IC_LO      0x17390
 #define REG_MEC_IC_HI      0x17394
 #define REG_MEC_ME1_CNTL   0x7A00   /* MEC ME1 halt control */
-        #define MEC_ME1_HALT       (1 << 0) /* bit 0 = halt */
+        #define MEC_ME1_HALT       (1 << 0) /* bit0=halt (potentially inverted; write 1=halt, 0=unhalt currently) */
 
         __try {
             /* Step 1: Halt — only halt target engine */
@@ -5679,7 +5691,7 @@ DreamV3DeviceControl(
             #define DUMP_REG32(off) DreamV3ReadRegister(DevExt, (off))
 
             /* GC registers (verified BAR5 byte offsets) */
-            dump->GpuId               = DUMP_REG32(0x3840);
+            dump->GpuId               = DUMP_REG32(0x0000);  /* GPU_ID at BAR5 offset 0 */
             dump->GrbmStatus          = DUMP_REG32(0x3260);
             dump->GrbmStatusSe0       = DUMP_REG32(0x3268);
             dump->GrbmStatusSe1       = DUMP_REG32(0x326C);
@@ -5723,8 +5735,8 @@ DreamV3DeviceControl(
             /* GCVM registers */
             dump->GcvmL2Cntl          = DUMP_REG32(0x0B360);
             dump->GcvmContext0Cntl    = DUMP_REG32(0x0B460);
-            dump->GcvmPtBaseLo        = DUMP_REG32(0x0B608);
-            dump->GcvmPtBaseHi        = DUMP_REG32(0x0B60C);
+            dump->GcvmPtBaseLo        = DUMP_REG32(0x6C8C);  /* correct writable PT_BASE */
+            dump->GcvmPtBaseHi        = DUMP_REG32(0x6C90);
 
             /* BIOS Context0 TLB entries (0x0B408-0x0B454, 20 DWORDs) */
             {
@@ -5736,9 +5748,11 @@ DreamV3DeviceControl(
 
             /* RLC/SDMA */
             dump->RlcCntl             = DUMP_REG32(0xECA8);
-            dump->Sdma0Cntl           = DUMP_REG32(0x10040);
+            dump->Sdma0Cntl           = DUMP_REG32(AMDBC250_REG_SDMA0_CNTL);
 
-            /* CP ring probe at raw BAR5 0xDA60 range � what IS this? */
+            /* CP GFX ring0 probe at BAR5 0xDA60 range
+             * CpRb0BaseProbe[0-3] = RING0_BASE_LO/HI/CNTL/RPTR at 0xDA60-0xDA6C
+             * CpRb1BaseProbe[0-3] = RING0_WPTR+fields at 0xDA70-0xDA7C (NOT ring1!) */
             dump->CpRb0BaseProbe[0]   = DUMP_REG32(0xDA60);
             dump->CpRb0BaseProbe[1]   = DUMP_REG32(0xDA64);
             dump->CpRb0BaseProbe[2]   = DUMP_REG32(0xDA68);
@@ -5827,7 +5841,7 @@ DreamV3DeviceControl(
             KeStallExecutionProcessor(1);
 
             /* Step 6: Write PM4 packets to ring */
-            {
+            __try {
                 volatile PULONG ring = (volatile PULONG)ringVa;
                 ring[0] = 0xC0370003;   /* IT_WRITE_DATA count=3 */
                 ring[1] = 0x10100000;   /* CONTROL: DST_SEL=register, WR_CONFIRM */
@@ -5835,6 +5849,21 @@ DreamV3DeviceControl(
                 ring[3] = 0x00000000;   /* ADDRESS_HI */
                 ring[4] = 0xCAFEBABE;   /* value to write */
                 ring[5] = 0xC0001000;   /* NOP */
+            } __except(EXCEPTION_EXECUTE_HANDLER) {
+                KdPrint(("AMDBC250-DREAM-V4.3: KIQ_NOP_TEST ring access exception\n"));
+                kt->Result = 0xDEADCAFE;
+                DreamV3WriteRegister(DevExt, KIQ_ME_CNTL_OFF,
+                    DreamV3ReadRegister(DevExt, KIQ_ME_CNTL_OFF) | (1 << 28) | (1 << 30));
+                KeStallExecutionProcessor(10);
+                DreamV3WriteRegister(DevExt, KIQ_BASE_LO_OFF, 0);
+                DreamV3WriteRegister(DevExt, KIQ_BASE_HI_OFF, 0);
+                DreamV3WriteRegister(DevExt, KIQ_RPTR_OFF, 0);
+                DreamV3WriteRegister(DevExt, KIQ_WPTR_OFF, 0);
+                DreamV3WriteRegister(DevExt, KIQ_ME_CNTL_OFF, kt->MeCntlBefore);
+                MmFreeContiguousMemory(ringVa);
+                status = STATUS_SUCCESS;
+                bytesReturned = sizeof(*kt);
+                break;
             }
             KeMemoryBarrier();
 
@@ -6065,7 +6094,7 @@ DreamV3DeviceControl(
             }
 
             /* Step 4: Read current ring contents */
-            {
+            __try {
                 volatile PULONG ring = (volatile PULONG)ringVa;
                 resp->RingDword0 = ring[0];
                 resp->RingDword1 = ring[1];
@@ -6073,6 +6102,14 @@ DreamV3DeviceControl(
                 resp->RingDword3 = ring[3];
                 KdPrint(("KIQ_BIOS_RING ring[0..3] = 0x%08X 0x%08X 0x%08X 0x%08X\n",
                     resp->RingDword0, resp->RingDword1, resp->RingDword2, resp->RingDword3));
+            } __except(EXCEPTION_EXECUTE_HANDLER) {
+                KdPrint(("KIQ_BIOS_RING ring read exception\n"));
+                resp->Result = 0xDEADCAFE;
+                BIOS_WRITE(BIOS_ME_CNTL_OFF, BIOS_READ(BIOS_ME_CNTL_OFF) | (1 << 28) | (1 << 30));
+                MmUnmapIoSpace(ringVa, 0x1000);
+                status = STATUS_SUCCESS;
+                bytesReturned = sizeof(*resp);
+                break;
             }
 
             /* Step 5: Halt ME+PFP */
@@ -6094,7 +6131,7 @@ DreamV3DeviceControl(
              *   ADDRESS_LO = SCRATCH byte offset (0x32D4)
              *   ADDRESS_HI = 0
              *   DATA = 0xCAFEBABE */
-            {
+            __try {
                 PULONG ring = (PULONG)ringVa;
                 ring[0] = 0xC0370003;  /* HEADER: IT_WRITE_DATA, count=3 */
                 ring[1] = 0x10100000;  /* CONTROL: DST_SEL=register, WR_CONFIRM */
@@ -6105,6 +6142,14 @@ DreamV3DeviceControl(
                 ring[6] = 0xC0001000;  /* NOP (padding) */
                 ring[7] = 0xC0001000;  /* NOP (padding) */
                 KdPrint(("KIQ_BIOS_RING: wrote IT_WRITE_DATA 0xCAFEBABE -> SCRATCH (0x32D4)\n"));
+            } __except(EXCEPTION_EXECUTE_HANDLER) {
+                KdPrint(("KIQ_BIOS_RING ring write exception\n"));
+                resp->Result = 0xDEADCAFE;
+                BIOS_WRITE(BIOS_ME_CNTL_OFF, BIOS_READ(BIOS_ME_CNTL_OFF) | (1 << 28) | (1 << 30));
+                MmUnmapIoSpace(ringVa, 0x1000);
+                status = STATUS_SUCCESS;
+                bytesReturned = sizeof(*resp);
+                break;
             }
 
             /* Step 7.5: CRITICAL � flush CPU stores before WPTR update */
@@ -6131,12 +6176,15 @@ DreamV3DeviceControl(
             resp->KiqRptrAfter = BIOS_READ(BIOS_KIQ_RPTR_OFF);
             resp->ScratchAfter = BIOS_READ(BIOS_SCRATCH_OFF);
             resp->MeCntlAfter  = BIOS_READ(BIOS_ME_CNTL_OFF);
-            {
+            __try {
                 volatile PULONG ring = (volatile PULONG)ringVa;
                 resp->RingDword0 = ring[0];
                 resp->RingDword1 = ring[1];
                 resp->RingDword2 = ring[2];
                 resp->RingDword3 = ring[3];
+            } __except(EXCEPTION_EXECUTE_HANDLER) {
+                /* Ring may have been unmapped — non-fatal */
+                resp->RingDword0 = resp->RingDword1 = resp->RingDword2 = resp->RingDword3 = 0xDEAD;
             }
 
             KdPrint(("KIQ_BIOS_RING result SCRATCH=0x%08X RPTR=0x%08X ME=0x%08X\n",
@@ -6289,6 +6337,10 @@ DreamV3DeviceControl(
 
             if (outputLen < sizeof(*resp)) {
                 status = STATUS_BUFFER_TOO_SMALL;
+                break;
+            }
+            if (!DevExt || !DevExt->MmioVirtualBase) {
+                status = STATUS_DEVICE_NOT_READY;
                 break;
             }
             RtlZeroMemory(resp, sizeof(*resp));

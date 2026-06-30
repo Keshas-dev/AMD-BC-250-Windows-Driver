@@ -1,5 +1,4 @@
 @echo off
-exit
 setlocal enabledelayedexpansion
 
 :: ============================================================================

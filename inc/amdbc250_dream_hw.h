@@ -460,8 +460,10 @@ typedef struct _DREAM_V3_DEVICE_EXTENSION *PDREAM_V3_DEVICE_EXTENSION;
 #define AMDBC250_REG_GCVM_L2_CNTL4                      0x00000B36C
 
 #define AMDBC250_REG_GCVM_CONTEXT0_CNTL                 0x00000B460
-#define AMDBC250_REG_GCVM_CONTEXT0_PT_BASE_LO           0x00000B608
-#define AMDBC250_REG_GCVM_CONTEXT0_PT_BASE_HI           0x00000B60C
+#define AMDBC250_REG_GCVM_CONTEXT0_PT_BASE_LO           0x000006C8C  /* Linux offset, verified WRITABLE */
+#define AMDBC250_REG_GCVM_CONTEXT0_PT_BASE_HI           0x000006C90  /* Linux offset, verified WRITABLE */
+
+/* NOTE: 0x0B608/0x0B60C are NOT PT_BASE (hardware-locked, reads 0). Correct PT_BASE is at 0x6C8C/0x6C90. */
 
 /* TLB entries (Context0 page table ??? WRITABLE, format unknown) */
 #define AMDBC250_REG_GCVM_CTX0_TLB_ENTRY_0              0x00000B408
