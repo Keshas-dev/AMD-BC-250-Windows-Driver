@@ -1723,9 +1723,9 @@ DreamV3SwPm4Process(
                     DreamV3WriteRegister(DevExt, DevExt->GrbmGfxIndexOffset,
                         AMDBC250_GRBM_GFX_INDEX_KIQ_VAL);
                     /* Write dispatch dimensions (may be read-only status shadow) */
-                    DreamV3WriteRegister(DevExt, AMDBC250_REG_COMPUTE_DISPATCH_DIRECT, packedDim);
+                    DreamV3WriteRegister(DevExt, AMDBC250_REG_COMPUTE_DISPATCH_INITIATOR, packedDim);
                     /* Trigger dispatch with VALID=1 */
-                    DreamV3WriteRegister(DevExt, AMDBC250_REG_COMPUTE_DISPATCH_START, initiator);
+                    DreamV3WriteRegister(DevExt, AMDBC250_REG_COMPUTE_DISPATCH_INITIATOR, initiator);
                     /* Restore broadcast */
                     DreamV3WriteRegister(DevExt, DevExt->GrbmGfxIndexOffset,
                         AMDBC250_GRBM_GFX_INDEX_BROADCAST_VAL);
@@ -5055,24 +5055,24 @@ DreamV3DeviceControl(
             #define BAR5_READ(off) DreamV3ReadRegister(DevExt, (off))
             #define GRBM_INDEX      0x34D0
             #define ME_CNTL         0x4A74
-            #define HQD_ACTIVE      0xDAC0
-            #define HQD_VMID        0xDAC4
-            #define HQD_PERSISTENT  0xDAC8
-            #define HQD_PQ_BASE     0xDAD8
-            #define HQD_PQ_BASE_HI  0xDADC
-            #define HQD_PQ_RPTR     0xDAE0
-            #define HQD_PQ_CONTROL  0xDAFC
-            #define HQD_PQ_WPTR_LO  0xDB90
-            #define HQD_PQ_WPTR_HI  0xDB94
-            #define HQD_PQ_WP_POLL  0xDB00
-            #define HQD_PQ_DOORBELL 0xDAF4
-            #define HQD_EOP_BASE    0xDB4C
-            #define HQD_EOP_BASE_HI 0xDB50
-            #define HQD_EOP_CNTL    0xDB54
-            #define HQD_RPTR_RPT    0xDAE4
-            #define HQD_RPTR_RPT_HI 0xDAE8
-            #define HQD_WP_POLL_A   0xDAEC
-            #define HQD_WP_POLL_A_HI 0xDAF0
+            #define HQD_ACTIVE      0x910C
+            #define HQD_VMID        0x9110
+            #define HQD_PERSISTENT  0x9114
+            #define HQD_PQ_BASE     0x9124
+            #define HQD_PQ_BASE_HI  0x9128
+            #define HQD_PQ_RPTR     0x912C
+            #define HQD_PQ_CONTROL  0x90F0
+            #define HQD_PQ_WPTR_LO  0x91DC
+            #define HQD_PQ_WPTR_HI  0x91E0
+            #define HQD_PQ_WP_POLL  0x914C
+            #define HQD_PQ_DOORBELL 0x9150
+            #define HQD_EOP_BASE    0x90EC
+            #define HQD_EOP_BASE_HI 0x90F4
+            #define HQD_EOP_CNTL    0x90F8
+            #define HQD_RPTR_RPT    0x913C
+            #define HQD_RPTR_RPT_HI 0x9140
+            #define HQD_WP_POLL_A   0x9144
+            #define HQD_WP_POLL_A_HI 0x9148
             #define KIQ_BASE_LO     0xE060
             #define KIQ_BASE_HI     0xE064
             #define KIQ_RPTR        0xE06C
@@ -5428,7 +5428,7 @@ DreamV3DeviceControl(
 
         if (fwType < 1 || fwType > 4) {
             KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
-                "AMDBC250-DREAM-V4.3: LOAD_CP_FW - invalid type %u (must be 1=ME, 2=PFP, 3=CE, 4=MEC)\n", fwType));
+                "AMDBC250-DREAM-V4.3: LOAD_CP_FW - invalid type %u (1=ME, 2=PFP, 3=CE, 4=MEC)\n", fwType));
             resp->Result = 0xDEAD0010;  /* invalid type */
             status = STATUS_SUCCESS;
             bytesReturned = sizeof(*resp);
@@ -5555,6 +5555,11 @@ DreamV3DeviceControl(
 #define REG_MEC_IC_HI      0x17394
 #define REG_MEC_ME1_CNTL   0x7A00   /* MEC ME1 halt control */
         #define MEC_ME1_HALT       (1 << 0) /* bit0=halt (potentially inverted; write 1=halt, 0=unhalt currently) */
+
+/* RLC registers — probed: 0x14664/0x14668 and 0x3A4C/0x3A50 are both DEAD (reads 0, writes hang).
+ * RLC firmware loading is NOT SUPPORTED on BC-250 — registers don't exist in BAR5 space.
+ * Linux BC-250 uses RLC autoload (PSP-based), which is also not available.
+ */
 
         __try {
             /* Step 1: Halt — only halt target engine */
@@ -5806,22 +5811,20 @@ DreamV3DeviceControl(
             dump->KiqRptr             = DUMP_REG32(0xE06C);
             dump->KiqWptr             = DUMP_REG32(0xE078);
 
-            /* HQD KIQ queue (GPU_KIQ_TEST offsets) */
-            dump->HqdActiveKiq        = DUMP_REG32(0xDAC0);
-            dump->HqdPqBaseKiq        = DUMP_REG32(0xDAD8);
-            dump->HqdPqBaseHiKiq      = DUMP_REG32(0xDADC);
-            dump->HqdPqRptrKiq        = DUMP_REG32(0xDAE0);
-            dump->HqdPqWptrLoKiq      = DUMP_REG32(0xDB90);
-            dump->HqdVmidKiq          = DUMP_REG32(0xDAC4);
-
-            /* HQD compute/GFX ring (fresh boot verified offsets) */
-            dump->HqdActiveCmp        = DUMP_REG32(0xDCF4);
-            dump->HqdPqBaseCmp        = DUMP_REG32(0xDBC8);
-            dump->HqdPqBaseHiCmp      = DUMP_REG32(0xDBCC);
-            dump->HqdPqRptrCmp        = DUMP_REG32(0xDBD0);
-            dump->HqdPqWptrCmp        = DUMP_REG32(0xDBD4);
-            dump->HqdVmidCmp          = DUMP_REG32(0xDCF0);
-            dump->HqdAqCntlCmp        = DUMP_REG32(0xDBC0);
+            /* HQD registers (corrected BASE_IDX=0 addresses) */
+            dump->HqdActiveKiq        = DUMP_REG32(0x910C);
+            dump->HqdPqBaseKiq        = DUMP_REG32(0x9124);
+            dump->HqdPqBaseHiKiq      = DUMP_REG32(0x9128);
+            dump->HqdPqRptrKiq        = DUMP_REG32(0x912C);
+            dump->HqdPqWptrLoKiq      = DUMP_REG32(0x91DC);
+            dump->HqdVmidKiq          = DUMP_REG32(0x9110);
+            dump->HqdActiveCmp        = DUMP_REG32(0x910C);
+            dump->HqdPqBaseCmp        = DUMP_REG32(0x9124);
+            dump->HqdPqBaseHiCmp      = DUMP_REG32(0x9128);
+            dump->HqdPqRptrCmp        = DUMP_REG32(0x912C);
+            dump->HqdPqWptrCmp        = DUMP_REG32(0x91DC);
+            dump->HqdVmidCmp          = DUMP_REG32(0x9110);
+            dump->HqdAqCntlCmp        = DUMP_REG32(0x90F0);
 
             /* GCVM registers */
             dump->GcvmL2Cntl          = DUMP_REG32(0x0B360);

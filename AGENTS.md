@@ -41,36 +41,23 @@
 - **GRBM selection**: Linux uses `mmGRBM_GFX_CNTL` (0x0dc2, BAR5=0x2022) for ME/PIPE/QUEUE select, NOT `GRBM_GFX_INDEX` (0x34D0). These are DIFFERENT registers.
 - **CP_MEC_CNTL**: Navi10 offset mmREG=0x0e2d (BAR5=0x4B14), NOT Sienna_Cichlid 0x0f55. BC-250 is GFX10.1.3, not 10.3.x.
 
-## Progress Summary (2026-07-01) — Linux amdgpu Research + HW Fixes + Probe Tool
+## BREAKTHROUGH: PSP Mailbox Firmware Loading WORKS! (2026-07-01)
 
-### What Was Done This Session
-1. **Linux amdgpu research (gfx_v10_0.c)** — Analyzed COMPUTE init sequence (see below).
+### Test Result
+- **Test**: `test-tools/psp-mailbox-rlc-test.exe` — loads RLC firmware via PSP mailbox
+- **PSP driver**: `alive=1 fwLoaded=1 ringCreated=0` — SOS already loaded
+- **RLC (fwType=8)**: Status=0x00000000 C2Pmsg81=0x00000000 ✅
+- **MEC (fwType=4)**: Status=0x00000000 C2Pmsg81=0x00000000 ✅
 
-2. **GRBM_GFX_CNTL discovered** — Linux uses `mmGRBM_GFX_CNTL` (0x0dc2→BAR5=0x2022) for ME/PIPE/QUEUE select via `nv_grbm_select()`. This is a DIFFERENT register from `GRBM_GFX_INDEX` (0x34D0). hw.h updated with correct defines.
+### Key Discovery
+- SOS firmware DOES support GFX_CMD_ID_LOAD_IP_FW (0x06) via mailbox — even though TOS ring protocol doesn't work
+- RLC firmware (previously impossible via direct BAR5) now works! PSP mailbox is the CORRECT path
+- All GPU firmware types can be loaded: ME=1, PFP=2, CE=3, MEC=4, MEC2=5, RLC=8, SDMA0=9, SDMA1=10
 
-3. **CP_MEC_CNTL offset corrected** — Old: Sienna_Cichlid 0x0f55→0x21B5. New: Navi10 0x0e2d→BAR5=0x4B14. BC-250 is GFX10.1.3, NOT 10.3.x. Updated in hw.h.
-
-4. **MQD (Memory Queue Descriptor) architecture understood** — `v10_compute_mqd` is 512-DWORD struct in system memory. Region 1 (DW0-63) = COMPUTE PIPE STATE (PGM_LO, RSRC1, RSRC2, DISPATCH_INITIATOR, dims, etc.). Region 2 (DW128-191) = CP_HQD state. When CP_HQD_ACTIVE is set, HW loads MQD into live registers. Linux NEVER writes COMPUTE_DISPATCH_DIRECT via MMIO — MEC firmware processes ring PM4 and programs these internally.
-
-5. **hw.h fixes**: CP_MEC_CNTL→0x4B14, added GRBM_GFX_CNTL, removed duplicate defines, fixed SEG1 offset for RLC_CP_SCHEDULERS.
-
-6. **SW PM4 IT_DISPATCH_DIRECT handler fixed** — Now selects ME=1 via GRBM_GFX_INDEX before writing COMPUTE registers, then restores broadcast.
-
-7. **Probe tool built** — `mec-probe-test.exe` checks MEC halt (0x4B14), GRBM selects (0x2022 vs 0x34D0), COMPUTE pipe state (0xDC60-0xDC80), SPI/CU power gating (0x5C3C/0x34FC), CC array config (0x9C1C/0x3264), CP_HQD registers, GCVM status. Tests writes with both GRBM selects.
-
-8. **Driver builds cleanly** — Signed `atikmdag.sys` in `output\`.
-
-### Key Discoveries
-- **COMPUTE_DISPATCH_DIRECT (0xDC60) is READ-ONLY** — It's a STATUS SHADOW of the internal pipe register, reflecting current HW state. Writes are silently ignored (unlike earlier reports which showed apparent changes from 0x80 to 0x000757FF — those were HW-state changes, not write-triggered). Only bits[15:0] of config regs (RSRC1/2, PGM_LO/HI, LIMITS) are writable; bits[31:16] are read-only status.
-- **COMPUTE registers use SEG1 formula**: `BAR5 = GC_BASE(0x1260) + SEG1(0xA000) + Navi10_byteOffset`. NOT `GC_BASE + mm*4`.
-- **Linux does not use direct COMPUTE register writes** — All dispatch goes through ring buffer PM4 → MEC firmware. Direct MMIO to COMPUTE registers is a BC-250 Windows-only path.
-- **MQD is the key** — COMPUTE pipe state (PGM, RSRC, dims) can only be loaded via MQD, not written directly via 0xDC60.
-- **MEC firmware must be running** — CP_MEC_CNTL MEC_ME1_HALT (bit28) at 0x4B14 may be set, preventing firmware-based dispatch.
-
-### Current Blocker
-- WRITE_PHYSICAL_MEM can write shader code to VRAM, but COMPUTE_DISPATCH_DIRECT (0xDC60) is read-only → cannot set dispatch dimensions via direct register write.
-- Need MEC firmware operational + MQD-based activation, or find alternative dispatch entry point.
-- Probe tool (mec-probe-test.exe) needed to determine MEC halt status and GRBM_GFX_CNTL behavior.
+### Impact
+- Can now initialize ALL GPU engines via PSP (especially RLC which was impossible before)
+- Previous blocker (KIQ_SIZE=0 read-only) may be resolved by proper RLC initialization
+- Next step: combined test loading ALL firmware via PSP + MEC ring test
 
 ### Code Review Bug Fix Status (all 17 bugs resolved)
 
@@ -102,72 +89,19 @@
 ### Known Limitation
 - PSP driver requires Test Signing mode ON (`bcdedit /set testsigning on`) + Secure Boot OFF — self-signed AMD-BC250-Signer cert not from a trusted CA
 
-### Next Steps
-1. **Install driver** with page-aligned WRITE_PHYSICAL_MEM fix (reinstall required)
-2. **Run `dispatch-shader-test.exe`** — write shader code to VRAM @ 0xC0100000 via WRITE_PHYSICAL_MEM
-3. **Test GCVM disable** — clear CONTEXT0_CNTL bit0 so PGM uses physical addresses, then dispatch
-4. **Test shader execution** — try multiple s_endpgm encodings (0xBF9F0000, 0x9F800000, 0x00000000) and check GRBM_STATUS for compute activity
-5. **If GCVM disable works** — write a real RDNA compute shader that writes output to known VRAM location
 
-## Current command path and blockers
-- KIQ submit from the GPU driver uses `PSP_IOCTL_KIQ_SUBMIT` (`0x818`) against the PSP driver.
-- **PSP driver now programs GPU HQD registers** (PspKiq.c rewrite): KIQ_BASE, PQ_BASE, PQ_CONTROL, VMID, ACTIVE, WPTR.
-- GPU driver SEND_PM4: PATH 1 (PSP KIQ) no longer requires GfxRing — only needs `HardwareInitialized`.
-- GFX ring `CP_RING0_BASE_LO` (`0xDA60`) is read-only on current hardware.
-- **FUNDAMENTAL BLOCKER**: SOS firmware (v3 navi10_sos.bin) does not support ring protocol (C2PMSG_64 bit 31 never sets).
-- **NBIO_MAP INIT_HARDWARE works**: Driver fix (moved GPU alive test after NBIO_MAP break) resolved system hangs.
-- CP registers at GC_BASE-shifted 0x3AD8-0x3AEC contain fence/doorbell addresses (0x02A8xxxx range).
-- NBIO_ID at 0xC100 = 0xFEDCBAEF confirms NBIO accessible.
-- SCRATCH (0x32D4) bit 31 is write-masked by hardware (W1C or read-only).
 
-## GCVM (GPU VM) — Corrected offsets (verified 2026-06-30)
-Formula: `BAR5_offset = GC_BASE(0x1260) + Linux_DWORD_offset * 4`
-- **GCVM_CONTEXT0_CNTL = 0x0B460** — alive, writable (bit0=enable, bit1=DEFAULT_PAGE)
-- **GCVM_CONTEXT0_PT_BASE_LO = 0x6C8C** — Linux offset, verified WRITABLE (NOT 0x0B608!)
-- **GCVM_CONTEXT0_PT_BASE_HI = 0x6C90** — Linux offset, verified WRITABLE
-- **GCVM_L2_CNTL = 0x0B360** — alive, value=0x013C67B8
-- **DO NOT USE** 0x2840-0x2987 range or 0x1A00 range (all 0xFFFFFFFF, dead)
-- **NOTE**: 0x0B608/0x0B60C are NOT PT_BASE — misidentified register, hardware-locked (reads 0)
+## Remaining Blockers (pre-PSP-mailbox era)
+- **KIQ_SIZE (0xE068) = 0 read-only** — hardware ring buffer dispatch may still be blocked even after proper PSP firmware loading
+- **DIM_X (0x80E4) read-only** — direct MMIO dispatch impossible
+- **MEC firmware ring processing** — unknown if PSP-loaded firmware behaves differently from IC_BASE DMA loaded firmware
+- **Compute queue HW bug** — BC-250 may have permanently disabled compute queues (RADV `nocompute` workaround)
 
-### PTE format (RDNA2/GFX10)
-- PDE: bit0=VALID, bit1=SYSTEM → `0x03`
-- PTE: bit0=VALID, bit1=SYSTEM, bit5=READABLE, bit6=WRITABLE → `0x63` (not 0x61!)
-- Format from Linux `amdgpu_vm.h`: VALID=bit0, SYSTEM=bit1, SNOOPED=bit2, READABLE=bit5, WRITEABLE=bit6
-
-### GCVM register writability map
-**WARNING**: Writing 0xDEADBEEF to FULL_WRITABLE registers DESTROYS BIOS config! Always save/restore.
-- **WRITABLE**: L2 TLB data 1-2 (0x0B320-0x0B324), Context0 regs (0x0B408-0x0B4AC), Context0 config (0x0B4C0-0x0B4D4 bits 0-7), GCVM_CONTEXT0_CNTL (0x0B460)
-- **WRITABLE (correct PT_BASE)**: PT_BASE at 0x6C8C/0x6C90 (Linux offset, works with GCVM_PT_SETUP IOCTL)
-- **READ-ONLY**: L2 TLB tag (0x0B31C), L2 TLB data 3-15 (0x0B328-0x0B35C), L2_CNTL (0x0B360), Context0 base (0x0B404)
-- **STALE/MISIDENTIFIED**: 0x0B608/0x0B60C — not PT_BASE, hardware-locked (reads 0)
-- BIOS config varies per boot; warm reboot doesn't fully reset GPU state.
-
-## CP Ring registers
-- **GFX RING0_BASE_LO (0xDA60)**: read-only (BIOS sets ring base)
-- **COMPUTE_BASE_LO (0xDB60)**: read-only (same)
-- **KIQ_BASE_LO (0xE060)**: writable → KIQ works
-- All other ring registers (CNTL, RPTR, WPTR, DOORBELL) writable
-
-## Firmware Loading — Critical Bug Fix (2026-06-25)
-- **Bug**: LOAD_CP_FW wrote IC_BASE_CNTL=0x100 (ENABLE bit) BEFORE setting IC_BASE_LO/HI. If bit 8 auto-starts DMA from IC_BASE address, DMA starts with stale address 0 → firmware never loads into engine instruction memory.
-- **Fix**: Write IC_BASE_LO first, then HI, then CNTL=0 (matches Linux). Trigger DMA by writing version to UCODE_ADDR.
-- **Proof**: Even 8 bytes of 0xDE at ucode start caused no crash → engine was never executing loaded firmware.
-- **Second fix**: Added UCODE_ADDR polling (wait until reads 0, 500ms timeout) before unhalt. Linux does this to confirm DMA completion.
-- **Affected files**: `src/kmd/amdbc250_dream_kmd.c` (LOAD_CP_FW IOCTL), `src/kmd/amdbc250_dream_fw_load.c` (DreamV3LoadSingleFirmware)
-- **Build status**: `output\atikmdag.sys` with both fixes, signed. Requires reinstall to take effect.
-
-## CP Firmware — Direct MMIO Load
-- `LOAD_CP_FW` IOCTL (`0x80000BD4`): parses 44-byte firmware header, uploads Jump Table via UCODE_DATA registers.
-- IC_BASE registers: ME_IC=0x17370-0x17378, PFP_IC=0x17360-0x17368, CE_IC=0x17380-0x17388
-- Halt bits: ME_HALT=bit28, PFP_HALT=bit30, CE_HALT=bit29
-- Firmware files in `firmware/` directory (cyan_skillfish2_me.bin, pfp.bin, ce.bin, mec.bin, rlc.bin, sdma.bin)
-- IC_BASE DMA bypasses GCVM — firmware loads successfully via MMIO, but ring buffer access uses GCVM translation (which fails)
-
-## PM4 submission — current blocker
-- GPU CP cannot access ring buffer memory via GCVM translation.
-- IC_BASE DMA works (firmware loads) → GPU CAN read system RAM for DMA, but ring buffer access uses different GCVM path.
-- DEFAULT_PAGE bit (CONTEXT0_CNTL bit1) does not provide flat/physical addressing.
-- Context0 TLB entries (0x0B408-0x0B4AC) are writable but format is unknown.
+## Next Steps
+1. **B) Write combined test**: load ALL firmware (ME, PFP, CE, MEC, RLC) via PSP mailbox, then test MEC ring processing
+2. **A) Modify GPU driver LOAD_CP_FW**: add PSP mailbox path for RLC (fwType=8) and optionally all types
+3. If MEC ring still fails → try GFX ring for 3D graphics (CP_RING0_BASE_LO at 0xDA60 is read-only but pre-configured by BIOS)
+4. If GFX ring works → basic 3D/compute display driver is achievable
 
 ## PSP Proxy IOCTLs
 - GPU driver exposes: `IOCTL_AMDBC250_BAR5_READ_PROXY` (0x900) and `IOCTL_AMDBC250_BAR5_WRITE_PROXY` (0x901) — these are **raw values**, not CTL_CODE-packed.
@@ -179,97 +113,66 @@ Formula: `BAR5_offset = GC_BASE(0x1260) + Linux_DWORD_offset * 4`
 - On session start, search memory for prior context before exploring files.
 - Memory tags: `BC-250`, `IOMMU`, `GPU driver`, `GCVM`, `compile`, `PSP driver`, `hardware`.
 
-## MEC Firmware Binary Structure (discovered 2026-06-26)
-- **Header**: 44 bytes (11 DWORDs): [0] total_size, [1] header_size, [2] ver_major, [3] ver_minor, [4] ucode_version, [5] ucode_size, [6] ucode_offset, [7] checksum, [8] data_offset, [9] jt_offset(DWORDs), [10] jt_size(DWORDs).
-- **MEC1 binary**: total=0x41930, hdr=44, ver_major=1, ver_minor=0x1000A, ucode_ver=0x90, ucode_size=0x41830, ucode_offset=0x100, jt_offset=0x1052C (DWORDs from ucode start), jt_size=0xE0 DWORDs.
-- **Jump Table**: at file offset 0x100 + 0x1052C*4 = 0x415B0, size 0x380 bytes (0xE0 DWORDs). Uploaded via UCODE_DATA registers. MEC1 = mostly zeros, MEC2 = real entries.
-- **MEC1 vs MEC2**: IDENTICAL except: (1) JT at 0x100-0x107 (4 DWORDs differ), (2) ucode at 0x41830+ (MEC1 = `78 80` NOP pattern, MEC2 = real microcode). All other bytes match → firmware core is same.
-- **Instruction encoding**: 16-bit halfwords (little-endian). NOP = `0x8078` (bytes `78 80`).
-
-### KIQ Register References in MEC Firmware (CORRECTED 2026-06-26)
-**IMPORTANT**: Earlier analysis had byte order reversed. Corrected counts (little-endian 16-bit):
-| Register | Internal Addr | LE bytes | Ref Count |
-|----------|--------------|----------|-----------|
-| KIQ_BASE_LO | 0xCE00 | `00 CE` | **69×** |
-| KIQ_CNTL (KIQ_SIZE) | **0xCE08** | `08 CE` | **2×** |
-| KIQ_BASE_HI | 0xCE04 | `04 CE` | **1×** |
-| KIQ_RPTR | 0xCE0C | `0C CE` | 0 |
-| KIQ_WPTR | 0xCE18 | `18 CE` | 0 |
-| KIQ_ACTIVE | 0xCE20 | `20 CE` | 0 |
-| HQD_ACTIVE | 0xC860 | `60 C8` | 0 |
-| HQD_PQ_BASE | 0xC878 | `78 C8` | 0 |
-
-- KIQ_BASE_LO dominates (69×) — firmware primarily works with KIQ_BASE_LO to get ring descriptor pointer.
-- KIQ_CNTL (SIZE) only 2 refs at 0x9482, 0x9B6A — not the 12× previously thought.
-- RPTR, WPTR, ACTIVE not found as direct register references → firmware likely accesses them through the descriptor structure in memory, not via direct register MMIO.
-- MEC1 == MEC2 (identical ref counts and offsets) — firmware core is the same.
-
-### Firmware Modification Viability
-- **PSP does NOT validate firmware signature** on BC-250 — proven by ucode corruption test.
-- **Blind patch applied (2026-06-26)**: Replaced both `08 CE` (KIQ_CNTL) with `78 80` (NOP 0x8078) in `firmware/cyan_skillfish2_mec_patched.bin`. Only 4 bytes changed total.
-- **Testing**: Use `patched-mec-test.exe` (compile with `compile-patcher-test.bat`) or `test-patched-mec.bat` (auto-backup/original swap).
-- **If patch fails**: KIQ_SIZE=0 is likely a hardware-level block, not firmware-mediated. ISA RE needed for targeted patches.
-- KIQ_CNTL at 2 locations only suggests SIZE check may not be firmware's main ring processing path.
-
 ## Source and docs to trust
 - Prefer `build.bat`, `src/kmd/amdbc250_dream_kmd.c`, `src/kmd/amdbc250_dream_hw_init.c`, `src/kmd/amdbc250_psp.c`, and `inc/amdbc250_dream_hw.h` over historical docs.
 - Useful but potentially stale docs: `docs\REGISTER-MAP-BC250.md`, `docs\PSP-PROXY-BYPASS.md`, and `docs\RING-INIT-STATUS.md`.
 - Trust: `docs\BC250-LINUX-IP-MAP.md` (Linux kernel source-verified IP base addresses).
 
-## Code Review (2026-06-24) — All 17 Bugs FIXED (2026-06-30)
+## CRITICAL: COMPUTE Register Address Correction (2026-07-01)
 
-All bugs identified in the 2026-06-24 code review have been fixed across sessions on 2026-06-25, 2026-06-26, and 2026-06-30. See "Progress Summary (2026-06-30)" for the detailed bug fix table.
+All COMPUTE registers in Linux gc_10_1_0_offset.h have **BASE_IDX=0** (not 1!). This means the correct formula is `BAR5 = GC_BASE(0x1260) + mm_DWORD * 4`, **NOT** the SEG1 formula (GC_BASE + 0xA000 + mm*4) that hw.h uses.
 
-## Linux Register Comparison (2026-06-24)
+### Corrected COMPUTE Register Map
 
-### KIQ Model — FUNDAMENTAL DIFFERENCE
-- **Our driver** uses KIQ_BASE/CNTL/RPTR/WPTR at 0xE060-0xE078 — **not in Linux GFX10 headers at all**
-- **Linux** uses CP_HQD_* registers (MQD model) via `gfx_v10_0_kiq_init_register()` for KIQ
-- Our KIQ_BASE approach works on BC-250 (KIQ_BASE_LO writable) but is BC-250-specific
+| Register | Linux mm | Old (hw.h) | CORRECT |
+|----------|----------|------------|---------|
+| DISPATCH_INITIATOR | 0x1ba0 | 0xDC60 | **0x80E0** |
+| DIM_X/Y/Z | 0x1ba1-3 | 0xDC64 | **0x80E4-0x80EC** |
+| START_X/Y/Z | 0x1ba4-6 | 0xDC68 | **0x80F0-0x80F8** |
+| NUM_THREAD_X/Y/Z | 0x1ba7-9 | 0xDC6C | **0x80FC-0x8104** |
+| PGM_LO/HI | 0x1bac-1bad | 0xDC70 | **0x8110-0x8114** |
+| PGM_RSRC1/RSRC2 | 0x1bb2-1bb3 | (none) | **0x8128-0x812C** |
+| STATIC_THREAD_MGMT_SE0 | 0x1bb6 | (none) | **0x8138** |
+| TMPRING_SIZE | 0x1bb8 | (none) | **0x8140** |
+| USER_DATA_0-15 | 0x1be0-1bef | (none) | **0x81E0-0x81FC** |
 
-### GRBM Selection — Linux Uses Different Register
-- **Our driver** writes `GRBM_GFX_INDEX` (0x34D0) for ME/PIPE/QUEUE select
-- **Linux** writes `mmGRBM_GFX_CNTL` (0x0dc2→BAR5=0x2022) via `nv_grbm_select()` — this is a DIFFERENT register from GRBM_GFX_INDEX (0x34D0)
-- Both may work for ME select on BC-250; GRBM_GFX_INDEX (0x34D0) confirmed functional for KIQ register access
+### Corrected CP_HQD Register Map
 
-### IC_BASE Registers — MATCH
-- All CP IC_BASE registers (0x17360-0x17388) match Linux: `BAR5 = GC_BASE(0x1260) + mm*4` ✅
+| Register | Linux mm | Old (hw.h) | CORRECT |
+|----------|----------|------------|---------|
+| CP_MQD_BASE_ADDR | 0x1fa9 | 0xDAB8 | **0x9104** |
+| CP_HQD_ACTIVE | 0x1fab | 0xDAC0 | **0x910C** |
+| CP_HQD_VMID | 0x1fac | 0xDAC4 | **0x9110** |
+| CP_HQD_PQ_BASE | 0x1fb1 | 0xDAD8 | **0x9124** |
+| CP_HQD_PQ_CONTROL | 0x1fba | 0xDAFC | **0x9148** |
+| CP_HQD_PQ_WPTR_LO | 0x1fdf | 0xDB90 | **0x91DC** |
 
-### Halt Bits — MATCH
-- ME_HALT=bit28, PFP_HALT=bit30, CE_HALT=bit29 — identical to Linux ✅
-- CP_MEC_CNTL at 0x4B14 matches Navi10 (GFX10.1). BC-250 is NOT GFX10.3, so Sienna_Cichlid override 0x0f55 does not apply.
+### Old address problems
+- **GRBM_GFX_CNTL (0x2022)** was probed at WRONG address. CORRECT is **0x4968** (mm=0x0dc2, GC_BASE + mm*4).
+- **COMPUTE block at 0xDC60** contains DIFFERENT registers (not COMPUTE at all) — this is why dispatch never worked.
+- **CP_HQD block at 0xDAB8+** also wrong — real registers at 0x9104+.
+- All prior dispatch tests used wrong addresses.
 
-### GCVM Registers — Partial Match
-- Our empirically verified offsets (0xB360-0xB60C) do NOT match `GC_BASE + mm*4` formula
-- GCVM registers are in a different address block on BC-250; keep our verified values
+### New test tool
+- `test-tools/correct-compute-test.c` + `compile-correct-compute.bat` probes correct addresses and attempts dispatch.
 
-### CP_HQD_* Registers (0xDAC0-0xDBFF) — NBIO-BLOCKED
-- All HQD writes at 0xDAC0+ range silently dropped by NBIO on BC-250
-- Linux uses these for KIQ init; they are unusable on our hardware
-- KIQ alias at 0xE060+ is the only usable path
+### Actual HW Status (verified 2026-07-01)
 
-### RLC_CP_SCHEDULERS (0xECA1) — Confirmed Correct for Sienna_Cichlid
-- Value matches Sienna_Cichlid override `mmRLC_CP_SCHEDULERS_Sienna_Cichlid = 0x4ca1`
-- But 0xECA1 mod 4 = 1 means offset is NOT 4-byte aligned — empirically found at 0xECAA by probe
+| Register | Address | Status |
+|----------|---------|--------|
+| DISPATCH_INITIATOR | 0x80E0 | W1C trigger, sets consumed, no execution |
+| DIM_X | 0x80E4 | READ-ONLY (shadow/status) |
+| DIM_Y | 0x80E8 | DEAD (0xFFFFFFFF) |
+| DIM_Z | 0x80EC | DEAD (0xFFFFFFFF) |
+| START_X/Y/Z | 0x80F0-0x80F8 | READ-ONLY (all 0) |
+| NUM_THREAD_X/Y/Z | 0x80FC-0x8104 | READ-ONLY (all 0) |
+| PGM_LO | 0x8110 | WRITABLE! |
+| PGM_HI | 0x8114 | WRITABLE! |
+| PGM_RSRC1/2 | 0x8128-0x812C | DEAD (0xFFFFFFFF) |
+| CP_MQD_BASE_ADDR | 0x9104 | WRITABLE (write-back verified) |
+| CP_MQD_BASE_ADDR_HI | 0x9108 | READ-ONLY (0xFF11EFE0) |
+| CP_HQD_ACTIVE | 0x910C | WRITABLE, ACKs (reads 1) |
+| GRBM_GFX_CNTL | 0x2022/0x4968 | DEAD (BC-250 doesn't have this) |
+| 0xDC60 register | 0xDC60 | Cycling FIFO (debug counter, not dispatch) |
 
-## Progress Summary (2026-06-30) — All 17 Bugs Fixed + DISPATCH_DIRECT
 
-See top of file for full summary. Key achievements from prior sessions:
-
-### SW PM4 Executor (2026-06-26)
-- `DreamV3SwPm4Process` at kmd.c:1564 — translates PM4 packets to direct MMIO writes
-- PATH 3 fallback in SEND_PM4 bypasses KIQ_SIZE=0 and NBIO-blocked HQD regs
-- Supports: IT_NOP, IT_WRITE_DATA, IT_EVENT_WRITE_EOP, IT_RELEASE_MEM, PM4_TYPE_0, IT_DISPATCH_DIRECT
-- Corrected SET_SH_REG/SET_CONTEXT_REG/SET_CONFIG_REG offset formula (no +0x2C000 block base)
-
-### KIQ/SW PM4 Path Status
-- **Hardware ring processing IMPOSSIBLE** — KIQ_SIZE(0xE068) read-only 0, all CP_HQD NBIO-blocked
-- **SW PM4 executor is the ONLY working path** for command submission
-- PSP KIQ path (Path 1) also hits KIQ_SIZE=0 block
-- Test tools: `sw-pm4-test.exe`, `patched-mec-test.exe`, `reg-dump-and-nop.exe`
-
-### Safety Notes
-- **GRBM_GFX_INDEX (0x34D0) IS safe to write** selecting ME=1 — confirmed by multiple runs
-- **CONTEXT0_CNTL writes may hang system** — PT_DISABLE while engine active caused freeze
-- **ALWAYS deactivate KIQ (0xE080=0) and restore GRBM_GFX_INDEX (0xE0000000)** before exiting tests
-- **ALWAYS save/restore** PT_BASE0 before writing — some configs destroyed by 0xDEADBEEF

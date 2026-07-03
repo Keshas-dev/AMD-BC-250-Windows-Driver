@@ -502,7 +502,7 @@ DreamV3HwInitGfxRing(
                 DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_MQD_BASE_ADDR_HI, 0);
 
                 /* 6. Set PQ base (ring buffer address) */
-                DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_HQD_PQ_BASE, BaseLoVal);
+                DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_HQD_PQ_BASE_LO, BaseLoVal);
                 DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_HQD_PQ_BASE_HI, BaseHiVal);
 
                 /* 7. Set PQ control (ring size in log2 DWORDs) */

@@ -276,39 +276,80 @@ typedef struct _DREAM_V3_DEVICE_EXTENSION *PDREAM_V3_DEVICE_EXTENSION;
 #define AMDBC250_REG_CP_COMPUTE_RING0_RPTR      (AMDBC250_GC_BASE + 0x0000C90C)  /* 0xDB6C */
 #define AMDBC250_REG_CP_COMPUTE_RING0_WPTR      (AMDBC250_GC_BASE + 0x0000C918)  /* 0xDB78 */
 
-/* --- COMPUTE engine registers (SEG1: GC_BASE + 0xA000 + Navi10 offset) --- */
-#define AMDBC250_REG_COMPUTE_DISPATCH_DIRECT    (AMDBC250_GC_BASE + AMDBC250_GC_BASE_SEG1 + 0x00002A00)  /* 0xDC60 */
-#define AMDBC250_REG_COMPUTE_DISPATCH_START     (AMDBC250_GC_BASE + AMDBC250_GC_BASE_SEG1 + 0x00002A04)  /* 0xDC64 */
+/* --- COMPUTE engine registers (BASE_IDX=0: GC_BASE(0x1260) + mm*4) --- */
+/* CORRECTED 2026-07-01: All COMPUTE registers have BASE_IDX=0 (NOT SEG1).
+ * Formula: BAR5 = GC_BASE(0x1260) + mm*4, where mm is from gc_10_1_0_offset.h.
+ * OLD WRONG addresses were at 0xDC60+ (SEG1 formula, GC_BASE+0xA000+mm*4).
+ *
+ * Verified register map (2026-07-01 probe):
+ *   0x80E0: W1C trigger (any write clears to 0, VALID consumed)
+ *   0x80E4: reads 0, READ-ONLY (DIM_X shadow)
+ *   0x80E8-0x80EC: 0xFFFFFFFF (DEAD, DIM_Y/Z unused on BC-250)
+ *   0x80F0-0x810C: reads 0, READ-ONLY (START, NUM_THREAD shadows)
+ *   0x8110: WRITABLE (PGM_LO)
+ *   0x8114: WRITABLE (PGM_HI)
+ *   0x8120-0x813C: 0xFFFFFFFF (DEAD - includes PGM_RSRC1/2)
+ *   0x8140: reads 0, alive but unknown purpose
+ *
+ * Only PGM_LO/HI and DISPATCH_INITIATOR accept MMIO writes.
+ * DIM/START/NUM_THREAD are shadow/status registers loaded by MEC firmware.
+ * PGM_RSRC1/2 are only writable via MQD (MQD loading confirmed for PGM_LO). */
+#define AMDBC250_REG_COMPUTE_DISPATCH_INITIATOR     (AMDBC250_GC_BASE + 0x00006E80)  /* 0x80E0, mm=0x1BA0 */
+#define AMDBC250_REG_COMPUTE_DIM_X                  (AMDBC250_GC_BASE + 0x00006E84)  /* 0x80E4, mm=0x1BA1 (read-only shadow) */
+#define AMDBC250_REG_COMPUTE_DIM_Y                  (AMDBC250_GC_BASE + 0x00006E88)  /* 0x80E8, mm=0x1BA2 (DEAD=0xFFFFFFFF) */
+#define AMDBC250_REG_COMPUTE_DIM_Z                  (AMDBC250_GC_BASE + 0x00006E8C)  /* 0x80EC, mm=0x1BA3 (DEAD=0xFFFFFFFF) */
+#define AMDBC250_REG_COMPUTE_START_X                (AMDBC250_GC_BASE + 0x00006E90)  /* 0x80F0, mm=0x1BA4 (read-only) */
+#define AMDBC250_REG_COMPUTE_START_Y                (AMDBC250_GC_BASE + 0x00006E94)  /* 0x80F4, mm=0x1BA5 (read-only) */
+#define AMDBC250_REG_COMPUTE_START_Z                (AMDBC250_GC_BASE + 0x00006E98)  /* 0x80F8, mm=0x1BA6 (read-only) */
+#define AMDBC250_REG_COMPUTE_NUM_THREAD_X           (AMDBC250_GC_BASE + 0x00006E9C)  /* 0x80FC, mm=0x1BA7 (read-only) */
+#define AMDBC250_REG_COMPUTE_NUM_THREAD_Y           (AMDBC250_GC_BASE + 0x00006EA0)  /* 0x8100, mm=0x1BA8 (read-only) */
+#define AMDBC250_REG_COMPUTE_NUM_THREAD_Z           (AMDBC250_GC_BASE + 0x00006EA4)  /* 0x8104, mm=0x1BA9 (read-only) */
+#define AMDBC250_REG_COMPUTE_PGM_LO                 (AMDBC250_GC_BASE + 0x00006EB0)  /* 0x8110, mm=0x1BAC (WRITABLE!) */
+#define AMDBC250_REG_COMPUTE_PGM_HI                 (AMDBC250_GC_BASE + 0x00006EB4)  /* 0x8114, mm=0x1BAD (WRITABLE!) */
 
-/* --- GFX10 HQD (Hardware Queue Dispatcher, BC-250: shift by GC_BASE=0x1260) --- */
-#define AMDBC250_REG_CP_MQD_BASE_ADDR       (AMDBC250_GC_BASE + 0x0000C858)  /* 0xDAB8 */
-#define AMDBC250_REG_CP_MQD_BASE_ADDR_HI    (AMDBC250_GC_BASE + 0x0000C85C)  /* 0xDABC */
-#define AMDBC250_REG_CP_HQD_ACTIVE          (AMDBC250_GC_BASE + 0x0000C860)  /* 0xDAC0 */
-#define AMDBC250_REG_CP_HQD_VMID            (AMDBC250_GC_BASE + 0x0000C864)  /* 0xDAC4 */
-#define AMDBC250_REG_CP_HQD_PERSISTENT_STATE (AMDBC250_GC_BASE + 0x0000C868) /* 0xDAC8 */
-#define AMDBC250_REG_CP_HQD_PIPE_PRIORITY   (AMDBC250_GC_BASE + 0x0000C86C)  /* 0xDACC */
-#define AMDBC250_REG_CP_HQD_QUEUE_PRIORITY  (AMDBC250_GC_BASE + 0x0000C870)  /* 0xDAD0 */
-#define AMDBC250_REG_CP_HQD_QUANTUM         (AMDBC250_GC_BASE + 0x0000C874)  /* 0xDAD4 */
-#define AMDBC250_REG_CP_HQD_PQ_BASE         (AMDBC250_GC_BASE + 0x0000C878)  /* 0xDAD8 */
-#define AMDBC250_REG_CP_HQD_PQ_BASE_HI      (AMDBC250_GC_BASE + 0x0000C87C)  /* 0xDADC */
-#define AMDBC250_REG_CP_HQD_PQ_RPTR         (AMDBC250_GC_BASE + 0x0000C880)  /* 0xDAE0 */
-#define AMDBC250_REG_CP_HQD_PQ_RPTR_REPORT_ADDR   (AMDBC250_GC_BASE + 0x0000C884)  /* 0xDAE4 */
-#define AMDBC250_REG_CP_HQD_PQ_RPTR_REPORT_ADDR_HI (AMDBC250_GC_BASE + 0x0000C888) /* 0xDAE8 */
-#define AMDBC250_REG_CP_HQD_PQ_WPTR_POLL_ADDR     (AMDBC250_GC_BASE + 0x0000C88C)  /* 0xDAEC */
-#define AMDBC250_REG_CP_HQD_PQ_WPTR_POLL_ADDR_HI  (AMDBC250_GC_BASE + 0x0000C890)  /* 0xDAF0 */
-#define AMDBC250_REG_CP_HQD_PQ_DOORBELL_CONTROL   (AMDBC250_GC_BASE + 0x0000C894)  /* 0xDAF4 */
+/* PGM_RSRC1, PGM_RSRC2 at 0x8120-0x813C are DEAD (0xFFFFFFFF) on BC-250.
+ * These must be loaded via MQD only (Region 1 of v10_compute_mqd).
+ * MQD loading confirmed working with GCVM enabled for PGM_LO. */
 
-/* CP_HQD_PQ_WPTR_POLL_CNTL: mm value from gc_10_1_0_offset.h 0x1E56 */
-#define AMDBC250_REG_CP_HQD_PQ_WPTR_POLL_CNTL (AMDBC250_GC_BASE + 0x0000C8A0)  /* 0xDB00 */
-#define AMDBC250_REG_CP_HQD_PQ_CONTROL      (AMDBC250_GC_BASE + 0x0000C89C)  /* 0xDAFC */
-#define AMDBC250_REG_CP_HQD_DEQUEUE_REQUEST (AMDBC250_GC_BASE + 0x0000C8B8)  /* 0xDB18 */
-#define AMDBC250_REG_CP_HQD_EOP_BASE_ADDR   (AMDBC250_GC_BASE + 0x0000C8EC)  /* 0xDB4C */
-#define AMDBC250_REG_CP_HQD_EOP_BASE_ADDR_HI (AMDBC250_GC_BASE + 0x0000C8F0) /* 0xDB50 */
-#define AMDBC250_REG_CP_HQD_EOP_CONTROL     (AMDBC250_GC_BASE + 0x0000C8F4)  /* 0xDB54 */
-#define AMDBC250_REG_CP_HQD_EOP_RPTR        (AMDBC250_GC_BASE + 0x0000C8F8)  /* 0xDB58 */
-#define AMDBC250_REG_CP_HQD_EOP_WPTR        (AMDBC250_GC_BASE + 0x0000C8FC)  /* 0xDB5C */
-#define AMDBC250_REG_CP_HQD_PQ_WPTR_LO      (AMDBC250_GC_BASE + 0x0000C930)  /* 0xDB90 */
-#define AMDBC250_REG_CP_HQD_PQ_WPTR_HI      (AMDBC250_GC_BASE + 0x0000C934)  /* 0xDB94 */
+/* --- GFX10 HQD (Hardware Queue Dispatcher, BC-250: CORRECTED BASE_IDX=0) --- */
+/* CORRECTED 2026-07-01: CP_HQD registers use BASE_IDX=0 formula like COMPUTE.
+ * Formula: BAR5 = GC_BASE(0x1260) + mm*4 from gc_10_1_0_offset.h.
+ * OLD WRONG addresses at 0xDAB8+ used SEG1 formula (GC_BASE + 0xA000 + mm*4).
+ *
+ * Verified (2026-07-01 probe):
+ *   CP_MQD_BASE_ADDR (0x9104): WRITABLE, write-back verified
+ *   CP_MQD_BASE_ADDR_HI (0x9108): READ-ONLY (stuck at 0xFF11EFE0)
+ *   CP_HQD_ACTIVE (0x910C): WRITABLE, ACKs (reads 1 after write 1)
+ *   CP_HQD_VMID (0x9110): reads 0, alive
+ *
+ * MQD loading (with GCVM enabled) confirmed working for PGM_LO transfer.
+ * MQD Region 2 (ring buffer config at 0x9124-0x91F0) does NOT load automatically. */
+#define AMDBC250_REG_CP_MQD_BASE_ADDR       (AMDBC250_GC_BASE + 0x00007EA4)  /* 0x9104, mm=0x1FA9 (WRITABLE!) */
+#define AMDBC250_REG_CP_MQD_BASE_ADDR_HI    (AMDBC250_GC_BASE + 0x00007EA8)  /* 0x9108, mm=0x1FAA (READ-ONLY) */
+#define AMDBC250_REG_CP_HQD_ACTIVE          (AMDBC250_GC_BASE + 0x00007EAC)  /* 0x910C, mm=0x1FAB (WRITABLE, ACKs) */
+#define AMDBC250_REG_CP_HQD_VMID            (AMDBC250_GC_BASE + 0x00007EB0)  /* 0x9110, mm=0x1FAC */
+#define AMDBC250_REG_CP_HQD_PERSISTENT_STATE (AMDBC250_GC_BASE + 0x00007EB4) /* 0x9114, mm=0x1FAD */
+#define AMDBC250_REG_CP_HQD_PIPE_PRIORITY   (AMDBC250_GC_BASE + 0x00007EB8)  /* 0x9118, mm=0x1FAE */
+#define AMDBC250_REG_CP_HQD_QUEUE_PRIORITY  (AMDBC250_GC_BASE + 0x00007EBC)  /* 0x911C, mm=0x1FAF */
+#define AMDBC250_REG_CP_HQD_QUANTUM         (AMDBC250_GC_BASE + 0x00007EC0)  /* 0x9120, mm=0x1FB0 */
+#define AMDBC250_REG_CP_HQD_PQ_BASE_LO      (AMDBC250_GC_BASE + 0x00007EC4)  /* 0x9124, mm=0x1FB1 */
+#define AMDBC250_REG_CP_HQD_PQ_BASE_HI      (AMDBC250_GC_BASE + 0x00007EC8)  /* 0x9128, mm=0x1FB2 */
+#define AMDBC250_REG_CP_HQD_PQ_RPTR         (AMDBC250_GC_BASE + 0x00007ECC)  /* 0x912C, mm=0x1FB3 */
+#define AMDBC250_REG_CP_HQD_PQ_RPTR_REPORT_ADDR      (AMDBC250_GC_BASE + 0x00007EDC)  /* 0x913C, mm=0x1FB7 */
+#define AMDBC250_REG_CP_HQD_PQ_RPTR_REPORT_ADDR_HI   (AMDBC250_GC_BASE + 0x00007EE0) /* 0x9140, mm=0x1FB8 */
+#define AMDBC250_REG_CP_HQD_PQ_WPTR_POLL_ADDR        (AMDBC250_GC_BASE + 0x00007EE4) /* 0x9144, mm=0x1FB9 */
+#define AMDBC250_REG_CP_HQD_PQ_WPTR_POLL_ADDR_HI     (AMDBC250_GC_BASE + 0x00007EE8) /* 0x9148, mm=0x1FBA */
+#define AMDBC250_REG_CP_HQD_PQ_WPTR_POLL_CNTL       (AMDBC250_GC_BASE + 0x00007EEC) /* 0x914C, mm=0x1FBB */
+#define AMDBC250_REG_CP_HQD_PQ_DOORBELL_CONTROL      (AMDBC250_GC_BASE + 0x00007EF0) /* 0x9150, mm=0x1FBC */
+#define AMDBC250_REG_CP_HQD_PQ_CONTROL      (AMDBC250_GC_BASE + 0x00007E90)  /* 0x90F0, mm=0x1FA4? */
+#define AMDBC250_REG_CP_HQD_DEQUEUE_REQUEST (AMDBC250_GC_BASE + 0x00007F5C)  /* 0x91BC, mm=0x1FEF */
+#define AMDBC250_REG_CP_HQD_EOP_BASE_ADDR   (AMDBC250_GC_BASE + 0x00007E8C)  /* 0x90EC, mm=0x1FA3 */
+#define AMDBC250_REG_CP_HQD_EOP_BASE_ADDR_HI (AMDBC250_GC_BASE + 0x00007E94) /* 0x90F4, mm=0x1FA5 */
+#define AMDBC250_REG_CP_HQD_EOP_CONTROL     (AMDBC250_GC_BASE + 0x00007E98)  /* 0x90F8, mm=0x1FA6 */
+#define AMDBC250_REG_CP_HQD_EOP_RPTR        (AMDBC250_GC_BASE + 0x00007E9C)  /* 0x90FC, mm=0x1FA7 */
+#define AMDBC250_REG_CP_HQD_EOP_WPTR        (AMDBC250_GC_BASE + 0x00007EA0)  /* 0x9100, mm=0x1FA8 */
+#define AMDBC250_REG_CP_HQD_PQ_WPTR_LO      (AMDBC250_GC_BASE + 0x00007F7C)  /* 0x91DC, mm=0x1FDF */
+#define AMDBC250_REG_CP_HQD_PQ_WPTR_HI      (AMDBC250_GC_BASE + 0x00007F80)  /* 0x91E0, mm=0x1FE0 */
 
 /* --- GRBM / SRBM Selection (BC-250) --- */
 /* GRBM_GFX_INDEX: DWORD offset mmGRBM_GFX_INDEX = 0x2200 → BAR5 = GC_BASE(0x1260) + 0x2200 = 0x34D0
@@ -317,16 +358,12 @@ typedef struct _DREAM_V3_DEVICE_EXTENSION *PDREAM_V3_DEVICE_EXTENSION;
  * Sienna_Cichlid Seg1 alias (0xA000+0x2200) NOT used on BC-250. */
 #define AMDBC250_REG_GRBM_GFX_INDEX        (AMDBC250_GC_BASE + 0x00002270)  /* 0x34D0 */
 
-/* GRBM_GFX_CNTL: DWORD offset mmGRBM_GFX_CNTL = 0x0dc2 → BAR5 = GC_BASE(0x1260) + 0x0dc2 = 0x2022
- * Linux amdgpu nv_grbm_select() writes THIS register for ME/PIPE/QUEUE selection,
- * NOT GRBM_GFX_INDEX (0x34D0). They are DIFFERENT registers.
- * NOTE: 0x0dc2 is NOT DWORD-aligned! Linux writes this as a BYTE offset. */
-#define AMDBC250_REG_GRBM_GFX_CNTL         (AMDBC250_GC_BASE + 0x00000DC2)  /* 0x2022 */
-#define AMDBC250_GRBM_GFX_CNTL_ME_SHIFT    16
-#define AMDBC250_GRBM_GFX_CNTL_PIPE_SHIFT  8
-#define AMDBC250_GRBM_GFX_CNTL_QUEUE_SHIFT 0
-#define AMDBC250_GRBM_GFX_CNTL_VMID_SHIFT  26
-#define AMDBC250_GRBM_GFX_CNTL_KIQ_VAL     (1 << 16)  /* ME=1, PIPE=0, QUEUE=0, VMID=0 */
+/* GRBM_GFX_CNTL: DEFINED IN LINUX as mm=0x0dc2 (not DWORD-aligned).
+ * On BC-250, this register is DEAD at ALL probed addresses:
+ *   - 0x2022 (GC_BASE + 0x0DC2, byte-level offset from Linux)
+ *   - 0x4968 (GC_BASE + 0x0DC2*4, DWORD-aligned from Linux)
+ *   - 0x3968 (GC_BASE + 0xA000 + 0x0DC2*4, SEG1 alias)
+ * All read 0xFFFFFFFF. BC-250 does NOT have GRBM_GFX_CNTL. Use GRBM_GFX_INDEX (0x34D0). */
 
 /* GRBM_GFX_INDEX bit fields (Linux soc15 layout from soc15.h):
  *   bit 31:   SE_BROADCAST
@@ -394,6 +431,11 @@ typedef struct _DREAM_V3_DEVICE_EXTENSION *PDREAM_V3_DEVICE_EXTENSION;
 #define AMDBC250_CP_MEC_ME1_HALT            (1 << 28)
 #define AMDBC250_CP_MEC_ME2_HALT            (1 << 29)
 
+/* --- MEC_ME1_CNTL (separate simple halt register at 0x7A00) --- */
+/* Used by firmware loading (fw_load.c:85, kmd.c:5556). Writing 1 halts MEC, 0 unhalts.
+ * This is a DIFFERENT register from CP_MEC_CNTL (0x4B14) — simple bit0 control. */
+#define AMDBC250_REG_MEC_ME1_CNTL           0x00007A00
+
 /* --- GRBM Status (GC_BASE + 0x2000 = 0x3260, confirmed) --- */
 #define AMDBC250_REG_GRBM_STATUS            (AMDBC250_GC_BASE + 0x00002000)  /* 0x3260 */
 #define AMDBC250_REG_GRBM_STATUS2           (AMDBC250_GC_BASE + 0x0000200C)  /* 0x326C */
@@ -425,9 +467,11 @@ typedef struct _DREAM_V3_DEVICE_EXTENSION *PDREAM_V3_DEVICE_EXTENSION;
 /* --- KIQ (Kernel Interface Queue, BC-250: shift by GC_BASE=0x1260) --- */
 /* KIQ_BASE_LO at 0xE060 is WRITABLE ??? only writable BASE register found on BC-250.
  * KIQ_CNTL at 0xE068 is READ-ONLY (writes silently ignored, reads 0).
- * KIQ_RPTR/WPTR at 0xE06C/0xE078 are WRITABLE.
- * KIQ_VMID at 0xE07C is writable.
- * KIQ_ACTIVE at 0xE080 is writable.
+ *   IMPORTANT: KIQ_CNTL/SIZE=0 prevents MEC firmware from determining ring buffer
+ *   bounds. This is the PRIMARY BLOCKER for ring-buffer-based compute dispatch.
+ *   KIQ_RPTR/WPTR at 0xE06C/0xE078 are WRITABLE (WPTR=0x40 confirmed via test).
+ *   KIQ_VMID at 0xE07C is writable.
+ *   KIQ_ACTIVE at 0xE080 is writable.
  * Native NBIO offsets (0xCE00+) are all read-only. */
 #define AMDBC250_REG_CP_KIQ_BASE_LO      (AMDBC250_GC_BASE + 0x0000CE00)  /* 0xE060, WRITABLE */
 #define AMDBC250_REG_CP_KIQ_BASE_HI      (AMDBC250_GC_BASE + 0x0000CE04)  /* 0xE064 */
@@ -489,6 +533,13 @@ typedef struct _DREAM_V3_DEVICE_EXTENSION *PDREAM_V3_DEVICE_EXTENSION;
  * NOTE: hw.h previously had 0x0B51C/0x0B520 which are WRONG (dead registers). */
 #define AMDBC250_REG_GCVM_INVALIDATE_ENG0_REQ            0x000006C0C
 #define AMDBC250_REG_GCVM_INVALIDATE_ENG0_ACK            0x000006C10
+
+/* GCVM page table setup IOCTL: 0x8000098C
+ * Sets up 3-level identity-mapped page tables for the KIQ ring buffer.
+ * Allocates 3 contiguous physical pages (root/mid/leaf), fills PDE=0x03, PTE=0x63.
+ * Writes root PA to PT_BASE at 0x6C8C/0x6C90 and invalidates TLB.
+ * MQD loading REQUIRES GCVM enabled (CONTEXT0_CNTL bit0=1).
+ * Return format: struct with RingBaseLo/Hi, PtPhysLo/Hi[3], Result, InvStatus, etc. */
 
 /* --- MMHUB VM (Memory Hub) ??? WRONG on BC-250, DO NOT USE --- */
 /* These are MMHUB MMEA registers (memory controller), NOT VM registers */
