@@ -259,7 +259,25 @@ typedef struct _DREAM_V3_DEVICE_EXTENSION *PDREAM_V3_DEVICE_EXTENSION;
 #define AMDBC250_REG_CP_MEC_IC_BASE_HI      (AMDBC250_GC_BASE + 0x00016134)  /* 0x17394 */
 #define AMDBC250_REG_CP_MEC_IC_BASE_CNTL    (AMDBC250_GC_BASE + 0x00016138)  /* 0x17398 */
 
-/* --- GFX10 Ring Buffer (GFX10 style, BC-250: shift by GC_BASE=0x1260) --- */
+/* --- GFX10 Ring Buffer (GFX10 style) ---
+ *
+ * TWO ADDRESS RANGES are documented here:
+ *
+ * RANGE A (hw.h legacy, GC_BASE + 0xC800, 0xDA60+):
+ *   This is the range we've been using in all test tools so far.
+ *   Empirically probed: BASE_LO=RO(0), CNTL=Wr, RPTR=Wr, WPTR=Wr.
+ *   These may NOT be the standard GFX ring registers — the RPTR being
+ *   writable is unusual for a true read pointer.
+ *
+ * RANGE B (Linux gc_10_1_0_offset.h, GC_BASE + mm*4, 0x89E0+):
+ *   Standard Navi10/(GFX10.1) register map from Linux amdgpu.
+ *   mmCP_RB0_BASE=0x1DE0, mmCP_RB0_CNTL=0x1DE1, mmCP_RB0_WPTR=0x1DF4.
+ *   UNVERIFIED on BC-250 hardware.
+ *
+ * Until probe test confirms which range is correct, both are kept.
+ */
+
+/* Range A: Current hw.h addresses (GC_BASE + 0xC800) — EMPIRICALLY USED */
 #define AMDBC250_REG_CP_GFX_RING0_BASE_LO   (AMDBC250_GC_BASE + 0x0000C800)  /* 0xDA60 */
 #define AMDBC250_REG_CP_GFX_RING0_BASE_HI   (AMDBC250_GC_BASE + 0x0000C804)  /* 0xDA64 */
 #define AMDBC250_REG_CP_GFX_RING0_CNTL      (AMDBC250_GC_BASE + 0x0000C808)  /* 0xDA68 */
@@ -269,6 +287,18 @@ typedef struct _DREAM_V3_DEVICE_EXTENSION *PDREAM_V3_DEVICE_EXTENSION;
 #define AMDBC250_REG_CP_GFX_RING0_WPTR      (AMDBC250_GC_BASE + 0x0000C818)  /* 0xDA78 */
 #define AMDBC250_REG_CP_GFX_RING0_WPTR_POLL (AMDBC250_GC_BASE + 0x0000C81C)  /* 0xDA7C */
 #define AMDBC250_REG_CP_GFX_RING0_DOORBELL  (AMDBC250_GC_BASE + 0x0000C820)  /* 0xDA80 */
+
+/* Range B: Linux-corrected (gc_10_1_0_offset.h, BASE_IDX=0: GC_BASE + mm*4) */
+#define AMDBC250_REG_CP_RB0_BASE            (AMDBC250_GC_BASE + 0x00007780)  /* 0x89E0, mm=0x1DE0 */
+#define AMDBC250_REG_CP_RB0_BASE_HI         (AMDBC250_GC_BASE + 0x00007944)  /* 0x8BA4, mm=0x1E51 */
+#define AMDBC250_REG_CP_RB0_CNTL            (AMDBC250_GC_BASE + 0x00007784)  /* 0x89E4, mm=0x1DE1 */
+#define AMDBC250_REG_CP_RB0_RPTR            (AMDBC250_GC_BASE + 0x00003D80)  /* 0x4FE0, mm=0x0F60 */
+#define AMDBC250_REG_CP_RB0_RPTR_ADDR       (AMDBC250_GC_BASE + 0x0000778C)  /* 0x89EC, mm=0x1DE3 */
+#define AMDBC250_REG_CP_RB0_RPTR_ADDR_HI    (AMDBC250_GC_BASE + 0x00007790)  /* 0x89F0, mm=0x1DE4 */
+#define AMDBC250_REG_CP_RB0_WPTR            (AMDBC250_GC_BASE + 0x000077D0)  /* 0x8A30, mm=0x1DF4 */
+#define AMDBC250_REG_CP_RB0_WPTR_HI         (AMDBC250_GC_BASE + 0x000077D4)  /* 0x8A34, mm=0x1DF5 */
+#define AMDBC250_REG_CP_RB_WPTR_DELAY       (AMDBC250_GC_BASE + 0x00003D84)  /* 0x4FE4, mm=0x0F61 */
+#define AMDBC250_REG_CP_RB_WPTR_POLL_CNTL   (AMDBC250_GC_BASE + 0x00003D88)  /* 0x4FE8, mm=0x0F62 */
 
 /* --- Compute Rings (GFX10, BC-250: shift by GC_BASE=0x1260) --- */
 #define AMDBC250_REG_CP_COMPUTE_RING0_BASE_LO   (AMDBC250_GC_BASE + 0x0000C900)  /* 0xDB60 */

@@ -91,17 +91,66 @@
 
 
 
-## Remaining Blockers (pre-PSP-mailbox era)
-- **KIQ_SIZE (0xE068) = 0 read-only** — hardware ring buffer dispatch may still be blocked even after proper PSP firmware loading
-- **DIM_X (0x80E4) read-only** — direct MMIO dispatch impossible
-- **MEC firmware ring processing** — unknown if PSP-loaded firmware behaves differently from IC_BASE DMA loaded firmware
-- **Compute queue HW bug** — BC-250 may have permanently disabled compute queues (RADV `nocompute` workaround)
+## CRITICAL BUG: METHOD_BUFFERED buffer sharing in PSP IOCTL (2026-07-03)
+
+**Root cause of PSP GPU_PM4_SUBMIT error 87**: In `METHOD_BUFFERED` IOCTL, `inputBuffer` and `outputBuffer` point to the SAME system buffer (`Irp->AssociatedIrp.SystemBuffer`). The PSP driver's IOCTL handler at `PspDriver.c:1164` called `RtlZeroMemory(resp, sizeof(*resp))` which zeroed the first 44 bytes — including `req->CommandCount` at offset 0. When `PspGpuPm4Submit` then checked `req->CommandCount`, it found 0 and returned `STATUS_INVALID_PARAMETER`.
+
+**Fix**: Save `cmdCount` and `waitMs` from `req` BEFORE `RtlZeroMemory`, then restore them after.
+
+**Applies to all METHOD_BUFFERED IOCTL handlers** that write to the output buffer before reading all input fields. KIQ_SUBMIT handler was not affected (doesn't zero the buffer).
+
+## Agent Analysis Results (2026-07-03)
+
+Three automated analysis agents ran on the GPU driver, PSP driver, and test tools codebases. Key findings:
+
+### PSP Driver Bugs Found by Agent
+| # | Priority | Description | Fix |
+|---|----------|-------------|-----|
+| 1 | CRITICAL | `PspGpuProxyInit` holds spinlock while calling `ZwCreateFile` (PspCore.c:69-71) — illegal at DISPATCH_LEVEL | **FIXED**: Release lock before `PspOpenGpuDriver()`, re-acquire after |
+| 2 | HIGH | `IOCTL_PSP_GPU_PM4_SUBMIT` size check requires full 268-byte struct even with `CommandCount=5` | **FIXED**: Dynamic check via `FIELD_OFFSET(..., Commands[req->CommandCount])` |
+| 3 | HIGH | `IOCTL_PSP_GPU_PM4_SUBMIT` METHOD_BUFFERED buffer sharing — `RtlZeroMemory` clears `req->CommandCount` | **FIXED**: Save/restore fields around zero |
+| 4 | HIGH | NBIO unlock uses GPU BAR5 (`g_Bar5Mapping`) instead of PSP BAR0 (`devExt->MmioBase`) — writes silently fail | **FIXED**: Always use `devExt->MmioBase` |
+| 5 | HIGH | Handle leak race: `PspGpuProxyInit` can return early with `g_GpuDriverHandle` set but `g_GpuProxyAvailable=FALSE` | **FIXED**: Close handle via `ZwClose` on error path |
+| 6 | MEDIUM | GRBM_STATUS reads offset 0x2004 (CC_CONFIG) instead of 0x2000 (GRBM_STATUS) | **FIXED**: All 6 occurrences changed to 0x2000 |
+| 7 | LOW | Error string missing in KdPrint for some IOCTL validation paths | Deferred |
+
+### Test Tool Bugs Found by Agent
+| # | Priority | Description | Fix |
+|---|----------|-------------|-----|
+| 1 | HIGH | `psp-gpu-pm4-submit-test.c`: PM4 header `0xC0370003` has swapped count/opcode | **FIXED**: `0xC0043700` |
+| 2 | HIGH | `psp-gpu-pm4-submit-test.c`: WRITE_DATA CONTROL `0x10100000` has wrong DST_SEL | **FIXED**: `0x00000102` (register | WR_CONFIRM) |
+| 3 | HIGH | `gfx-ring-init-test.c`: RPTR comparison always succeeds (false positive) — `RPTR >= wptrTarget` always true due to bit 24 | **FIXED**: Compare before/after difference |
+
+## Verified GFX/Compute Engine Status (2026-07-03)
+
+### GFX Ring (0xDA60+ range)
+- **BASE_LO (0xDA60)**: READ-ONLY = 0 — ring buffer address CANNOT be changed
+- **CNTL (0xDA68)**: partially writable (bit 0 sticks)
+- **RPTR (0xDA6C)**: 0x01200000 — bit 24 permanently set, other bits writable but bounces back
+- **WPTR (0xDA78)**: FULLY WRITABLE ✅ — can kick ring
+- **DOORBELL (0xDA7C)**: WRITABLE ✅
+- **RPTR DOES NOT ADVANCE** on WPTR kick — MEC not processing
+
+### Linux-corrected (0x89E0+ range)
+- **RB0_BASE (0x89E0)**: mostly RO, only low byte writable (W1C to 0x000000A5)
+- **RB0_CNTL (0x89E4)**: RO = 0
+- **RB0_WPTR (0x8A30)**: RO = 0
+- All registers in this range mostly dead/read-only on BC-250
+
+### PSP KIQ Path
+- **PSP GPU PM4 submit**: IOCTL WORKS ✅ (after METHOD_BUFFERED fix)
+- PM4 written to KIQ ring buffer (WPTR=5→10)
+- BUT: GPU MEC not processing (KIQ_BASE=0, KIQ_SIZE=0, ME halted)
+- Readback confirms ring is writable through PSP proxy
+
+### Conclusion
+BC-250 compute/GFX engines appear permanently disabled at hardware level. Ring registers respond to MMIO but the CP/MEC engine behind them doesn't process. PSP PM4 submit path works as a transport layer but the GPU doesn't execute the commands. Consistent with RADV `RADV_DEBUG=nocompute` workaround documented in the community.
 
 ## Next Steps
-1. **B) Write combined test**: load ALL firmware (ME, PFP, CE, MEC, RLC) via PSP mailbox, then test MEC ring processing
-2. **A) Modify GPU driver LOAD_CP_FW**: add PSP mailbox path for RLC (fwType=8) and optionally all types
-3. If MEC ring still fails → try GFX ring for 3D graphics (CP_RING0_BASE_LO at 0xDA60 is read-only but pre-configured by BIOS)
-4. If GFX ring works → basic 3D/compute display driver is achievable
+1. Investigate if KIQ_BASE/KIQ_SIZE can be programmed through alternative means (MMIO aliases, PSP mailbox commands)
+2. Check if ME unhalt (write 0 to 0x4A74 via PSP proxy) enables any engine activity
+3. Consider display-only driver if all compute paths remain fused
+4. Deepen code analysis: verify all register addresses against Linux kernel sources
 
 ## PSP Proxy IOCTLs
 - GPU driver exposes: `IOCTL_AMDBC250_BAR5_READ_PROXY` (0x900) and `IOCTL_AMDBC250_BAR5_WRITE_PROXY` (0x901) — these are **raw values**, not CTL_CODE-packed.

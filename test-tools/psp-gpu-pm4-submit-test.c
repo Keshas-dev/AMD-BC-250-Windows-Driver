@@ -85,8 +85,8 @@ int main(void) {
     // Header: TYPE=3(11), COUNT=3, OPCODE=0x37 -> 0xC0370003
     req.CommandCount = 5;     // 5 DWORDs: header + control + addr_lo + addr_hi + data
     req.WaitMs = 100;         // Wait 100ms after kick
-    req.Commands[0] = 0xC0370003;   // PM4: IT_WRITE_DATA (count=3)
-    req.Commands[1] = 0x10100000;   // CONTROL: DST_SEL=register, WR_CONFIRM
+    req.Commands[0] = 0xC0043700;   // PM4: IT_WRITE_DATA (count=4 DWORDS after hdr)
+    req.Commands[1] = 0x00000102;   // CONTROL: DST_SEL=register(1) | WR_CONFIRM
     req.Commands[2] = 0x000032D4;   // ADDR_LO = SCRATCH register byte offset
     req.Commands[3] = 0x00000000;   // ADDR_HI
     req.Commands[4] = 0xCAFEBABE;   // DATA

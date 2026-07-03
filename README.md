@@ -50,6 +50,27 @@ AMD BC-250 Windows driver project by Keshas. Goal: fully working GPU driver for 
 - ✅ **PATH 3 fallback** in SEND_PM4 — when PSP KIQ and GfxRing are both unavailable
 - ✅ Recursion depth guard (max 32) — prevents stack overflow
 
+## Recent Bug Fixes & Findings (2026-07-03)
+
+### ✓ PSP GPU PM4 Submit IOCTL Works!
+- **Root cause of error 87**: `METHOD_BUFFERED` buffer sharing bug — `RtlZeroMemory` was clearing `req->CommandCount` before it was read
+- **Fix**: Save/restore fields around RtlZeroMemory
+- IOCTL now succeeds: PM4 commands written to KIQ ring, WPTR kicked (0→5→10)
+- GPU MEC still doesn't process (ME halted, KIQ_BASE/KIQ_SIZE=0)
+
+### ✓ PSP Driver Bug Fixes (6 critical/high bugs found by agent analysis)
+1. **CRITICAL**: `PspGpuProxyInit` holds spinlock while calling `ZwCreateFile` (DISPATCH_LEVEL violation)
+2. **HIGH**: IOCTL size check requires full 268-byte struct → dynamic via FIELD_OFFSET
+3. **HIGH**: METHOD_BUFFERED buffer sharing → RtlZeroMemory corrupts request fields
+4. **HIGH**: NBIO unlock writes to GPU BAR5 instead of PSP BAR0 → silently failing
+5. **HIGH**: Handle leak race in PspGpuProxyInit
+6. **MEDIUM**: GRBM_STATUS reads CC_CONFIG (0x3264) instead of GRBM_STATUS (0x3260)
+
+### ✓ GFX Ring Investigation Finalized
+- **Range A (0xDA60+)**: WPTR writable, BASE read-only=0, RPTR=0x01200000 (bit 24 fixed), **does not process**
+- **Range B (Linux 0x89E0+)**: Mostly dead/read-only, **does not process**
+- **Conclusion**: MEC/CP engines appear permanently disabled at hardware level
+
 ### SMU v11.8
 - ✅ **MP1_BASE**=0x16000, C2PMSG_66/82/90, THM_BASE=0x16600
 - ✅ Protocol: clear C2PMSG_90 → arg → msg → poll
