@@ -20,4 +20,13 @@ if %errorlevel% neq 0 (echo BUILD FAILED & exit /b %errorlevel%)
 cl.exe /nologo /O2 "C:\AMD-BC-250\AMD-BC-250-Windows-Driver-main\test-tools\test-load-cp-fw.c" /Fe"C:\AMD-BC-250\AMD-BC-250-Windows-Driver-main\output\test-load-cp-fw.exe" user32.lib
 if %errorlevel% neq 0 (echo BUILD FAILED & exit /b %errorlevel%)
 
+cl.exe /nologo /O2 "C:\AMD-BC-250\AMD-BC-250-Windows-Driver-main\test-tools\me-unhalt-test.c" /Fe"C:\AMD-BC-250\AMD-BC-250-Windows-Driver-main\output\me-unhalt-test.exe"
+if %errorlevel% neq 0 (echo BUILD FAILED & exit /b %errorlevel%)
+
+cl.exe /nologo /O2 "C:\AMD-BC-250\AMD-BC-250-Windows-Driver-main\test-tools\gfx-ring-unhalted-test.c" /Fe"C:\AMD-BC-250\AMD-BC-250-Windows-Driver-main\output\gfx-ring-unhalted-test.exe"
+if %errorlevel% neq 0 (echo BUILD FAILED & exit /b %errorlevel%)
+
+cl.exe /nologo /O2 "C:\AMD-BC-250\AMD-BC-250-Windows-Driver-main\test-tools\smu-probe-test.c" /Fe"C:\AMD-BC-250\AMD-BC-250-Windows-Driver-main\output\smu-probe-test.exe"
+if %errorlevel% neq 0 (echo BUILD FAILED & exit /b %errorlevel%)
+
 echo BUILD OK
