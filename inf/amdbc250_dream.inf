@@ -24,6 +24,7 @@ CatalogFile=amdbc250_dream.CAT
 DefaultDestDir = 11
 DreamV3.Miniport = 12
 DreamV3.UMD      = 11
+DreamV3.Firmware = 13,System32\drivers\bc-250
 
 [SourceDisksNames]
 1 = %DISKNAME%,,,
@@ -34,6 +35,16 @@ atikmdag.sys = 1
 
 ; User-mode driver (UMD) - D3D10/D3D11/D3D12
 amdbc250umd64.dll = 1
+
+; GPU firmware files (loaded via IC_BASE DMA at driver startup)
+cyan_skillfish2_me.bin   = 1,,firmware
+cyan_skillfish2_pfp.bin  = 1,,firmware
+cyan_skillfish2_ce.bin   = 1,,firmware
+cyan_skillfish2_mec.bin  = 1,,firmware
+cyan_skillfish2_mec2.bin = 1,,firmware
+cyan_skillfish2_sdma.bin = 1,,firmware
+cyan_skillfish2_sdma1.bin = 1,,firmware
+cyan_skillfish2_rlc.bin  = 1,,firmware
 
 [Manufacturer]
 %AMD% = AMD,NTamd64
@@ -52,7 +63,7 @@ amdbc250umd64.dll = 1
 ;-----------------------------------------------------------------------
 
 [DreamV3_Install]
-CopyFiles = DreamV3.Miniport, DreamV3.UMD
+CopyFiles = DreamV3.Miniport, DreamV3.UMD, DreamV3.Firmware
 AddReg    = DreamV3_AddReg
 
 [DreamV3_Install.HW]
@@ -78,6 +89,16 @@ atikmdag.sys
 
 [DreamV3.UMD]
 amdbc250umd64.dll
+
+[DreamV3.Firmware]
+cyan_skillfish2_me.bin
+cyan_skillfish2_pfp.bin
+cyan_skillfish2_ce.bin
+cyan_skillfish2_mec.bin
+cyan_skillfish2_mec2.bin
+cyan_skillfish2_sdma.bin
+cyan_skillfish2_sdma1.bin
+cyan_skillfish2_rlc.bin
 
 ;-----------------------------------------------------------------------
 ; Registry

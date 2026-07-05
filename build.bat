@@ -220,6 +220,11 @@ echo.
 echo Copying INF file...
 copy "%PROJECT_DIR%\inf\amdbc250_dream.inf" "%OUTPUT_DIR%\" >nul
 
+echo Copying firmware files...
+if not exist "%OUTPUT_DIR%\firmware" mkdir "%OUTPUT_DIR%\firmware"
+copy "%PROJECT_DIR%\firmware\cyan_skillfish2_*.bin" "%OUTPUT_DIR%\firmware\" >nul 2>&1
+echo   Firmware files copied
+
 echo.
 echo ==========================================
 echo  SIGNING DRIVERS

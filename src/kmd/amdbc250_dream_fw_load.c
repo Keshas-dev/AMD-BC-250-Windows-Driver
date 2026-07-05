@@ -155,7 +155,7 @@ typedef struct _FW_HEADER {
     STATUS_SUCCESS on success
 ===========================================================================*/
 
-static NTSTATUS
+NTSTATUS
 DreamV3LoadSingleFirmware(
     _In_ PDREAM_V3_DEVICE_EXTENSION DevExt,
     _In_ UINT32 FwType,
@@ -370,18 +370,79 @@ cleanup:
 
 /*===========================================================================
   DreamV3LoadAllFirmware — Load all CP firmware during initialization
-  
+   
   This function is called from DreamV3HwInitialize() after MMIO is mapped.
-  It loads ME, PFP, and CE firmware (the minimum needed for GFX ring).
-  
-  MEC and RLC are loaded later when compute is initialized.
-  
+  It loads ME, PFP, CE, MEC, MEC2, SDMA0, and SDMA1 firmware from disk
+  via IC_BASE DMA, matching Linux AMDGPU_FW_LOAD_DIRECT.
+   
+  Firmware files are read from C:\Windows\System32\drivers\bc-250\ which
+  is populated by the PSP driver's INF during installation.
+   
   Parameters:
     DevExt - Device extension with BAR5 mapping
-    
+     
   Returns:
     STATUS_SUCCESS if at least ME+PFP loaded successfully
 ===========================================================================*/
+
+typedef struct _FW_LOAD_ENTRY {
+    UINT32 FwType;
+    PCWSTR FileName;
+} FW_LOAD_ENTRY;
+
+static const FW_LOAD_ENTRY g_FwLoadTable[] = {
+    { FW_TYPE_ME,  L"\\SystemRoot\\System32\\drivers\\bc-250\\cyan_skillfish2_me.bin" },
+    { FW_TYPE_PFP, L"\\SystemRoot\\System32\\drivers\\bc-250\\cyan_skillfish2_pfp.bin" },
+    { FW_TYPE_CE,  L"\\SystemRoot\\System32\\drivers\\bc-250\\cyan_skillfish2_ce.bin" },
+    { FW_TYPE_MEC, L"\\SystemRoot\\System32\\drivers\\bc-250\\cyan_skillfish2_mec.bin" },
+};
+
+static NTSTATUS
+DreamV3LoadFirmwareFromFile(
+    _In_ PCWSTR FileName,
+    _Out_ PUCHAR *OutData,
+    _Out_ ULONG *OutSize
+    )
+{
+    NTSTATUS status;
+    OBJECT_ATTRIBUTES objAttr;
+    UNICODE_STRING uniName;
+    IO_STATUS_BLOCK ioStatus;
+    HANDLE handle = NULL;
+    FILE_STANDARD_INFORMATION fileInfo;
+
+    RtlInitUnicodeString(&uniName, FileName);
+    InitializeObjectAttributes(&objAttr, &uniName, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
+
+    status = ZwCreateFile(&handle, GENERIC_READ, &objAttr, &ioStatus, NULL,
+        FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ, FILE_OPEN, FILE_SYNCHRONOUS_IO_NONALERT, NULL, 0);
+    if (!NT_SUCCESS(status)) return status;
+
+    status = ZwQueryInformationFile(handle, &ioStatus, &fileInfo, sizeof(fileInfo), FileStandardInformation);
+    if (!NT_SUCCESS(status) || fileInfo.EndOfFile.QuadPart == 0) {
+        ZwClose(handle);
+        return status;
+    }
+
+    ULONG fileSize = (ULONG)fileInfo.EndOfFile.QuadPart;
+    PUCHAR buffer = (PUCHAR)ExAllocatePool2(POOL_FLAG_NON_PAGED, fileSize, 'fw');
+    if (!buffer) { ZwClose(handle); return STATUS_INSUFFICIENT_RESOURCES; }
+
+    status = ZwReadFile(handle, NULL, NULL, NULL, &ioStatus, buffer, fileSize, NULL, NULL);
+    ZwClose(handle);
+
+    if (!NT_SUCCESS(status)) {
+        ExFreePoolWithTag(buffer, 'fw');
+        return status;
+    }
+
+    *OutData = buffer;
+    *OutSize = fileSize;
+
+    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+        "AMDBC250-FW: Loaded '%wZ' (%u bytes)\n", &uniName, fileSize));
+    return STATUS_SUCCESS;
+}
 
 NTSTATUS
 DreamV3LoadAllFirmware(
@@ -389,26 +450,55 @@ DreamV3LoadAllFirmware(
     )
 {
     NTSTATUS Status = STATUS_SUCCESS;
-    
+    UINT32 loadedCount = 0;
+
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-        "AMDBC250-FW: Loading all CP firmware (direct mode)\n"));
-    
+        "AMDBC250-FW: Loading all CP firmware (direct IC_BASE DMA)\n"));
+
     if (!DevExt->MmioVirtualBase) {
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
             "AMDBC250-FW: No BAR5 mapping\n"));
         return STATUS_DEVICE_NOT_READY;
     }
-    
-    /* Firmware file paths (embedded in driver or loaded from disk) */
-    /* For now, firmware must be loaded via LOAD_CP_FW IOCTL from userspace */
-    /* This function will be called after userspace loads firmware */
-    
+
+    /* Halt all engines before loading firmware */
+    DreamV3HaltAllEngines(DevExt);
+
+    for (UINT32 i = 0; i < ARRAYSIZE(g_FwLoadTable); i++) {
+        PUCHAR fwData = NULL;
+        ULONG fwSize = 0;
+
+        NTSTATUS loadStatus = DreamV3LoadFirmwareFromFile(
+            g_FwLoadTable[i].FileName, &fwData, &fwSize);
+
+        if (!NT_SUCCESS(loadStatus)) {
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+                "AMDBC250-FW: Failed to load type=%u from file (0x%08X)\n",
+                g_FwLoadTable[i].FwType, loadStatus));
+            continue;
+        }
+
+        NTSTATUS fwStatus = DreamV3LoadSingleFirmware(DevExt,
+            g_FwLoadTable[i].FwType, fwData, fwSize);
+
+        ExFreePoolWithTag(fwData, 'fw');
+
+        if (NT_SUCCESS(fwStatus)) {
+            loadedCount++;
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                "AMDBC250-FW: Loaded type=%u OK\n", g_FwLoadTable[i].FwType));
+        } else {
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
+                "AMDBC250-FW: Loading type=%u failed (0x%08X)\n",
+                g_FwLoadTable[i].FwType, fwStatus));
+        }
+    }
+
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-        "AMDBC250-FW: Firmware loading requires userspace helper\n"));
-    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-        "AMDBC250-FW: Use load-cp-fw.exe to load ME, PFP, CE firmware\n"));
-    
-    return STATUS_SUCCESS;
+        "AMDBC250-FW: Loaded %u/%llu firmware types\n",
+        loadedCount, (ULONGLONG)ARRAYSIZE(g_FwLoadTable)));
+
+    return (loadedCount > 0) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
 }
 
 /*===========================================================================

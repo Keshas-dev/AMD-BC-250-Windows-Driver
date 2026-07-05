@@ -122,12 +122,24 @@ DreamV3HwInitialize(
 
     /* Step 5: Halt all CP engines before firmware load */
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-               "AMDBC250-DREAM-V4.3: [STEP 5/12] Halt CP engines\n"));
+               "AMDBC250-DREAM-V4.3: [STEP 5/13] Halt CP engines\n"));
     DreamV3HaltAllEngines(DevExt);
 
-    /* Step 6: GFX command processor (RDNA2 style) — skip if already initialized */
+    /* Step 5b: Load all CP firmware via IC_BASE DMA (ME, PFP, CE, MEC) */
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-               "AMDBC250-DREAM-V4.3: [STEP 6/12] GFX ring\n"));
+               "AMDBC250-DREAM-V4.3: [STEP 6/13] Load CP firmware\n"));
+    Status = DreamV3LoadAllFirmware(DevExt);
+    if (!NT_SUCCESS(Status)) {
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+                   "AMDBC250-DREAM-V4.3: [STEP 6/13] Firmware load failed (non-fatal): 0x%08X\n", Status));
+    } else {
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                   "AMDBC250-DREAM-V4.3: [STEP 6/13] Firmware load OK\n"));
+    }
+
+    /* Step 7: GFX command processor (RDNA2 style) — skip if already initialized */
+    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+               "AMDBC250-DREAM-V4.3: [STEP 7/13] GFX ring\n"));
     if (DevExt->GfxRing.VirtualAddress == NULL) {
         Status = DreamV3HwInitGfxRing(DevExt);
         if (!NT_SUCCESS(Status)) {
@@ -136,83 +148,83 @@ DreamV3HwInitialize(
             return Status;
         }
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-                   "AMDBC250-DREAM-V4.3: [STEP 6/12] GFX ring OK\n"));
+                   "AMDBC250-DREAM-V4.3: [STEP 7/13] GFX ring OK\n"));
     } else {
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-                   "AMDBC250-DREAM-V4.3: [STEP 6/12] GFX ring already initialized\n"));
+                   "AMDBC250-DREAM-V4.3: [STEP 7/13] GFX ring already initialized\n"));
     }
 
-    /* Step 7: SDMA engine */
+    /* Step 8: SDMA engine */
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-               "AMDBC250-DREAM-V4.3: [STEP 7/12] SDMA ring\n"));
+               "AMDBC250-DREAM-V4.3: [STEP 8/13] SDMA ring\n"));
     Status = DreamV3HwInitSdmaRing(DevExt);
     if (!NT_SUCCESS(Status)) {
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
-                   "AMDBC250-DREAM-V4.3: [STEP 7/12] SDMA ring failed (non-fatal): 0x%08X\n", Status));
+                   "AMDBC250-DREAM-V4.3: [STEP 8/13] SDMA ring failed (non-fatal): 0x%08X\n", Status));
     } else {
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-                   "AMDBC250-DREAM-V4.3: [STEP 7/12] SDMA ring OK\n"));
+                   "AMDBC250-DREAM-V4.3: [STEP 8/13] SDMA ring OK\n"));
     }
 
-    /* Step 8: GART table */
+    /* Step 9: GART table */
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-               "AMDBC250-DREAM-V4.3: [STEP 8/12] GART\n"));
+               "AMDBC250-DREAM-V4.3: [STEP 9/13] GART\n"));
     Status = DreamV3GartInitialize(DevExt);
     if (!NT_SUCCESS(Status)) {
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
-                   "AMDBC250-DREAM-V4.3: [STEP 8/12] GART init failed (non-fatal): 0x%08X\n", Status));
+                   "AMDBC250-DREAM-V4.3: [STEP 9/13] GART init failed (non-fatal): 0x%08X\n", Status));
     } else {
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-                   "AMDBC250-DREAM-V4.3: [STEP 8/12] GART OK\n"));
+                   "AMDBC250-DREAM-V4.3: [STEP 9/13] GART OK\n"));
     }
 
-    /* Step 9: GPU Virtual Memory */
+    /* Step 10: GPU Virtual Memory */
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-               "AMDBC250-DREAM-V4.3: [STEP 9/12] GPUVM\n"));
+               "AMDBC250-DREAM-V4.3: [STEP 10/13] GPUVM\n"));
     Status = DreamV3VmInitialize(DevExt);
     if (!NT_SUCCESS(Status)) {
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
-                   "AMDBC250-DREAM-V4.3: [STEP 9/12] GPUVM init failed (non-fatal): 0x%08X\n", Status));
+                   "AMDBC250-DREAM-V4.3: [STEP 10/13] GPUVM init failed (non-fatal): 0x%08X\n", Status));
     } else {
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-                   "AMDBC250-DREAM-V4.3: [STEP 9/12] GPUVM OK\n"));
+                   "AMDBC250-DREAM-V4.3: [STEP 10/13] GPUVM OK\n"));
     }
 
-    /* Step 10: Display engine (DCN 2.1) */
+    /* Step 11: Display engine (DCN 2.1) */
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-               "AMDBC250-DREAM-V4.3: [STEP 10/12] Display (DCN 2.1)\n"));
+               "AMDBC250-DREAM-V4.3: [STEP 11/13] Display (DCN 2.1)\n"));
     Status = DreamV3HwInitDisplay(DevExt);
     if (!NT_SUCCESS(Status)) {
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
-                   "AMDBC250-DREAM-V4.3: [STEP 10/12] Display init failed (non-fatal): 0x%08X\n", Status));
+                   "AMDBC250-DREAM-V4.3: [STEP 11/13] Display init failed (non-fatal): 0x%08X\n", Status));
     } else {
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-                   "AMDBC250-DREAM-V4.3: [STEP 10/12] Display OK\n"));
+                   "AMDBC250-DREAM-V4.3: [STEP 11/13] Display OK\n"));
     }
 
-    /* Step 11: PSP & NBIO unlock (GPU BAR5, MP0 discovery, ring, NBIO bypass) */
+    /* Step 12: PSP & NBIO unlock (GPU BAR5, MP0 discovery, ring, NBIO bypass) */
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-               "AMDBC250-DREAM-V4.3: [STEP 11/12] PSP init\n"));
+               "AMDBC250-DREAM-V4.3: [STEP 12/13] PSP init\n"));
     Status = DreamV3PspHardwareInit(DevExt);
     if (DevExt->PspAlive) {
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-                   "AMDBC250-DREAM-V4.3: [STEP 11/12] SOS alive, NBIO unlocked=%u\n",
+                   "AMDBC250-DREAM-V4.3: [STEP 12/13] SOS alive, NBIO unlocked=%u\n",
                    DevExt->NbioUnlocked));
     } else {
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
-                   "AMDBC250-DREAM-V4.3: [STEP 11/12] SOS not found — continuing\n"));
+                   "AMDBC250-DREAM-V4.3: [STEP 12/13] SOS not found — continuing\n"));
     }
 
-    /* Step 12: RLC initialization (power/scheduler) */
+    /* Step 13: RLC initialization (power/scheduler) */
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-               "AMDBC250-DREAM-V4.3: [STEP 12/12] RLC init\n"));
+               "AMDBC250-DREAM-V4.3: [STEP 13/13] RLC init\n"));
     Status = DreamV3InitRlc(DevExt);
     if (!NT_SUCCESS(Status)) {
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
-                   "AMDBC250-DREAM-V4.3: [STEP 12/12] RLC init failed (non-fatal): 0x%08X\n", Status));
+                   "AMDBC250-DREAM-V4.3: [STEP 13/13] RLC init failed (non-fatal): 0x%08X\n", Status));
     } else {
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-                   "AMDBC250-DREAM-V4.3: [STEP 12/12] RLC OK\n"));
+                   "AMDBC250-DREAM-V4.3: [STEP 13/13] RLC OK\n"));
     }
 
     /* Set VRAM sizes */
