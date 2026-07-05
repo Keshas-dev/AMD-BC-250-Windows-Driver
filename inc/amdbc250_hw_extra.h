@@ -3,20 +3,19 @@
 Copyright (c) 2026 AMD BC-250 Driver Project
 
 Module Name:
-    amdbc250_hw.h
+    amdbc250_hw_extra.h
 
 Abstract:
-    Hardware definitions and register maps for the AMD BC-250 APU
-    (Cyan Skillfish / Ariel - RDNA2 iGPU, 24 Compute Units)
-
-    This header defines PCI identifiers, MMIO register offsets,
-    command submission structures, and hardware capability flags
-    for the AMD BC-250 APU used in ASRock mining boards.
+    LEGACY v2.0 register definitions — DO NOT USE for new code!
+    
+    WARNING: This header contains WRONG register offsets that were
+    used by the early v2.0 driver. Most registers here have incorrect
+    BAR5 byte offsets (not GC_BASE-shifted). Use amdbc250_dream_hw.h
+    (v3.0, hardware-verified offsets) for all new development.
+    
+    Kept for reference only; NOT included by current KMD source.
 
     GPU Architecture: RDNA2 (Navi 1x family, cyan_skillfish variant)
-    CPU Architecture: AMD Zen 2 (6 cores / 12 threads)
-    Memory: 16 GB GDDR6 (shared UMA)
-    Compute Units: 24 CU (1536 Stream Processors)
 
 Environment:
     Kernel mode (Windows Display Driver Model - WDDM 2.x)

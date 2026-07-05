@@ -227,13 +227,12 @@ DreamV3HwInitialize(
                    "AMDBC250-DREAM-V4.3: [STEP 13/13] RLC OK\n"));
     }
 
-    /* Set VRAM sizes */
-    DevExt->TotalVramBytes = DevExt->FbSize;
-    if (DevExt->TotalVramBytes == 0) {
-        DevExt->TotalVramBytes = 16ULL * 1024 * 1024 * 1024; /* Default 16GB */
-    }
+    /* Step 13b: VRAM detection (MC_VM_FB_LOCATION, VBIOS, PCI BAR) */
+    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+               "AMDBC250-DREAM-V4.3: [STEP 13b/13] VRAM detection\n"));
+    DreamV3DetectVram(DevExt);
+
     DevExt->UsedVramBytes = 0;
-    DevExt->VisibleVramBytes = min(DevExt->VisibleVramBytes, DevExt->TotalVramBytes);
 
     /* Set clocks */
     DevExt->GpuClockMhz = AMDBC250_BOOST_CLOCK_MHZ;  /* Assume governor active */

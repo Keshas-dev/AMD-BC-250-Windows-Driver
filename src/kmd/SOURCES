@@ -17,7 +17,8 @@ SOURCES=amdbc250_dream_kmd.c \
     amdbc250_dream_fw_load.c \
     amdbc250_dream_golden.c \
     amdbc250_dream_hdp.c \
-    amdbc250_dream_rlc.c
+    amdbc250_dream_rlc.c \
+    amdbc250_dream_vbios.c
 
 TARGETPATH=obj
 

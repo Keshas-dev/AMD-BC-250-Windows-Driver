@@ -130,7 +130,8 @@ cl.exe /c /kernel /W3 /Zi /Od /DAMD64 /D_AMD64_ /DAMDBC250_DREAM_V3 ^
   "%SRC_DIR%\kmd\amdbc250_dream_fw_load.c" ^
   "%SRC_DIR%\kmd\amdbc250_dream_golden.c" ^
   "%SRC_DIR%\kmd\amdbc250_dream_hdp.c" ^
-  "%SRC_DIR%\kmd\amdbc250_dream_rlc.c"
+  "%SRC_DIR%\kmd\amdbc250_dream_rlc.c" ^
+  "%SRC_DIR%\kmd\amdbc250_dream_vbios.c"
 
 if errorlevel 1 (
     echo KMD compilation FAILED!
@@ -141,7 +142,7 @@ if errorlevel 1 (
 echo Linking KMD...
 link.exe /DRIVER /SUBSYSTEM:NATIVE /ENTRY:DriverEntry ^
   /OUT:"%OUTPUT_DIR%\atikmdag.sys" ^
-  amdbc250_dream_kmd.obj amdbc250_dream_hw_init.obj amdbc250_dream_power.obj amdbc250_dream_vm.obj amdbc250_psp.obj amdbc250_dream_fw_load.obj amdbc250_dream_golden.obj amdbc250_dream_hdp.obj amdbc250_dream_rlc.obj ^
+  amdbc250_dream_kmd.obj amdbc250_dream_hw_init.obj amdbc250_dream_power.obj amdbc250_dream_vm.obj amdbc250_psp.obj amdbc250_dream_fw_load.obj amdbc250_dream_golden.obj amdbc250_dream_hdp.obj amdbc250_dream_rlc.obj amdbc250_dream_vbios.obj ^
   ntoskrnl.lib wdm.lib win32k.lib ntstrsafe.lib BufferOverflowK.lib hal.lib ^
   /LIBPATH:"%WDK_ROOT%\Lib\%WDK_VERSION%\km\x64"
 

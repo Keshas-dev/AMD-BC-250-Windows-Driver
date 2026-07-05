@@ -918,6 +918,12 @@ DreamV3HaltAllEngines(
     _In_ PDREAM_V3_DEVICE_EXTENSION DevExt
     );
 
+/* VRAM detection via MC_VM_FB_LOCATION / VBIOS / PCI BAR */
+NTSTATUS
+DreamV3DetectVram(
+    _In_ PDREAM_V3_DEVICE_EXTENSION DevExt
+    );
+
 VOID
 DreamV3UnhaltAllEngines(
     _In_ PDREAM_V3_DEVICE_EXTENSION DevExt
