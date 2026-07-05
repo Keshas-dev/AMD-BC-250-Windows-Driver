@@ -274,6 +274,28 @@ When installing PSP driver via Device Manager → Have Disk → select `PspDrive
 - Useful but potentially stale docs: `docs\REGISTER-MAP-BC250.md`, `docs\PSP-PROXY-BYPASS.md`, and `docs\RING-INIT-STATUS.md`.
 - Trust: `docs\BC250-LINUX-IP-MAP.md` (Linux kernel source-verified IP base addresses).
 
+## CRITICAL: Pre-build code analysis agent
+- **ALWAYS** run the Code Reviewer agent BEFORE every build to catch bugs, wrong register offsets, and logic errors.
+- The agent must check: IOCTL handler parameter validation, register offset correctness against hw.h, method_buffered buffer sharing, pointer safety, and memory leaks.
+- Never build without prior agent code review.
+
+## CRITICAL: Never jump to "hardware limitation" conclusions
+- All tests must be run with firmware files properly installed at the correct path (`C:\Windows\System32\drivers\bc-250\`).
+- Verify firmware installation FIRST before any hardware diagnostic conclusion.
+- Tests must be repeated multiple times, across reboots, before concluding hardware is dead.
+- An SMU or engine appearing dead is often a firmware-not-loaded problem, not a hardware limitation.
+
+## CRITICAL: INF DestinationDirs syntax (easy to get wrong)
+- `DIRID_12` = `%SystemRoot%\System32\drivers\` — use for firmware files in `bc-250\`
+- `DIRID_13` = `%SystemRoot%\System32\DriverStore\FileRepository\` — NOT for runtime files!
+- WRONG: `Firmware_Files = 13,System32\drivers\bc-250` → creates `...\drivers\System32\drivers\bc-250\` (double path!)
+- WRONG: `Firmware_Files = 13, bc-250` → creates `...\DriverStore\FileRepository\bc-250\` (wrong parent dir!)
+- CORRECT: `Firmware_Files = 12, bc-250` → creates `...\drivers\bc-250\` ✅
+- Also in `SourceDisksFiles`:
+  - WRONG: `Asd.bin = 1,,firmware` ← third field is `size`, not `subdir` (extra comma!)
+  - CORRECT: `Asd.bin = 1, firmware` ← second field is `subdir`
+- Check BOTH GPU (`inf\amdbc250_dream.inf`) and PSP (`inf\PspDriver.inf`) INF files.
+
 ## CRITICAL: COMPUTE Register Address Correction (2026-07-01)
 
 All COMPUTE registers in Linux gc_10_1_0_offset.h have **BASE_IDX=0** (not 1!). This means the correct formula is `BAR5 = GC_BASE(0x1260) + mm_DWORD * 4`, **NOT** the SEG1 formula (GC_BASE + 0xA000 + mm*4) that hw.h uses.
@@ -330,5 +352,88 @@ All COMPUTE registers in Linux gc_10_1_0_offset.h have **BASE_IDX=0** (not 1!). 
 | CP_HQD_ACTIVE | 0x910C | WRITABLE, ACKs (reads 1) |
 | GRBM_GFX_CNTL | 0x2022/0x4968 | DEAD (BC-250 doesn't have this) |
 | 0xDC60 register | 0xDC60 | Cycling FIFO (debug counter, not dispatch) |
+
+## BREAKTHROUGH: SMU Mailbox via SMN WORKS! (2026-07-05)
+
+### Discoveries
+1. **SMN access via NBIO BAR5+0x38/0x3C works** — this is Linux `WREG32_PCIE`/`RREG32_PCIE` path
+   - Write SMN address to `0x38`, data to `0x3C` → generates SMN bus cycles
+   - Direct MMIO SMN ports (physical 0x3B10528/0x3B10564) FAIL — use NBIO path only
+   - SMN via PCI config (B0D0F0 + 0xB8/0xBC) is read-only — no reboot fix possible
+
+2. **SMU firmware is RUNNING** (not just loaded by PSP)
+   - FW_FLAGS at SMN[0x03B10024] = 0x00000001 → INTERRUPTS_ENABLED = YES
+   - PUB_CTRL at SMN[0x03B10B14] = 0x00000000 → reset NOT asserted
+   - SMU version: 88.6.0 (0x00580600)
+   - Driver interface version: 8
+   - Responds to PPSMC_MSG_TestMessage (0x1) — SMU is alive!
+
+3. **C2PMSG mailbox registers located in SMN space (NOT BAR5!)**
+   - C2PMSG_66 (message): SMN[0x03B10A08]
+   - C2PMSG_82 (arg/response): SMN[0x03B10A48]
+   - C2PMSG_90 (control): SMN[0x03B10A68]
+   - SMU C2PMSG via BAR5 direct (0x16A08/0xA48/0xA68) reads 0 on BC-250 — MP1 NOT mapped into BAR5!
+
+4. **SMU enabled features: 0xDD602C7D**
+   - Bit 0 (GFXCLK DPM) = ON ✅
+   - Bit 2 (GFXOFF) = ON — GFX block in deep sleep/clock gated!
+   - Most other SOC/DF features also enabled
+
+5. **Why ALL prior compute tests failed: GFXOFF keeps GFX in deep sleep**
+   - GFX frequency: 15 MHz (idle) — GFXOFF enabled
+   - 0 WGPs active — compute units physically powered/gated off
+   - Registers readable/writable = shadow registers, actual hardware has no clock
+   - RPTR not advancing = CP/MEC engine has no power — NOT a ring issue!
+   - KIQ_BASE/KIQ_SIZE hardwired to 0 — hardware read-only without proper SMU init
+
+### Test Tool
+- `test-tools\bar5-smn-test.c` — **PRIMARY**: SMU mailbox via SMN (uses GPU IOCTL for BAR5 + NBIO 0x38/0x3C for SMN)
+- Supports `SmuSendMsg(msg)` and `SmuSendMsg(msg, param)` with proper protocol (wait C2PMSG_90==1, ack, write param, write msg, poll, read)
+
+### SMU v11.8 PPSMC Message IDs (verified for BC-250)
+- 0x1 TestMessage ✅
+- 0x2 GetSmuVersion (returns 0x00580600 = 88.6.0) ✅
+- 0x3 GetDriverIfVersion (returns 8) ✅
+- 0x3D GetEnabledSmuFeatures (returns 0xDD602C7D) ✅
+- 0x37 GetGfxFrequency (returns 15 MHz) ✅
+- 0x0F QueryGfxclk (returns 15 MHz) ✅
+- 0x38 GetGfxVid ✅
+- 0x1E QueryActiveWgp (returns 0) ✅
+- 0x0C QueryCorePstate ✅
+- 0x13 QueryDfPstate ✅
+- **0x39 ForceGfxFreq: CAUSED SYSTEM CRASH with param=80000** ⚠️
+
+### System Crash from ForceGfxFreq
+- Command: ForceGfxFreq (0x39) with param=80000 (800 MHz)
+- SMU accepted it but hung the GPU (probably missing voltage/DPM tables)
+- Screen went white, system unresponsive → TDR or hardware watchdog
+- NO blue screen (no bugcheck event) — likely display driver restart
+- After reboot: `amdbc250kmd` service stopped (manual start), required admin to restart
+- **CRITICAL**: ForceGfxFreq/ForceGfxVid/SetCoreEnableMask/RequestActiveWgp require FULL DPM setup first — they will crash without DriverPPTable
+
+### Next Steps
+1. Restart `amdbc250kmd` service with admin
+2. Test SetSoftMinCclk (0x35) with safe value 20000 (200 MHz) — low risk
+3. Test SetSoftMaxCclk (0x36) with safe value 40000 (400 MHz) — low risk
+4. If clocks increase: query QueryActiveWgp to see if WGPs activated
+5. If stable: implement full DPM initialization in `amdbc250_dream_power.c`:
+   - Allocate system memory for `cyan_skillfish_tbl` DriverPPTable
+   - Send SetDriverTableDramAddrHigh (0x4) + Low (0x5)
+   - Send TransferTableDram2Smu (0x7)
+   - SMU takes over: clocks rise, GFXOFF disabled, compute active
+6. After DPM running: retry RLC firmware load via PSP + PM4 ring submission
+
+### Why Linux works but Windows doesn't
+- Linux: `cyan_skillfish_ppt.c` + `smu_v11_0` framework initializes SMU DPM, loads tables, manages GFXOFF
+- Windows: SMU is alive but our driver sends ZERO DPM init — GFX stays in deep sleep
+- **The hardware is capable!** We just need to replicate Linux's SMU initialization sequence
+
+### Cyan Skillfish vs Skillfish2
+- Linux `94bd7bf` commit: SMU IP block only for `AMD_APU_IS_CYAN_SKILLFISH2`
+- Our card: SMU v88.6.0 active → this IS Cyan Skillfish2 (BC-250B)
+- SMU initialization MANDATORY for any compute/3D functionality
+
+### Key Lesson
+Do NOT use Set/Force/Request messages without DriverPPTable. The crash was not random — ForceGfxFreq required DPM tables but SMU had none. These messages should only be used AFTER `TransferTableDram2Smu` completes. Query-only messages are always safe.
 
 

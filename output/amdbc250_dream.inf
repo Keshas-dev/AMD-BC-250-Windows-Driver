@@ -24,7 +24,7 @@ CatalogFile=amdbc250_dream.CAT
 DefaultDestDir = 11
 DreamV3.Miniport = 12
 DreamV3.UMD      = 11
-DreamV3.Firmware = 13,System32\drivers\bc-250
+DreamV3.Firmware = 12, bc-250
 
 [SourceDisksNames]
 1 = %DISKNAME%,,,
@@ -37,14 +37,14 @@ atikmdag.sys = 1
 amdbc250umd64.dll = 1
 
 ; GPU firmware files (loaded via IC_BASE DMA at driver startup)
-cyan_skillfish2_me.bin   = 1,,firmware
-cyan_skillfish2_pfp.bin  = 1,,firmware
-cyan_skillfish2_ce.bin   = 1,,firmware
-cyan_skillfish2_mec.bin  = 1,,firmware
-cyan_skillfish2_mec2.bin = 1,,firmware
-cyan_skillfish2_sdma.bin = 1,,firmware
-cyan_skillfish2_sdma1.bin = 1,,firmware
-cyan_skillfish2_rlc.bin  = 1,,firmware
+cyan_skillfish2_me.bin   = 1, firmware
+cyan_skillfish2_pfp.bin  = 1, firmware
+cyan_skillfish2_ce.bin   = 1, firmware
+cyan_skillfish2_mec.bin  = 1, firmware
+cyan_skillfish2_mec2.bin = 1, firmware
+cyan_skillfish2_sdma.bin = 1, firmware
+cyan_skillfish2_sdma1.bin = 1, firmware
+cyan_skillfish2_rlc.bin  = 1, firmware
 
 [Manufacturer]
 %AMD% = AMD,NTamd64
