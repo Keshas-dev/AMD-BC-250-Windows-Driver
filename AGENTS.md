@@ -241,6 +241,12 @@ BC-250 mining ASIC has compute/GFX engines permanently disabled at hardware leve
 
 The PSP driver's `PspDriver.inf` now has a `[Firmware_Files]` section that auto-copies `Sysdrv.bin`, `Sos.bin`, and `Smu.bin` to `C:\Windows\System32\drivers\bc-250\` during Device Manager installation. No separate xcopy step needed.
 
+### GPU driver firmware loading (IC_BASE DMA)
+- `DreamV3LoadAllFirmware()` in `amdbc250_dream_fw_load.c` loads ME, PFP, CE, MEC firmware from `\SystemRoot\System32\drivers\bc-250\` via ZwCreateFile/ZwReadFile + IC_BASE DMA registers
+- Called from `DreamV3HwInitialize()` as step 6/13 after engine halt + before GFX ring init
+- GPU INF (`amdbc250_dream.inf`) now has `DreamV3.Firmware` section installing `cyan_skillfish2_*.bin` to `13,System32\drivers\bc-250`
+- `build.bat` copies `firmware/*.bin` to `output/firmware/` for INF-based installation
+
 When installing PSP driver via Device Manager → Have Disk → select `PspDriver.inf`:
 - `PspDriver.sys` → `C:\Windows\System32\drivers\`
 - `Sysdrv.bin` → `C:\Windows\System32\drivers\bc-250\`
