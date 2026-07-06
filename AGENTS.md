@@ -436,4 +436,24 @@ All COMPUTE registers in Linux gc_10_1_0_offset.h have **BASE_IDX=0** (not 1!). 
 ### Key Lesson
 Do NOT use Set/Force/Request messages without DriverPPTable. The crash was not random — ForceGfxFreq required DPM tables but SMU had none. These messages should only be used AFTER `TransferTableDram2Smu` completes. Query-only messages are always safe.
 
+## CRITICAL: Win11 26100 WDM fallback — INIT_HARDWARE required before register access (2026-07-05)
+
+### Problem
+On Win11 26100, `DxgkInitialize` is NOT exported. Driver enters WDM fallback mode → creates IOCTL device but **NEVER maps BAR5** (no PnP `StartDevice` call). All `IOCTL_AMDBC250_READ_REG` returns `STATUS_DEVICE_NOT_READY` (ERROR 21) because `DevExt->MmioVirtualBase == NULL`.
+
+### Solution
+User-mode test tools MUST call `IOCTL_AMDBC250_INIT_HARDWARE` FIRST:
+```c
+AMDBC250_IOCTL_INIT_HARDWARE ih;
+ih.MmioPhysicalBase = 0xFE800000ULL;  // GPU BAR5
+ih.MmioSize = 0x80000;                 // 512KB
+ih.Flags = AMDBC250_INIT_FLAG_NBIO_MAP; // SKIP full HW init!
+```
+- `Flags=0` → calls `DreamV3HwInitialize()` → **crashes** (TDR/white screen)
+- `Flags=AMDBC250_INIT_FLAG_NBIO_MAP` → safely maps BAR5 + enables PCI mem space via IO ports
+- After success: register reads work, SMU via SMN (BAR5+0x38/0x3C) works
+
+### Test Template
+`bar5-smn-test.c` must include INIT_HARDWARE before any read/write on Win11 26100. Without this, all reads return `0xFFFFFFFF`.
+
 

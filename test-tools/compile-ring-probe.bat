@@ -1,12 +1,11 @@
 @echo off
-setlocal
-call "E:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat" >nul 2>&1
-set "WINVER=10.0.26100.0"
-set "WDK=E:\Program Files (x86)\Windows Kits\10"
-set "VCTools=E:\Program Files\Microsoft Visual Studio\2022\Community\VC\Tools\MSVC\14.44.35207"
-set "INCLUDE=%VCTools%\include;%WDK%\Include\%WINVER%\ucrt;%WDK%\Include\%WINVER%\shared;%WDK%\Include\%WINVER%\um;%WDK%\Include\%WINVER%\winrt"
-set "LIB=%VCTools%\lib\x64;%WDK%\Lib\%WINVER%\ucrt\x64;%WDK%\Lib\%WINVER%\um\x64"
-cd /d "%~dp0"
-cl /nologo /O2 /utf-8 /W3 /Fegfx-ring-probe-test.exe gfx-ring-probe-test.c /link /subsystem:console
-if %errorlevel% equ 0 (echo Build OK) else (echo Build FAILED)
-endlocal
+setlocal enabledelayedexpansion
+call "E:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat" amd64 >nul 2>&1
+set "EXTRA_INC=E:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\ucrt;E:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\shared;E:\Program Files (x86)\Windows Kits\10\Include\10.0.26100.0\um"
+set "EXTRA_LIB=E:\Program Files (x86)\Windows Kits\10\Lib\10.0.26100.0\ucrt\x64;E:\Program Files (x86)\Windows Kits\10\Lib\10.0.26100.0\um\x64"
+set "INCLUDE=!EXTRA_INC!;!INCLUDE!"
+set "LIB=!EXTRA_LIB!;!LIB!"
+cd /d "C:\AMD-BC-250\AMD-BC-250-Windows-Driver-main"
+cl /nologo /O2 /Feoutput\ring-register-probe.exe test-tools\ring-register-probe.c /I inc /link /out:output\ring-register-probe.exe
+if errorlevel 1 (echo BUILD FAILED & pause & exit /b 1)
+echo BUILD OK

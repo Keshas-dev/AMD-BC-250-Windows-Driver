@@ -988,6 +988,12 @@ static VOID DreamV3WdmUnload(_In_ PDRIVER_OBJECT DriverObject)
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                    "AMDBC250-DREAM-V4.3: Control device deleted by WDM unload\n"));
     }
+
+    /* Free separately-allocated device extension (WDM path only — WDDM path frees in RemoveDevice) */
+    if (g_PciDevExt != NULL) {
+        ExFreePoolWithTag(g_PciDevExt, '3vDA');
+        g_PciDevExt = NULL;
+    }
 }
 
 /*===========================================================================
@@ -2803,6 +2809,8 @@ DreamV3DeviceControl(
     PIO_STACK_LOCATION irpSp = IoGetCurrentIrpStackLocation(Irp);
     NTSTATUS status = STATUS_SUCCESS;
     ULONG bytesReturned = 0;
+    /* WARNING: METHOD_BUFFERED — inputBuffer == outputBuffer (same SystemBuffer).
+     * Read ALL input fields BEFORE writing to output. Do NOT RtlZeroMemory before reading. */
     PVOID inputBuffer = Irp->AssociatedIrp.SystemBuffer;
     PVOID outputBuffer = Irp->AssociatedIrp.SystemBuffer;
     ULONG inputLen = irpSp->Parameters.DeviceIoControl.InputBufferLength;

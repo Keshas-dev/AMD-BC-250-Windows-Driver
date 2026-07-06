@@ -105,14 +105,14 @@ int main(void) {
             UINT32 newVal = (v == 0) ? 1 : (v ^ 1);
             WriteReg(h, testRegs[i], newVal);
             UINT32 grbm = 0;
-            ReadReg(h, 0x2004, &grbm);
+            ReadReg(h, 0x3260, &grbm);
             if (grbm != 0xFFFFFFFF) {
                 Log("  *** UNLOCK! [0x%04X] 0x%08X→0x%08X GRBM=0x%08X ***\n",
                     testRegs[i], v, newVal, grbm);
             }
             WriteReg(h, testRegs[i], v);
         }
-        ReadReg(h, 0x2004, &rb);
+        ReadReg(h, 0x3260, &rb);
         Log("  GRBM after all writes: 0x%08X\n", rb);
         fflush(g);
     }
@@ -147,7 +147,7 @@ int main(void) {
 
     /* Final check */
     Log("\n=== Final ===\n"); fflush(g);
-    ReadReg(h, 0x2004, &v); Log("  GRBM = 0x%08X\n", v);
+    ReadReg(h, 0x3260, &v); Log("  GRBM = 0x%08X\n", v);
     ReadReg(h, 0x0000, &v); Log("  GPU_ID = 0x%08X\n", v);
     fflush(g);
 

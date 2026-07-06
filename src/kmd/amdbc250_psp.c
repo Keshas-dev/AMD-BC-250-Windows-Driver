@@ -447,7 +447,7 @@ ULONG Amdbc250PspReadRegister(ULONG RegisterOffset)
 {
     ULONG off = PspReg(RegisterOffset);
     if (!g_PspContext.MmioBase || off >= g_PspContext.MmioSize)
-        return 0;
+        return 0xFFFFFFFF;
     return READ_REGISTER_ULONG((PULONG)(g_PspContext.MmioBase + off));
 }
 

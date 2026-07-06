@@ -6,6 +6,6 @@ set "EXTRA_LIB=E:\Program Files (x86)\Windows Kits\10\Lib\10.0.26100.0\ucrt\x64;
 set "INCLUDE=!EXTRA_INC!;!INCLUDE!"
 set "LIB=!EXTRA_LIB!;!LIB!"
 cd /d "C:\AMD-BC-250\AMD-BC-250-Windows-Driver-main"
-cl /nologo /O2 /Feoutput\bar5-smn-test.exe test-tools\bar5-smn-test.c /I inc /link /out:output\bar5-smn-test.exe
+cl /nologo /O2 /Feoutput\mec-unhalt-test.exe test-tools\mec-unhalt-test.c /I inc /link /out:output\mec-unhalt-test.exe
 if errorlevel 1 (echo BUILD FAILED & pause & exit /b 1)
 echo BUILD OK

@@ -81,7 +81,7 @@ static void DumpRegs(HANDLE h, const char *tag) {
     PspReadReg(h, 0x6C8C, &val); Log("  GCVM_PT_BASE_LO (0x6C8C)= 0x%08X\n", val);
     PspReadReg(h, 0x6C90, &val); Log("  GCVM_PT_BASE_HI (0x6C90)= 0x%08X\n", val);
     PspReadReg(h, 0xB360, &val); Log("  GCVM_L2_CNTL (0xB360)   = 0x%08X\n", val);
-    PspReadReg(h, 0x3264, &val); Log("  GRBM_STATUS (0x3264)    = 0x%08X\n", val);
+    PspReadReg(h, 0x3260, &val); Log("  GRBM_STATUS (0x3260)    = 0x%08X\n", val);
 }
 
 int main(void) {

@@ -94,7 +94,7 @@ int main(void) {
 
     ULONG rlcBefore = R(0xECA8);
     printf("RLC_CP_SCHEDULERS before=0x%08X\n", rlcBefore);
-    printf("ME_CNTL before=0x%08X\n", R(0x4A64));
+    printf("ME_CNTL before=0x%08X\n", R(0x4A74));
 
     /* Write RLC_CP_SCHEDULERS = 0 to disable, then read back */
     W(0xECA8, 0);
@@ -103,7 +103,7 @@ int main(void) {
     /* Now write 0xA0 and check if MEC state changes */
     W(0xECA8, 0xA0);
     printf("RLC_CP_SCHEDULERS after 0xA0=0x%08X\n", R(0xECA8));
-    printf("ME_CNTL after 0xA0=0x%08X\n", R(0x4A64));
+    printf("ME_CNTL after 0xA0=0x%08X\n", R(0x4A74));
 
     /* Check GRBM_STATUS for any engine activity */
     for(int i=0; i<10; i++) {
