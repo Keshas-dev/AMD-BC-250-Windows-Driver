@@ -28,7 +28,7 @@
 
 ## BC-250 hardware facts
 - BC-250 GC registers are shifted by `GC_BASE=0x1260`; use `AMDBC250_REG_*` macros. Navi10 offsets like `0x2000`/`0x2004` read `0xFFFFFFFF` because they are unmapped, not NBIO-blocked.
-- Key corrected offsets: GRBM `0x3260`, CC `0x9C1C` (NOT 0x3264 — see bc250-collective), scratch `0x32D4`, SPI WGP mask `0x5C3C` (NOT 0x34FC).
+- Key corrected offsets: GRBM `0x3260`, CC `0x9C1C` (NOT 0x3264 — see bc250-collective), scratch `0x32D4`, SPI WGP mask `0x5C3C` (NOT 0x34FC but hw read-only — WGPs fused off).
 - NBIO blocks writes in native `0xC000+` ranges such as `CP_ME_CNTL`/`CP_MEC_CNTL`; GC_BASE-shifted ring aliases can bypass NBIO but some BASE registers are hardware read-only.
 - **Linux IP Base Map** (from `cyan_skillfish_ip_offset.h` — full details in `docs/BC250-LINUX-IP-MAP.md`):
   - GC: `0x1260` (+ `0xA000`), NBIO: `0x0000`, HDP: `0x0F20`, MMHUB: `0x1A000`
@@ -37,7 +37,7 @@
   - GC IP version: 10.1.3, NBIO: 2.1.1, MP0/PSP: 11.0.8
   - Linux skips PSP firmware loading entirely for BC-250 (`psp_v11_0_8.c` is minimal)
   - `cg_flags=0`, `pg_flags=0` (no clock/power gating), `external_rev_id = rev_id + 0x82`
-- **40 CU unlock** (from bc250-collective): Write `CC_GC_SHADER_ARRAY_CONFIG` (0x9C1C) + `SPI_PG_ENABLE_STATIC_WGP_MASK` (0x5C3C) together during `gfx_v10_0_get_cu_info()`. Linux mm* offsets: CC=0x226F*4+0x1260=0x9C1C, SPI=0x1277*4+0x1260=0x5C3C.
+- **40 CU unlock** (from bc250-collective): Write `CC_GC_SHADER_ARRAY_CONFIG` (0x9C1C) + `SPI_PG_ENABLE_STATIC_WGP_MASK` (0x5C3C) together during `gfx_v10_0_get_cu_info()`. Linux mm* offsets: CC=0x226F*4+0x1260=0x9C1C, SPI=0x1277*4+0x1260=0x5C3C. SPI_PG_MASK (0x5C3C) is read-only at runtime (0x00000000) — WGPs fused off on our unit. UNLOCK_40CU IOCTL defined in header but NEVER implemented in driver.
 - **GRBM selection**: Linux uses `mmGRBM_GFX_CNTL` (0x0dc2, BAR5=0x2022) for ME/PIPE/QUEUE select, NOT `GRBM_GFX_INDEX` (0x34D0). These are DIFFERENT registers.
 - **CP_MEC_CNTL**: Navi10 offset mmREG=0x0e2d (BAR5=0x4B14), NOT Sienna_Cichlid 0x0f55. BC-250 is GFX10.1.3, not 10.3.x.
 
@@ -196,7 +196,7 @@ Is PSP SOS firmware loaded? AGENTS.md earlier noted `C2PMSG_81=0xF0000010` sugge
 
 ## Next Steps (Completed)
 
-## FINAL VERDICT: All compute/GFX paths confirmed dead on BC-250 (2026-07-03)
+## (ARCHIVED) Initial compute dead verdict — superseded by 2026-07-08 (see FINAL VERDICT below)
 
 ### ME Unhalt Test (me-unhalt-test.c via PSP driver)
 - PSP driver INIT_HW maps GPU BAR5 with clean MmMapIoSpace (no PCI config writes)
@@ -221,8 +221,8 @@ BC-250 mining ASIC has compute/GFX engines permanently disabled at hardware leve
 - ME was halted but unhalting it doesn't enable processing
 - GFX ring WPTR is writable but the CP/MEC engine behind it never reads from the ring
 - KIQ_BASE/KIQ_SIZE are hardwired to 0 — ring buffer address can't be set
-- PGM_LO (0x8110) is read-only (0x65FFEB6E) despite being "writable" in earlier tests
-- COMPUTE registers (DIM_X/Y/Z) are read-only shadows
+- PGM_LO (0x8110) is WRITABLE (0x65FFEB6E initial, writes persist across boots) but still no execution
+- COMPUTE registers (DIM_X/Y/Z) are read-only shadows, but PGM_LO/HI and NUM_THREAD_Y/Z are WRITABLE
 - Consistent with RADV `RADV_DEBUG=nocompute` workaround and bc250-collective findings
 
 ### What DOES Work
@@ -334,24 +334,30 @@ All COMPUTE registers in Linux gc_10_1_0_offset.h have **BASE_IDX=0** (not 1!). 
 ### New test tool
 - `test-tools/correct-compute-test.c` + `compile-correct-compute.bat` probes correct addresses and attempts dispatch.
 
-### Actual HW Status (verified 2026-07-01)
+### Actual HW Status (verified 2026-07-08)
 
 | Register | Address | Status |
 |----------|---------|--------|
-| DISPATCH_INITIATOR | 0x80E0 | W1C trigger, sets consumed, no execution |
-| DIM_X | 0x80E4 | READ-ONLY (shadow/status) |
+| DISPATCH_INITIATOR | 0x80E0 | W1C trigger, VALID consumed=YES, but no execution |
+| DIM_X | 0x80E4 | STALE read (0), writes silently ignored |
 | DIM_Y | 0x80E8 | DEAD (0xFFFFFFFF) |
 | DIM_Z | 0x80EC | DEAD (0xFFFFFFFF) |
-| START_X/Y/Z | 0x80F0-0x80F8 | READ-ONLY (all 0) |
-| NUM_THREAD_X/Y/Z | 0x80FC-0x8104 | READ-ONLY (all 0) |
-| PGM_LO | 0x8110 | WRITABLE! |
-| PGM_HI | 0x8114 | WRITABLE! |
+| START_X/Y/Z | 0x80F0-0x80F8 | STALE read (0), writes silently ignored |
+| NUM_THREAD_X | 0x80FC | STALE read (0), writes silently ignored |
+| NUM_THREAD_Y | 0x8100 | STALE read (0x3F1FBC5F), WRITABLE but persists garbage |
+| NUM_THREAD_Z | 0x8104 | STALE read (0xFF973BC8), WRITABLE but persists garbage |
+| PGM_LO | 0x8110 | WRITABLE!, persists across boots (shadow) |
+| PGM_HI | 0x8114 | WRITABLE!, persists across boots (shadow) |
 | PGM_RSRC1/2 | 0x8128-0x812C | DEAD (0xFFFFFFFF) |
 | CP_MQD_BASE_ADDR | 0x9104 | WRITABLE (write-back verified) |
-| CP_MQD_BASE_ADDR_HI | 0x9108 | READ-ONLY (0xFF11EFE0) |
+| CP_MQD_BASE_ADDR_HI | 0x9108 | READ-ONLY (0xFE75DFC2) |
 | CP_HQD_ACTIVE | 0x910C | WRITABLE, ACKs (reads 1) |
 | GRBM_GFX_CNTL | 0x2022/0x4968 | DEAD (BC-250 doesn't have this) |
 | 0xDC60 register | 0xDC60 | Cycling FIFO (debug counter, not dispatch) |
+| CC_ARRAY_CONFIG | 0x9C1C | PARTIALLY WRITABLE (0xFFE00000→0x1F000000) |
+| SPI_PG_ENABLE_STATIC_WGP_MASK | 0x5C3C | READ-ONLY zero (WGPs fused off) |
+| SPI_PG_MASK | 0x34FC | PARTIALLY WRITABLE (0xFFFFFFFF→0xF7F77F80) |
+| GRBM_GFX_INDEX | 0x34D0 | LIVING (0xE0000000 broadcast) |
 
 ## BREAKTHROUGH: SMU Mailbox via SMN WORKS! (2026-07-05)
 
@@ -401,40 +407,29 @@ All COMPUTE registers in Linux gc_10_1_0_offset.h have **BASE_IDX=0** (not 1!). 
 - 0x1E QueryActiveWgp (returns 0) ✅
 - 0x0C QueryCorePstate ✅
 - 0x13 QueryDfPstate ✅
-- **0x39 ForceGfxFreq: CAUSED SYSTEM CRASH with param=80000** ⚠️
+- **0x39 ForceGfxFreq: NOW PROVEN SAFE** (with voltage+profile set first) ✅
+- **0x39 ForceGfxFreq: CAUSED SYSTEM CRASH only with param=80000 (wrong units) + no voltage** — the governor sequence (Q3 temp→Q0 unforce→Q3 profile→Q0 force_vid→Q0 force_freq) works without DPM tables
+- **0x1E QueryActiveWgp: ALWAYS returns 0** — WGPs are hardware-fused off even when GFXOFF/CG/PG disabled
 
-### System Crash from ForceGfxFreq
-- Command: ForceGfxFreq (0x39) with param=80000 (800 MHz)
-- SMU accepted it but hung the GPU (probably missing voltage/DPM tables)
-- Screen went white, system unresponsive → TDR or hardware watchdog
-- NO blue screen (no bugcheck event) — likely display driver restart
-- After reboot: `amdbc250kmd` service stopped (manual start), required admin to restart
-- **CRITICAL**: ForceGfxFreq/ForceGfxVid/SetCoreEnableMask/RequestActiveWgp require FULL DPM setup first — they will crash without DriverPPTable
+### FINAL VERDICT: Compute hardware permanently fused off on BC-250 (2026-07-08)
+- GFXOFF+CG+PG all successfully disabled via Q2(6,0x1C,0) — feature mask went from 0xDD602C7D to 0xDD602C61 (all three bits cleared)
+- CC_ARRAY_CONFIG(0x9C1C) partially writable (0xFFE00000→0x1F000000)
+- **SPI_PG_ENABLE_STATIC_WGP_MASK(0x5C3C) is READ-ONLY returning 0** — this is the critical register that enables per-WGP power gating; being zero means ALL WGPs are permanently power-gated/fused off
+- DISPATCH_INITIATOR(0x80E0) VALID consumed=YES (compute frontend register interface works)
+- BUT: GRBM_STATUS(0x3260)=0, Scratch unchanged, QueryActiveWgp=0 — no shader execution
+- PGM_LO(0x8110) writable and persists across boots (shadow register)
+- CONFIRMED by: Mesa MR 33116, ROCm issue #6313, RADV RADV_DEBUG=nocompute
+- UNLOCK_40CU IOCTL defined in header but NEVER implemented in driver source
 
-### Next Steps
-1. Restart `amdbc250kmd` service with admin
-2. Test SetSoftMinCclk (0x35) with safe value 20000 (200 MHz) — low risk
-3. Test SetSoftMaxCclk (0x36) with safe value 40000 (400 MHz) — low risk
-4. If clocks increase: query QueryActiveWgp to see if WGPs activated
-5. If stable: implement full DPM initialization in `amdbc250_dream_power.c`:
-   - Allocate system memory for `cyan_skillfish_tbl` DriverPPTable
-   - Send SetDriverTableDramAddrHigh (0x4) + Low (0x5)
-   - Send TransferTableDram2Smu (0x7)
-   - SMU takes over: clocks rise, GFXOFF disabled, compute active
-6. After DPM running: retry RLC firmware load via PSP + PM4 ring submission
-
-### Why Linux works but Windows doesn't
-- Linux: `cyan_skillfish_ppt.c` + `smu_v11_0` framework initializes SMU DPM, loads tables, manages GFXOFF
-- Windows: SMU is alive but our driver sends ZERO DPM init — GFX stays in deep sleep
-- **The hardware is capable!** We just need to replicate Linux's SMU initialization sequence
-
-### Cyan Skillfish vs Skillfish2
-- Linux `94bd7bf` commit: SMU IP block only for `AMD_APU_IS_CYAN_SKILLFISH2`
-- Our card: SMU v88.6.0 active → this IS Cyan Skillfish2 (BC-250B)
-- SMU initialization MANDATORY for any compute/3D functionality
+### Why Linux compute init doesn't solve this
+- Linux `cyan_skillfish_ppt.c` SMU init works for SMU frequency control but does NOT magically enable compute
+- The governor (cyan-skillfish-governor) never queries WGPs for compute purposes — it only reads GRBM_STATUS for GPU LOAD detection (GUI_ACTIVE bit)
+- Even with full amdgpu kernel driver and SMU DPM init, ROCm reports SDMA0/KIQ/CP timeouts (issue #6313)
+- Mesa explicitly disabled compute-only queue on BC-250's GFX10.1 variant
+- This is a B0 stepping hardware limitation, not a software-solvable problem
 
 ### Key Lesson
-Do NOT use Set/Force/Request messages without DriverPPTable. The crash was not random — ForceGfxFreq required DPM tables but SMU had none. These messages should only be used AFTER `TransferTableDram2Smu` completes. Query-only messages are always safe.
+Compute is permanently disabled at hardware level on BC-250 via SPI_WGP power gating fuses. No amount of SMU/DPM/register init can enable WGPs. The card is usable only for display output, PSP mailbox/firmware operations, and register-level hardware debugging.
 
 ## CRITICAL: Win11 26100 WDM fallback — INIT_HARDWARE required before register access (2026-07-05)
 
@@ -455,5 +450,120 @@ ih.Flags = AMDBC250_INIT_FLAG_NBIO_MAP; // SKIP full HW init!
 
 ### Test Template
 `bar5-smn-test.c` must include INIT_HARDWARE before any read/write on Win11 26100. Without this, all reads return `0xFFFFFFFF`.
+
+## bc250-collective Repository Analysis (2026-07-08)
+
+### Confirmed Queue SMN Addresses (from bc250_smu_oc Python library)
+```python
+DEFAULT_QUEUE_ADDRS = {
+    0: (0x03B10A08, 0x03B10A68, 0x03B10A48),  # (cmd, rsp, arg) — GPU freq/voltage/DPM
+    1: (0x03B10A00, 0x03B10A60, 0x03B10A40),  # unknown
+    2: (0x03B10528, 0x03B10564, 0x03B10998),  # SMU features enable/disable, device info
+    3: (0x03B10A20, 0x03B10A80, 0x03B10A88),  # temperature, perf profiles, CPU voltage
+    4: (0x03B10A24, 0x03B10A84, 0x03B10A8C),  # unknown
+}
+```
+- Both Python (bc250_smu_oc) and Rust (cyan-skillfish-governor) use **PCI config 0xB8/0xBC** for SMN transport. On Windows we use BAR5+0x38/0x3C — functionally identical (NBIO SMN bridge).
+- **Queue 0** is protected (`allow_queue0=False` by default) because it has dangerous messages (force freq/vid, DPM table transfer).
+- **Test message uses Queue 3 msg 0x01** (NOT Queue 0 or Queue 2). Returns arg+1.
+- Protocol: `write RSP=0` → `write ARG` → `write CMD` → poll RSP for {0x01=OK, 0xFF=fail, 0xFE=unknown, 0xFD=rejected, 0xFC=busy}.
+- VID formula: `vid = round((1.55 - mv/1000.0) / 0.00625)`; `mV = round((-vid*0.00625 + 1.55) * 1000)`.
+
+### Cyan Skillfish Governor — Complete SMU Message Maps
+
+**Queue 0 messages** (from cyan-skillfish-governor src/api/queue0.rs):
+| msg | Name | Arg | Returns |
+|-----|------|-----|---------|
+| 0x01 | TestMessage | value | value+1 |
+| 0x02 | GetSmuVersion | 0 | version (0x00580600 = 88.6.0) |
+| 0x03 | GetDriverIfVersion | 0 | 8 |
+| 0x04 | SetDriverTableDramAddrHigh | addr_hi | — |
+| 0x05 | SetDriverTableDramAddrLow | addr_lo | — |
+| 0x06 | TransferTableSmu2Dram | 0 | — |
+| 0x07 | TransferTableDram2Smu | 0 | — |
+| 0x0B | RequestCorePstate | pstate<<16\|core_mask | — |
+| 0x0C | QueryCorePstate | core_id | pstate |
+| 0x0E | RequestGfxclk | 0 | — (DANGER: crashes SMU!) |
+| 0x0F | QueryGfxclk | 0 | freq_mhz |
+| 0x11 | QueryVddcrSocClock | index<<16 | freq_mhz |
+| 0x13 | QueryDfPstate | 0 | pstate |
+| 0x18 | RequestActiveWgp | 0 | — (DANGER) |
+| 0x1B | StartTelemetryReporting | value | — |
+| 0x1C | StopTelemetryReporting | 0 | — |
+| 0x1E | QueryActiveWgp | 0 | count (0 = GFXOFF) |
+| 0x37 | GetGfxFrequency | 0 | **MHz directly** (NOT 100×MHz) |
+| 0x38 | GetGfxVid | 0 | vid |
+| **0x39** | **ForceGfxFreq** | **freq_mhz** | — SAFE if voltage+profile set first |
+| 0x3A | UnforceGfxFreq | 0 | — |
+| **0x3B** | **ForceGfxVid** | **vid** (from mV) | — |
+| 0x3C | UnforceGfxVid | 0 | — (check_status=false) |
+| 0x3D | GetEnabledSmuFeatures | 0 | bitmask |
+| 0x35 | SetSoftMinCclk | core_id<<20\|freq_mhz | ? |
+| 0x36 | SetSoftMaxCclk | core_id<<20\|freq_mhz | ? |
+
+**Queue 3 messages** (from cyan-skillfish-governor src/api/queue3.rs):
+| msg | Name | Arg | Notes |
+|-----|------|-----|-------|
+| 0x01 | TestMessage | value | Returns value+1 |
+| 0x0F | SetCpuGpuVid | kind<<16\|vid | — |
+| 0x10 | UnforceCpuGpuVid | kind<<16 | — |
+| **0x1E** | **SetPerfProfileIndex** | **profile** (0-3) | **MUST call before force_freq!** |
+| 0x20 | SetMaxTemperatureCpuGpu | temp_c | — |
+| 0x25 | SetOcClk | core_id<<16\|freq_mhz | CPU OC |
+| 0x3C | EnableSmuFeatures | mask | Q3 variant |
+| 0x3D | DisableSmuFeatures | mask | Q3 variant |
+| 0x36 | GetCurrentCpuVoltage | 0 | mV |
+| 0x37 | GetCurrentGpuVoltage | 0 | mV |
+| 0x40 | GetCpuTempMax | 0 | °C |
+| **0x8C** | **SetGpuMaxTemperature** | **temp_c** | Governor sets 80°C |
+| 0x8B | SetCpuMaxTemperature | temp_c | — |
+
+**Queue 2 messages** (from cyan-skillfish-governor src/api/queue2.rs):
+| msg | Name | Arg | Notes |
+|-----|------|-----|-------|
+| 0x03 | GetConstant | 0 | Returns 23 (confirmed on our HW) |
+| 0x04 | GetDeviceNameChunk | index | Returns 4 ASCII chars |
+| **0x05** | **EnableSmuFeatures** | **mask_low** | arg_high=mask_high |
+| **0x06** | **DisableSmuFeatures** | **mask_low** | arg_high=mask_high |
+| 0x0D/0x0E | SetAddrHigh/Low | addr | unknown purpose |
+| 0x17 | CpuDroopCalibration | margin<<16\|test_mv | — |
+
+**Feature bits** (for enable/disable_smu_features via Q2 0x05/0x06 or Q3 0x3C/0x3D):
+- bit 0 = GFXCLK DPM
+- bit 2 = GFXOFF
+- bit 3 = CG (Clock Gating)
+- bit 4 = PG (Power Gating)
+
+### Governor change_freq() Sequence (PROVEN SAFE on Linux)
+1. `q3(0x8C, 80)` — Set GPU max temp to 80°C
+2. `q0(0x3A, 0)` — Unforce any previous frequency
+3. `q0(0x3C, 0)` — Unforce any previous voltage (ignores failure)
+4. Look up safe point: find nearest `(freq_mhz, mv, profile)` at or above target
+5. `q3(0x1E, profile)` — Set perf profile (1=low, 3=high)
+6. `q0(0x3B, mv_to_vid(mv))` — Force voltage
+7. `q0(0x39, freq_mhz)` — **Force frequency (SAFE when voltage+profile set)**
+
+### Safe Points (from default-config.toml)
+| Frequency | Voltage | Profile | Use |
+|-----------|---------|---------|-----|
+| 500 MHz | 700 mV | 1 | Deep idle |
+| 800 MHz | 750 mV | 1 | Idle |
+| 1000 MHz | 800 mV | 1 | Low power |
+| 1175 MHz | 850 mV | 3 | Performance base |
+| 1400 MHz | 900 mV | 3 | Balanced |
+| 1600 MHz | 950 mV | 3 | Gaming |
+| 1800 MHz | 1000 mV | 3 | High perf |
+| 2000 MHz | 1050 mV | 3 | Max safe |
+
+### CRITICAL CORRECTIONS from earlier assumptions
+1. **Queue 0 is the correct path for freq/voltage control**, NOT Queue 2.
+2. **Queue 2 is for feature enable/disable** (GFXOFF etc.) — but governor NEVER disables GFXOFF (it works on bare metal without it).
+3. **Test message goes to Queue 3**, not Queue 0 or Queue 2.
+4. **force_gfx_freq WITHOUT voltage crashes** — must be preceded by force_gfx_vid + perf_profile (proven safe).
+5. **Freq units are MHz directly** (0x5DC = 1500 MHz, NOT 15 × 100).
+6. **Queue 0 requires `allow_queue0=True`** in Python library — dangerous messages are locked.
+7. **Governor reads GRBM_STATUS at BAR5 0x2004** via libdrm for GPU load detection.
+8. **Even with GFXOFF+CG+PG off + frequency forced, WGPs remain 0** — SPI_PG_ENABLE_STATIC_WGP_MASK is hardware read-only.
+9. **Not a DPM table issue** — governor proves safe sequence works without tables; WGPs are fused, not clock-gated.
 
 

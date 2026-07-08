@@ -549,6 +549,43 @@ typedef struct _AMDBC250_IOCTL_KIQ_BIOS_RING_SUBMIT {
 #define IOCTL_AMDBC250_GPU_IB_TEST     CTL_CODE_AMDBC250(0x89, METHOD_BUFFERED, FILE_ANY_ACCESS)
 /* Reuses AMDBC250_IOCTL_GPU_KIQ_TEST struct (output fields same) */
 
+/* --- Execute PM4 via ring (CPU fill + CP_HQD program + WPTR kick) --- */
+#define IOCTL_AMDBC250_EXECUTE_RING_PM4  CTL_CODE_AMDBC250(0x8A, METHOD_BUFFERED, FILE_ANY_ACCESS)
+
+typedef struct _AMDBC250_IOCTL_EXECUTE_RING_PM4 {
+    /* IN */
+    UINT32 Commands[64];        /* PM4 commands (up to 64 DWORDs) */
+    UINT32 CommandCount;        /* Number of valid DWORDs in Commands */
+    UINT32 TimeoutMs;           /* Max wait ms for RPTR advance (0 = no wait) */
+
+    /* OUT */
+    UINT32 Result;              /* 0=OK (RPTR advanced), 1=timeout, 2=error */
+    UINT32 WptrBefore;          /* CP_HQD_PQ_WPTR before kick */
+    UINT32 WptrAfter;           /* CP_HQD_PQ_WPTR after kick */
+    UINT32 RptrBefore;          /* CP_HQD_PQ_RPTR before kick */
+    UINT32 RptrAfter;           /* CP_HQD_PQ_RPTR after (or after timeout) */
+    UINT32 HqdActive;           /* CP_HQD_ACTIVE readback after programming */
+    UINT32 ScratchBefore;       /* SCRATCH_REG0 before */
+    UINT32 ScratchAfter;        /* SCRATCH_REG0 after */
+    UINT64 RingPa;              /* Ring buffer physical address */
+    UINT64 MqdPa;               /* MQD physical address */
+    ULONG  RingDwords[4];       /* First 4 DWORDS of ring after write (readback) */
+    UINT32 PqCtrlBefore;        /* CP_HQD_PQ_CONTROL (BASE_IDX=0) before write */
+    UINT32 PqCtrlAfter;         /* CP_HQD_PQ_CONTROL (BASE_IDX=0) after write */
+    UINT32 PqBaseReadback;      /* CP_HQD_PQ_BASE_LO (BASE_IDX=0) readback after write */
+    UINT32 SwResult;            /* Software PM4 executor result: 0=OK, 1=failed */
+    UINT32 SmuFeaturesMask;     /* SMU enabled features mask (after WakeGfx) */
+    UINT32 SmuGfxFreqMhz;       /* GFX frequency in MHz (after WakeGfx, 0=unknown) */
+    /* DISPATCH_DIRECT test */
+    UINT32 DispatchResult;      /* 0=not attempted, 1=regs set, 2=triggered, 3=activity detected */
+    UINT32 GrbmStatusBefore;    /* GRBM_STATUS before dispatch trigger */
+    UINT32 GrbmStatusAfter;     /* GRBM_STATUS after dispatch trigger + short poll */
+    UINT32 MqdLoadPgmLo;        /* COMPUTE_PGM_LO readback AFTER MQD activation (0=MQD failed) */
+    UINT32 PgmLoReadback;       /* COMPUTE_PGM_LO readback after dispatch MMIO write */
+    UINT32 PgmHiReadback;       /* COMPUTE_PGM_HI readback after dispatch MMIO write */
+    UINT32 TmgMaskReadback;     /* COMPUTE_STATIC_THREAD_MGMT_SE0 readback */
+} AMDBC250_IOCTL_EXECUTE_RING_PM4, *PAMDBC250_IOCTL_EXECUTE_RING_PM4;
+
 #pragma pack(pop)
 
 #endif /* _AMDBC250_IOCTL_H_ */

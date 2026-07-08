@@ -429,6 +429,14 @@ typedef struct _DREAM_V3_DEVICE_EXTENSION {
     PVOID               GcvmRingBuf;        /* KIQ ring buffer page (4KB) */
     ULONG64             GcvmRingBufPa;      /* Physical address of ring buffer */
 
+    /* MQD (Memory Queue Descriptor) for compute/KIQ ring init */
+    PVOID               HqdMqdBuf;          /* MQD buffer (768 bytes) */
+    ULONG64             HqdMqdBufPa;        /* Physical address of MQD */
+
+    /* Saved PM4 commands (saved before RtlZeroMemory clobbers input buffer) */
+    ULONG               SavedPm4Cmds[64];
+    ULONG               SavedPm4Count;
+
 } DREAM_V3_DEVICE_EXTENSION, *PDREAM_V3_DEVICE_EXTENSION;
 
 /*===========================================================================
@@ -496,6 +504,50 @@ DreamV3PspHardwareInit(
 
 NTSTATUS
 DreamV3SmuInitialize(
+    _In_ PDREAM_V3_DEVICE_EXTENSION DevExt
+    );
+
+/* SMU v11.8 PPSMC Message IDs (Cyan Skillfish) */
+#define SMU_MSG_TestMessage             0x1
+#define SMU_MSG_GetSmuVersion           0x2
+#define SMU_MSG_GetDriverIfVersion      0x3
+#define SMU_MSG_SetDriverDramAddrHigh   0x4
+#define SMU_MSG_SetDriverDramAddrLow    0x5
+#define SMU_MSG_TransferTableSmu2Dram   0x6
+#define SMU_MSG_TransferTableDram2Smu   0x7
+#define SMU_MSG_RequestGfxclk           0xE
+#define SMU_MSG_QueryGfxclk             0xF
+#define SMU_MSG_QueryVddcrSocClock      0x11
+#define SMU_MSG_QueryDfPstate           0x13
+#define SMU_MSG_RequestActiveWgp        0x18
+#define SMU_MSG_SetMinDeepSleepGfxclkFreq 0x19
+#define SMU_MSG_SetMaxDeepSleepDfllGfxDiv 0x1A
+#define SMU_MSG_AllowGfxOff             0x1B
+#define SMU_MSG_DisallowGfxOff          0x1C
+#define SMU_MSG_QueryActiveWgp          0x1E
+#define SMU_MSG_SetCoreEnableMask       0x2C
+#define SMU_MSG_InitiateGcRsmuSoftReset 0x2E
+#define SMU_MSG_SetDriverTableVMID      0x34
+#define SMU_MSG_SetSoftMinCclk          0x35
+#define SMU_MSG_SetSoftMaxCclk          0x36
+#define SMU_MSG_GetGfxFrequency         0x37
+#define SMU_MSG_GetGfxVid               0x38
+#define SMU_MSG_ForceGfxFreq            0x39
+#define SMU_MSG_UnForceGfxFreq          0x3A
+#define SMU_MSG_ForceGfxVid             0x3B
+#define SMU_MSG_UnforceGfxVid           0x3C
+#define SMU_MSG_GetEnabledSmuFeatures   0x3D
+
+NTSTATUS
+DreamV3SmuSendMessage(
+    _In_ PDREAM_V3_DEVICE_EXTENSION DevExt,
+    _In_ ULONG MessageId,
+    _In_ ULONG Parameter,
+    _Out_opt_ PULONG Response
+    );
+
+NTSTATUS
+DreamV3SmuWakeGfx(
     _In_ PDREAM_V3_DEVICE_EXTENSION DevExt
     );
 

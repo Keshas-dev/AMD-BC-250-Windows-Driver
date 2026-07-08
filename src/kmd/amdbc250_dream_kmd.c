@@ -958,6 +958,10 @@ static VOID DreamV3WdmUnload(_In_ PDRIVER_OBJECT DriverObject)
                 MmFreeContiguousMemory(devExt->GcvmRingBuf);
                 devExt->GcvmRingBuf = NULL;
             }
+            if (devExt->HqdMqdBuf != NULL) {
+                MmFreeContiguousMemory(devExt->HqdMqdBuf);
+                devExt->HqdMqdBuf = NULL;
+            }
         }
     }
 
@@ -6639,6 +6643,289 @@ DreamV3DeviceControl(
             bytesReturned = sizeof(*resp);
             status = STATUS_SUCCESS;
         }
+        break;
+    }
+
+    case 0x80000BE8: { /* IOCTL_AMDBC250_EXECUTE_RING_PM4 */
+        PAMDBC250_IOCTL_EXECUTE_RING_PM4 rp = (PAMDBC250_IOCTL_EXECUTE_RING_PM4)inputBuffer;
+        ULONG cmdCount, pollTimeoutMs;
+        if (inputLen < sizeof(*rp)) { status = STATUS_BUFFER_TOO_SMALL; break; }
+
+        cmdCount = rp->CommandCount;
+        if (cmdCount == 0 || cmdCount > 64) { status = STATUS_INVALID_PARAMETER; break; }
+
+        /* Save input fields BEFORE RtlZeroMemory clobbers them */
+        pollTimeoutMs = rp->TimeoutMs;
+        {
+            ULONG i;
+            for (i = 0; i < cmdCount; i++) DevExt->SavedPm4Cmds[i] = rp->Commands[i];
+            DevExt->SavedPm4Count = cmdCount;
+        }
+        RtlZeroMemory(rp, sizeof(*rp));
+        rp->CommandCount = cmdCount;
+        rp->TimeoutMs = (pollTimeoutMs > 0) ? pollTimeoutMs : 500;
+
+        /* --- Allocate ring buffer (MQD stored at offset 0; PM4 at offset 256) --- */
+        if (DevExt->GcvmRingBuf == NULL) {
+            PHYSICAL_ADDRESS lowR = {0x100000}, highR = {0xFFFFFFFFFFFFFFFFULL}, boundaryR = {0};
+            DevExt->GcvmRingBuf = MmAllocateContiguousMemorySpecifyCache(
+                4096, lowR, highR, boundaryR, MmNonCached);
+            if (DevExt->GcvmRingBuf) {
+                DevExt->GcvmRingBufPa = MmGetPhysicalAddress(DevExt->GcvmRingBuf).QuadPart;
+                RtlZeroMemory(DevExt->GcvmRingBuf, 4096);
+                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                    "AMDBC250-DREAM-V4.3: EXEC_RING: ring PA=0x%llX\n",
+                    DevExt->GcvmRingBufPa));
+            } else {
+                rp->Result = 2; status = STATUS_INSUFFICIENT_RESOURCES; break;
+            }
+        }
+        /* Full v10_compute_mqd at ring buffer offset 0 (256 dwords = 1024B).
+           Layout matches Linux v10_structs.h: compute fields 0-39, then
+           HQD fields at offsets 128-186. Shader at byte 1024 (dword 256). */
+        {
+            volatile PULONG buf = (volatile PULONG)DevExt->GcvmRingBuf;
+            ULONG64 ringPa = DevExt->GcvmRingBufPa;
+            ULONG64 shaderPa = ringPa + 1024;
+            int i;
+            for (i = 0; i < 256; i++) buf[i] = 0;
+            buf[0]  = 0xC0310800;           /* header: type=compute, qsize=8, priv */
+            buf[1]  = 0;                     /* DISPATCH_INITIATOR */
+            buf[2]  = 1; buf[3] = 1; buf[4] = 1;  /* DIM_X/Y/Z */
+            buf[5]  = 0; buf[6] = 0; buf[7] = 0;  /* START_X/Y/Z */
+            buf[8]  = 63;                    /* NUM_THREAD_X (64-1) */
+            buf[9]  = 0;                     /* NUM_THREAD_Y */
+            buf[10] = 0;                     /* NUM_THREAD_Z */
+            buf[11] = 1;                     /* PIPELINESTAT_ENABLE */
+            buf[13] = (ULONG)(shaderPa >> 8); /* PGM_LO */
+            buf[14] = (ULONG)(shaderPa >> 32);/* PGM_HI */
+            buf[19] = (2 << 0) | (1 << 6);   /* PGM_RSRC1: VGPRS=2,SGPRS=1 */
+            buf[20] = (63 << 0);             /* PGM_RSRC2: 64 threads */
+            buf[23] = 0xFFFFFFFF;            /* THREAD_MGMT_SE0 */
+            buf[24] = 0xFFFFFFFF;            /* THREAD_MGMT_SE1 */
+            buf[26] = 0xFFFFFFFF;            /* THREAD_MGMT_SE2 */
+            buf[27] = 0xFFFFFFFF;            /* THREAD_MGMT_SE3 */
+            buf[128] = (ULONG)(ringPa & 0xFFFFFFFC);  /* MQD_BASE_ADDR_LO */
+            buf[129] = (ULONG)(ringPa >> 32);          /* MQD_BASE_ADDR_HI */
+            buf[130] = 1;                             /* HQD_ACTIVE */
+            buf[131] = 0;                             /* HQD_VMID */
+            buf[132] = 0x8000014C;                    /* PERSISTENT_STATE */
+            buf[133] = 1;                             /* PIPE_PRIORITY */
+            buf[134] = 15;                            /* QUEUE_PRIORITY */
+            buf[135] = 0x00010011;                    /* QUANTUM */
+            buf[136] = (ULONG)(ringPa >> 8);           /* PQ_BASE_LO (ring >> 8) */
+            buf[137] = (ULONG)(ringPa >> 40);          /* PQ_BASE_HI */
+            buf[138] = 0;                             /* PQ_RPTR */
+            buf[139] = 0;                             /* RPTR_REPORT_ADDR_LO */
+            buf[140] = 0;                             /* RPTR_REPORT_ADDR_HI */
+            buf[141] = 0;                             /* WPTR_POLL_ADDR_LO */
+            buf[142] = 0;                             /* WPTR_POLL_ADDR_HI */
+            buf[143] = 0;                             /* DOORBELL_CONTROL */
+            buf[145] = 0x000A0101;                    /* PQ_CONTROL */
+            buf[146] = 0;                             /* IB_BASE_ADDR_LO */
+            buf[147] = 0;                             /* IB_BASE_ADDR_HI */
+            buf[148] = 0;                             /* IB_RPTR */
+            buf[149] = 0x00030003;                    /* IB_CONTROL */
+            buf[150] = 0;                             /* IQ_TIMER */
+            buf[164] = 1 << 14;                       /* HQ_SCHEDULER0 (bit 14) */
+            buf[166] = 1;                             /* MQD_CONTROL (PRIV_STATE) */
+        }
+
+        /* --- Step 0: Wake GFX from GFXOFF (SMU) --- */
+        DreamV3SmuWakeGfx(DevExt);
+        KeStallExecutionProcessor(1000);
+        rp->SmuFeaturesMask = 0;
+        rp->SmuGfxFreqMhz = 0;
+        DreamV3SmuSendMessage(DevExt, SMU_MSG_GetEnabledSmuFeatures, 0, &rp->SmuFeaturesMask);
+        DreamV3SmuSendMessage(DevExt, SMU_MSG_GetGfxFrequency, 0, &rp->SmuGfxFreqMhz);
+
+        /* --- Baseline (MQD is at ring buffer offset 0) --- */
+        rp->RingPa = DevExt->GcvmRingBufPa;
+        rp->MqdPa  = DevExt->GcvmRingBufPa;
+        rp->ScratchBefore = DreamV3ReadRegister(DevExt, AMDBC250_REG_SCRATCH_REG0);
+
+        /* Step 1: Select ME=1 (MEC) AND unhalt ME + MEC + enable schedulers */
+        DreamV3WriteRegister(DevExt, AMDBC250_REG_GRBM_GFX_INDEX,
+            AMDBC250_GRBM_GFX_INDEX_KIQ_VAL);
+
+        /* Write 0xFF to RLC_CP_SCHEDULERS to enable all queue slots */
+        DreamV3WriteRegister(DevExt, AMDBC250_REG_RLC_CP_SCHEDULERS, 0xFF);
+
+        /* Unhalt ME (write 0 to ME_CNTL at 0x4A74) */
+        DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_ME_CNTL, 0);
+
+        /* Unhalt MEC (write 0 to CP_MEC_CNTL at 0x4B14) */
+        DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_MEC_CNTL_GC, 0);
+
+        KeMemoryBarrier();
+
+        /* NOTE: Linux gc_10_1_0_offset.h confirms ALL CP_HQD registers
+           have BASE_IDX=0 (NOT SEG1). Earlier SEG1 hypothesis was wrong.
+           Formula: BAR5 = GC_BASE(0x1260) + mm*4. Using BASE_IDX=0. */
+        /* Read baseline */
+        rp->RptrBefore = DreamV3ReadRegister(DevExt, AMDBC250_REG_CP_HQD_PQ_RPTR);
+        rp->WptrBefore = DreamV3ReadRegister(DevExt, AMDBC250_REG_CP_HQD_PQ_WPTR_LO);
+
+        /* Step 2: Program CP_HQD registers (all BASE_IDX=0) */
+        rp->PqCtrlBefore = DreamV3ReadRegister(DevExt, AMDBC250_REG_CP_HQD_PQ_CONTROL);
+        DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_HQD_ACTIVE, 0);
+        rp->PqCtrlAfter = DreamV3ReadRegister(DevExt, AMDBC250_REG_CP_HQD_PQ_CONTROL);
+        DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_MQD_BASE_ADDR,
+            (ULONG)(DevExt->GcvmRingBufPa & 0xFFFFFFFF));
+        DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_MQD_BASE_ADDR_HI,
+            (ULONG)(DevExt->GcvmRingBufPa >> 32));
+        /* Ring buffer layout:
+           0-1023  = MQD (256 dwords)
+           1024+   = ring PM4 data (ring base at ringPA+1024, PQ_BASE = (ringPA+1024)>>8) */
+        #define RING_DATA_OFFSET_BYTES  1024
+        #define RING_DATA_OFFSET_DWORDS 256
+        ULONG64 ringDataPa = DevExt->GcvmRingBufPa + RING_DATA_OFFSET_BYTES;
+        DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_HQD_PQ_BASE_LO,
+            (ULONG)((ringDataPa >> 8) & 0xFFFFFFFF));
+        DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_HQD_PQ_BASE_HI,
+            (ULONG)((ringDataPa >> 8) >> 32));
+        /* QUEUE_SIZE=7 (2^8=256 dwords ring), RPTR_BLOCK_SIZE=5, UNORD_DISPATCH */
+        DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_HQD_PQ_CONTROL, 0x00004507);
+        rp->HqdActive = DreamV3ReadRegister(DevExt, AMDBC250_REG_CP_HQD_PQ_CONTROL);
+        DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_HQD_PERSISTENT_STATE, 0x8000014C);
+        rp->PqBaseReadback = DreamV3ReadRegister(DevExt, AMDBC250_REG_CP_HQD_PQ_BASE_LO);
+
+        /* Fill ring at offset 1024+ (AFTER MQD) */
+        {
+            ULONG i;
+            PULONG ringBase = (PULONG)((PUCHAR)DevExt->GcvmRingBuf + RING_DATA_OFFSET_BYTES);
+            for (i = 0; i < 8; i++)
+                WRITE_REGISTER_ULONG(ringBase + i, 0xC0001000);
+            for (i = 0; i < DevExt->SavedPm4Count; i++)
+                WRITE_REGISTER_ULONG(ringBase + i, DevExt->SavedPm4Cmds[i]);
+        }
+
+        /* Read back MQD header to verify MQD preserved */
+        {
+            rp->RingDwords[0] = READ_REGISTER_ULONG((PULONG)DevExt->GcvmRingBuf + 0);
+            rp->RingDwords[1] = READ_REGISTER_ULONG((PULONG)DevExt->GcvmRingBuf + 1);
+            rp->RingDwords[2] = READ_REGISTER_ULONG((PULONG)DevExt->GcvmRingBuf + 2);
+            rp->RingDwords[3] = READ_REGISTER_ULONG((PULONG)DevExt->GcvmRingBuf + 3);
+        }
+
+        /* Activate HQD - triggers MQD load if GCVM page tables active */
+        DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_HQD_ACTIVE, 1);
+        rp->HqdActive = DreamV3ReadRegister(DevExt, AMDBC250_REG_CP_HQD_ACTIVE);
+        KeStallExecutionProcessor(1000);
+        /* Read PGM_LO to verify MQD load (if value matches (ringPa+256)>>8, MQD loaded) */
+        rp->MqdLoadPgmLo = DreamV3ReadRegister(DevExt, AMDBC250_REG_COMPUTE_PGM_LO);
+        /* Read PQ_CONTROL + PQ_BASE to see if MQD load updated them */
+        rp->PqCtrlAfter = DreamV3ReadRegister(DevExt, AMDBC250_REG_CP_HQD_PQ_CONTROL);
+        rp->PqBaseReadback = DreamV3ReadRegister(DevExt, AMDBC250_REG_CP_HQD_PQ_BASE_LO);
+
+        rp->ScratchAfter = DreamV3ReadRegister(DevExt, AMDBC250_REG_SCRATCH_REG0);
+
+        /* Kick WPTR = offset in bytes to first unused dword */
+        {
+            ULONG totalBytes = DevExt->SavedPm4Count * sizeof(ULONG);
+            DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_HQD_PQ_WPTR_LO, totalBytes);
+            rp->WptrAfter = totalBytes;
+        }
+
+        /* Restore GRBM */
+        DreamV3WriteRegister(DevExt, AMDBC250_REG_GRBM_GFX_INDEX,
+            AMDBC250_GRBM_GFX_INDEX_BROADCAST_VAL);
+
+        /* Short poll for RPTR advance (200ms = no TDR on WDDM 2.x) */
+        {
+            ULONG waited = 0;
+            while (waited < 200) {
+                DreamV3WriteRegister(DevExt, AMDBC250_REG_GRBM_GFX_INDEX,
+                    AMDBC250_GRBM_GFX_INDEX_KIQ_VAL);
+                rp->RptrAfter = DreamV3ReadRegister(DevExt, AMDBC250_REG_CP_HQD_PQ_RPTR);
+                DreamV3WriteRegister(DevExt, AMDBC250_REG_GRBM_GFX_INDEX,
+                    AMDBC250_GRBM_GFX_INDEX_BROADCAST_VAL);
+                if (rp->RptrAfter != 0) { rp->Result = 0; break; }
+                KeStallExecutionProcessor(1000);
+                waited++;
+            }
+            if (waited >= 200) rp->Result = 1;
+        }
+
+        /* Fallback: Execute same PM4 via Software PM4 executor (bypasses ring entirely) */
+        rp->SwResult = STATUS_UNSUCCESSFUL;
+        rp->ScratchAfter = DreamV3ReadRegister(DevExt, AMDBC250_REG_SCRATCH_REG0);
+        {
+            NTSTATUS swStatus = DreamV3SwPm4Process(DevExt, DevExt->SavedPm4Cmds,
+                DevExt->SavedPm4Count, 0, 32);
+            if (NT_SUCCESS(swStatus)) {
+                rp->SwResult = 0;
+                rp->ScratchAfter = DreamV3ReadRegister(DevExt, AMDBC250_REG_SCRATCH_REG0);
+                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                    "AMDBC250-DREAM-V4.3: EXEC_RING SW fallback OK, SCRATCH=0x%08X\n",
+                    rp->ScratchAfter));
+            }
+        }
+
+        /* --- DISPATCH_DIRECT test: write s_endpgm shader and trigger --- */
+        rp->DispatchResult = 0;
+        rp->GrbmStatusBefore = 0;
+        rp->GrbmStatusAfter = 0;
+        rp->PgmLoReadback = 0;
+        rp->PgmHiReadback = 0;
+        rp->TmgMaskReadback = 0;
+        if (DevExt->GcvmRingBuf != NULL) {
+            /* Shader well past MQD + ring area (offset 3072 = dword 768) */
+            #define SHADER_OFFSET_BYTES  3072
+            ULONG64 shaderPa = DevExt->GcvmRingBufPa + SHADER_OFFSET_BYTES;
+            WRITE_REGISTER_ULONG((PULONG)((PUCHAR)DevExt->GcvmRingBuf + SHADER_OFFSET_BYTES), 0xBF810000UL);
+            KeMemoryBarrier();
+            /* Select ME=1 (MEC) */
+            DreamV3WriteRegister(DevExt, AMDBC250_REG_GRBM_GFX_INDEX,
+                AMDBC250_GRBM_GFX_INDEX_KIQ_VAL);
+            /* Set PGM_LO: read-modify-write to preserve bits 31:28 */
+            {
+                ULONG pgmLoCurrent = DreamV3ReadRegister(DevExt, AMDBC250_REG_COMPUTE_PGM_LO);
+                ULONG pgmLoNew = (pgmLoCurrent & 0xF0000000) | ((ULONG)(shaderPa & 0xFFFFFFFF) & 0x0FFFFFFF);
+                DreamV3WriteRegister(DevExt, AMDBC250_REG_COMPUTE_PGM_LO, pgmLoNew);
+                rp->PgmLoReadback = DreamV3ReadRegister(DevExt, AMDBC250_REG_COMPUTE_PGM_LO);
+            }
+            /* Set PGM_HI */
+            DreamV3WriteRegister(DevExt, AMDBC250_REG_COMPUTE_PGM_HI, (ULONG)(shaderPa >> 32));
+            rp->PgmHiReadback = DreamV3ReadRegister(DevExt, AMDBC250_REG_COMPUTE_PGM_HI);
+            /* Set STATIC_THREAD_MGMT_SE0 = allow all WGPs */
+            DreamV3WriteRegister(DevExt, AMDBC250_REG_COMPUTE_STATIC_THREAD_MGMT_SE0, 0xFFFFFFFF);
+            rp->TmgMaskReadback = DreamV3ReadRegister(DevExt, AMDBC250_REG_COMPUTE_STATIC_THREAD_MGMT_SE0);
+            rp->DispatchResult = 1;
+            /* Save GRBM_STATUS before trigger */
+            rp->GrbmStatusBefore = DreamV3ReadRegister(DevExt, AMDBC250_REG_GRBM_STATUS);
+            /* Trigger DISPATCH_DIRECT with VALID=1. Format: dimX[11:0], dimY[23:12], dimZ[31:24] */
+            ULONG packedDim = (1 & 0xFFF) | ((1 & 0xFFF) << 12) | ((1 & 0xFF) << 24);
+            DreamV3WriteRegister(DevExt, AMDBC250_REG_COMPUTE_DISPATCH_INITIATOR, packedDim);
+            DreamV3WriteRegister(DevExt, AMDBC250_REG_COMPUTE_DISPATCH_INITIATOR, 0x00075FFF);
+            rp->DispatchResult = 2;
+            /* Short poll for GRBM_STATUS change */
+            {
+                ULONG waited = 0;
+                while (waited < 50) {
+                    rp->GrbmStatusAfter = DreamV3ReadRegister(DevExt, AMDBC250_REG_GRBM_STATUS);
+                    if (rp->GrbmStatusAfter != rp->GrbmStatusBefore) {
+                        rp->DispatchResult = 3;
+                        break;
+                    }
+                    KeStallExecutionProcessor(1000);
+                    waited++;
+                }
+            }
+            /* Restore broadcast */
+            DreamV3WriteRegister(DevExt, AMDBC250_REG_GRBM_GFX_INDEX,
+                AMDBC250_GRBM_GFX_INDEX_BROADCAST_VAL);
+        }
+
+        bytesReturned = sizeof(*rp);
+        status = STATUS_SUCCESS;
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+            "AMDBC250-DREAM-V4.3: EXEC_RING: r=%u w=%u->%u r=0x%X->0x%X pqC=0x%08X->0x%08X pqB=0x%08X hqd=0x%08X sw=0x%08X sA=0x%08X\n",
+            rp->Result, rp->WptrBefore, rp->WptrAfter,
+            rp->RptrBefore, rp->RptrAfter,
+            rp->PqCtrlBefore, rp->PqCtrlAfter,
+            rp->PqBaseReadback, rp->HqdActive,
+            rp->SwResult, rp->ScratchAfter));
         break;
     }
 

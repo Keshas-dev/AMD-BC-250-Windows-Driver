@@ -30,13 +30,6 @@ Environment:
 #include "amdbc250_dream_kmd.h"
 
 /* Forward declarations */
-static NTSTATUS DreamV3SmuSendMessage(
-    _In_ PDREAM_V3_DEVICE_EXTENSION DevExt,
-    _In_ ULONG MessageId,
-    _In_ ULONG Parameter,
-    _Out_opt_ PULONG Response
-    );
-
 static NTSTATUS DreamV3SmuWaitForResponse(
     _In_ PDREAM_V3_DEVICE_EXTENSION DevExt,
     _In_ ULONG TimeoutUs
@@ -47,40 +40,6 @@ static NTSTATUS DreamV3SetPowerStateD3(_In_ PDREAM_V3_DEVICE_EXTENSION DevExt);
 static NTSTATUS DreamV3SetGpuClockMhz(_In_ PDREAM_V3_DEVICE_EXTENSION DevExt, _In_ ULONG Mhz);
 static NTSTATUS DreamV3SetMemoryClockMhz(_In_ PDREAM_V3_DEVICE_EXTENSION DevExt, _In_ ULONG Mhz);
 static NTSTATUS DreamV3SetFanSpeedPercent(_In_ PDREAM_V3_DEVICE_EXTENSION DevExt, _In_ ULONG Percent);
-
-/* ============================================================================
-   SMU v11.8 PPSMC Message IDs (Cyan Skillfish)
-   Source: drivers/gpu/drm/amd/pm/swsmu/inc/pmfw_if/smu_v11_8_ppsmc.h
-   Transport: SMN via NBIO BAR5+0x38/0x3C (Linux WREG32_PCIE/RREG32_PCIE)
-  ============================================================================ */
-
-#define SMU_MSG_TestMessage             0x1
-#define SMU_MSG_GetSmuVersion           0x2
-#define SMU_MSG_GetDriverIfVersion      0x3
-#define SMU_MSG_SetDriverDramAddrHigh   0x4
-#define SMU_MSG_SetDriverDramAddrLow    0x5
-#define SMU_MSG_TransferTableSmu2Dram   0x6
-#define SMU_MSG_TransferTableDram2Smu   0x7
-#define SMU_MSG_RequestGfxclk           0xE
-#define SMU_MSG_QueryGfxclk             0xF
-#define SMU_MSG_QueryVddcrSocClock      0x11
-#define SMU_MSG_QueryDfPstate           0x13
-#define SMU_MSG_RequestActiveWgp        0x18
-#define SMU_MSG_SetMinDeepSleepGfxclkFreq 0x19
-#define SMU_MSG_SetMaxDeepSleepDfllGfxDiv 0x1A
-#define SMU_MSG_QueryActiveWgp          0x1E
-#define SMU_MSG_SetCoreEnableMask       0x2C
-#define SMU_MSG_InitiateGcRsmuSoftReset 0x2E
-#define SMU_MSG_SetDriverTableVMID      0x34
-#define SMU_MSG_SetSoftMinCclk          0x35
-#define SMU_MSG_SetSoftMaxCclk          0x36
-#define SMU_MSG_GetGfxFrequency         0x37
-#define SMU_MSG_GetGfxVid               0x38
-#define SMU_MSG_ForceGfxFreq            0x39
-#define SMU_MSG_UnForceGfxFreq          0x3A
-#define SMU_MSG_ForceGfxVid             0x3B
-#define SMU_MSG_UnforceGfxVid           0x3C
-#define SMU_MSG_GetEnabledSmuFeatures   0x3D
 
 /* SMU response codes */
 #define SMU_RESULT_OK                   0x1
@@ -131,7 +90,7 @@ static void SmnWrite(
    Direct BAR5 offsets 0x16A08/0xA48/0xA68 read 0 -- MP1 NOT mapped into BAR5.
   ============================================================================ */
 
-static NTSTATUS
+NTSTATUS
 DreamV3SmuSendMessage(
     _In_ PDREAM_V3_DEVICE_EXTENSION DevExt,
     _In_ ULONG MessageId,
@@ -312,6 +271,57 @@ DreamV3SmuInitialize(_In_ PDREAM_V3_DEVICE_EXTENSION DevExt)
 
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                "AMDBC250-DREAM-V4.3: SMU initialization complete\n"));
+
+    return STATUS_SUCCESS;
+}
+
+/* ============================================================================
+   DreamV3SmuWakeGfx - Wake GFX from GFXOFF deep sleep
+
+   BC-250 enters GFXOFF (bit 2 in SMU features) at boot, gating the entire
+   GFX block. The MEC/CP cannot process ring buffers without a clock.
+
+   Strategy:
+   1. Disallow GFXOFF via PPSMC message 0x1C
+   2. Set soft minimum GFX clock via message 0x35 (param = 200 MHz)
+   3. Small delay for clock ramp
+
+   Returns STATUS_SUCCESS even on partial success (best effort).
+  ============================================================================ */
+
+NTSTATUS
+DreamV3SmuWakeGfx(_In_ PDREAM_V3_DEVICE_EXTENSION DevExt)
+{
+    NTSTATUS Status;
+
+    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+        "AMDBC250-DREAM-V4.3: SMU Wake GFX from GFXOFF\n"));
+
+    if (DevExt == NULL || DevExt->MmioVirtualBase == NULL) {
+        return STATUS_DEVICE_NOT_READY;
+    }
+
+    /* Strategy:
+    1. REPLACED: GFXOFF is not controllable via SMU message 0x1C (StopTelemetryReporting).
+       Loading a proper DriverPPTable is required to initialize DPM/GFXOFF.
+    2. Set soft minimum GFX clock via message 0x35 (param = 200 MHz)
+    3. Small delay for clock ramp
+
+    TODO: Implement DriverPPTable loading to initialize DPM.
+    */
+    KeStallExecutionProcessor(1000);
+
+    Status = DreamV3SmuSendMessage(DevExt, SMU_MSG_SetSoftMinCclk, 20000, NULL);
+    if (!NT_SUCCESS(Status)) {
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+            "AMDBC250-DREAM-V4.3: SetSoftMinCclk(200MHz) failed: 0x%08X\n", Status));
+        return Status;
+    }
+
+    KeStallExecutionProcessor(10000);
+
+    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+        "AMDBC250-DREAM-V4.3: SMU Wake GFX complete\n"));
 
     return STATUS_SUCCESS;
 }
