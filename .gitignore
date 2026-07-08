@@ -85,3 +85,6 @@ Vulkan/
 mesa-aco/
 delete
 disable.ps1
+
+*.csv
+

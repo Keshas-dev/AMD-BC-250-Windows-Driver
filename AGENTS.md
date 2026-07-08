@@ -566,4 +566,27 @@ DEFAULT_QUEUE_ADDRS = {
 8. **Even with GFXOFF+CG+PG off + frequency forced, WGPs remain 0** — SPI_PG_ENABLE_STATIC_WGP_MASK is hardware read-only.
 9. **Not a DPM table issue** — governor proves safe sequence works without tables; WGPs are fused, not clock-gated.
 
+## 2026-07-08: PSP driver signing fix + comprehensive test run
+
+### PSP signing fix
+- **Root cause**: `build.bat` only searched `x64\` for Inf2Cat; Inf2Cat was in `x86\` directory (WDK 10.0.26100.0)
+- **Fix**: Added `x86\` path search for Inf2Cat, fixed build order (sign .sys → generate .cat → sign .cat), fixed Inf2Cat OS param (`11_X64` → `10_X64`)
+- **Result**: PSP driver now installs without "not digitally signed" error — both .sys and .cat properly signed
+
+### Test results (all pass)
+| Test | Result | Notes |
+|------|--------|-------|
+| `psp-status-test` | ✅ | PSP driver OK, BAR5 mapped, SOS alive (C2PMSG_81=0xF0000010) |
+| `bar5-smn-test` | ✅ | SMU v88.6.0 (driver_if=8), 1500 MHz, features 0xDD602C7D |
+| `smu-monitor` | ✅ | Stable 1500 MHz @ 931 mV, 0 WGPs, mem temp ~0xC2, all fans/power sensors=0 |
+| `governor-sequence` | ✅ | **Frequency change 1500→1166 MHz** — SMU frequency control confirmed working |
+| `gfxoff-kill-v2` | ✅ | GFXOFF+CG+PG disabled, CC_ARRAY partially writable, SPI_PG_WGP_MASK(0x5C3C) RO=0 |
+| `dcn-init-test` | ✅ | DCN mostly RO, Pipe 3 OTG (0x6300) has live counter 0x270D |
+
+### Key discoveries
+- SMU mailbox via SMN (NBIO 0x38/0x3C) fully functional — TestMessage, GetSmuVersion, GetEnabledSmuFeatures, ForceGfxFreq all work
+- Governor sequence (Q3 max_temp → Q0 unforce → Q3 perf_profile → Q0 force_vid → Q0 force_freq) safe and effective
+- DISPATCH_INITIATOR(0x80E0) accepts VALID command but shader array never executes (WGPs=0)
+- SPI_PG_ENABLE_STATIC_WGP_MASK(0x5C3C) confirmed hardware read-only at 0 — compute permanently fused
+
 
