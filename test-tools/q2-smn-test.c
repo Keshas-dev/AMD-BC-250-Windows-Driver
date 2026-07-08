@@ -92,20 +92,23 @@ int main() {
     int r4=q2Send(0x09,0,0);
     printf("q2_0x09 = %d\n",r4);
 
+    /* Define helper for Q0 queries that returns uint32_t */
+    #define Q0VAL(msg) (uint32_t)q0Send(msg,0)
+
     /* Step 3: Disable GFXOFF via Queue 2 message 0x06 */
     /* GFXOFF = feature bit 2. mask = (1<<2) = 4 */
     printf("\n=== Disable GFXOFF via Queue 2 msg 0x06 ===\n");
-    uint32_t before=smuMsg0(0x37,0);
+    uint32_t before=Q0VAL(0x37);
     printf("Before: GfxFreq=%u MHz ActiveWgp=%u Features=0x%08X\n",
-        before/100, smuMsg0(0x1E,0), smuMsg0(0x3D,0));
+        before, Q0VAL(0x1E), Q0VAL(0x3D));
     /* Also try Enable/Disable features */
     int de=q2Send(0x06,4,0); /* disable_smu_features, mask=bit2 */
     printf("disable_smu_features(bit2=GFXOFF): %d\n",de);
     Sleep(100);
-    uint32_t f=smuMsg0(0x37,0);
-    uint32_t w=smuMsg0(0x1E,0);
-    uint32_t fe=smuMsg0(0x3D,0);
-    printf("After: GfxFreq=%u MHz ActiveWgp=%u Features=0x%08X\n",f/100,w,fe);
+    uint32_t f=Q0VAL(0x37);
+    uint32_t w=Q0VAL(0x1E);
+    uint32_t fe=Q0VAL(0x3D);
+    printf("After: GfxFreq=%u MHz ActiveWgp=%u Features=0x%08X\n",f,w,fe);
     if(fe&4) printf("  GFXOFF still enabled\n");
     else printf("  GFXOFF DISABLED!\n");
 
@@ -113,7 +116,7 @@ int main() {
     int en=q2Send(0x05,4,0); /* enable_smu_features, mask=bit2 */
     printf("enable_smu_features(bit2=GFXOFF): %d\n",en);
     Sleep(100);
-    printf("Features after re-enable: 0x%08X\n",smuMsg0(0x3D,0));
+    printf("Features after re-enable: 0x%08X\n",Q0VAL(0x3D));
 
     /* Step 4: Try to cancel GFXOFF again and set voltage+freq */
     printf("\n=== Try full wake sequence ===\n");
@@ -135,11 +138,11 @@ int main() {
     q0Send(0x39,1175);
     Sleep(200);
 
-    f=smuMsg0(0x37,0);
-    w=smuMsg0(0x1E,0);
-    printf("Result: GfxFreq=%u MHz ActiveWgp=%u\n",f/100,w);
+    f=Q0VAL(0x37);
+    w=Q0VAL(0x1E);
+    printf("Result: GfxFreq=%u MHz ActiveWgp=%u\n",f,w);
     
-    if(f/100>15) printf("*** GFX IS AWAKE! ***\n");
+    if(f>15) printf("*** GFX IS AWAKE! ***\n");
     else printf("GFX still sleeping\n");
 
     /* Step 5: Cleanup */
@@ -147,7 +150,7 @@ int main() {
     q0Send(0x3A,0); /* unforce_gfx_freq */
     q0Send(0x3C,0); /* unforce_gfx_vid */
     q2Send(0x05,4,0); /* re-enable GFXOFF */
-    printf("Features=0x%08X\n",smuMsg0(0x3D,0));
+    printf("Features=0x%08X\n",Q0VAL(0x3D));
 
     CloseHandle(h);
     printf("DONE\n");

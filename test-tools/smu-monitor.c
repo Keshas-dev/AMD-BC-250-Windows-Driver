@@ -65,7 +65,8 @@ int main(){
 
     r=q0(2,0); uint32_t ver=q0_arg();
     r=q0(3,0); uint32_t drv=q0_arg();
-    printf("SMU v%d.%d.%d (driver_if=%d)\n",(ver>>20)&0xFF,(ver>>8)&0xFF,ver&0xFF,drv);
+    /* SMU version format: bits[23:16]=major, bits[15:8]=minor, bits[7:0]=patch */
+    printf("SMU v%d.%d.%d (driver_if=%d)\n",(ver>>16)&0xFF,(ver>>8)&0xFF,ver&0xFF,drv);
 
     /* Single shot read */
     printf("\n=== Single Shot ===\n");

@@ -85,14 +85,14 @@ int main() {
         uint32_t r=smuSend(0x0B,bigParams[i]);
         printf("0x%08X\n",r);
         Sleep(100);
-        printf("  -> GfxFreq=%u MHz\n",smuSend(0x37,0)/100);
+        printf("  -> GfxFreq=%u MHz\n",smuSend(0x37,0));
     }
 
     /* Quick final state */
     printf("\n=== Final ===\n");
     printf("TestMessage=0x%08X\n",smuSend(0x01,0));
     printf("Features=0x%08X\n",smuSend(0x3D,0));
-    printf("GfxFreq=%u MHz\n",smuSend(0x37,0)/100);
+    printf("GfxFreq=%u MHz\n",smuSend(0x37,0));
     printf("0x11=0x%08X 0x2F=0x%08X\n",smuSend(0x11,0),smuSend(0x2F,0));
 
     CloseHandle(h);

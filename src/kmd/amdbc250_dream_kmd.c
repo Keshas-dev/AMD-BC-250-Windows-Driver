@@ -621,8 +621,10 @@ DreamV3DdiStartDevice(
     }
 
     /* Save DXGKRNL interface and device handle */
-    DevExt->DxgkInterface = *DxgkInterface;
-    DevExt->DxgkDeviceHandle = DxgkInterface->DeviceHandle;  /* Handle is in interface struct */
+    if (DxgkInterface) {
+        DevExt->DxgkInterface = *DxgkInterface;
+        DevExt->DxgkDeviceHandle = DxgkInterface->DeviceHandle;
+    }
 
     /* Get device information */
     DXGK_DEVICE_INFO DeviceInfo = {0};
@@ -3993,7 +3995,10 @@ DreamV3DeviceControl(
                  * uses the correct ring offset (after commands, not at old WritePointer). */
                 DevExt->GfxRing.WritePointer = WPtr;
 
-                /* Write EOP fence BEFORE doorbell */
+                /* Write EOP fence BEFORE doorbell
+                 * NOTE: Fence PM4 is written to GfxRing buffer but doorbell
+                 * below kicks HQD/KIQ ring — fence never consumed by HW.
+                 * TODO: Move fence to SavedPm4Cmds/KIQ ring instead. */
                 if (SendPm4->FenceValue > 0) {
                     DreamV3WriteEopFence(DevExt, (ULONG64)SendPm4->FenceValue);
                     WPtr = DevExt->GfxRing.WritePointer;
@@ -5830,13 +5835,17 @@ DreamV3DeviceControl(
             dump->HqdPqRptrKiq        = DUMP_REG32(0x912C);
             dump->HqdPqWptrLoKiq      = DUMP_REG32(0x91DC);
             dump->HqdVmidKiq          = DUMP_REG32(0x9110);
+            /* NOTE: These read at the SAME offsets as KIQ above because
+             * GRBM_GFX_INDEX is not changed to select ME=0 (GFX) vs ME=1 (KIQ).
+             * Without ME selection, these return the current (KIQ) values.
+             * To read actual compute HQD, write GRBM_GFX_INDEX=0 first. */
             dump->HqdActiveCmp        = DUMP_REG32(0x910C);
             dump->HqdPqBaseCmp        = DUMP_REG32(0x9124);
             dump->HqdPqBaseHiCmp      = DUMP_REG32(0x9128);
             dump->HqdPqRptrCmp        = DUMP_REG32(0x912C);
             dump->HqdPqWptrCmp        = DUMP_REG32(0x91DC);
             dump->HqdVmidCmp          = DUMP_REG32(0x9110);
-            dump->HqdAqCntlCmp        = DUMP_REG32(0x90F0);
+            dump->HqdAqCntlCmp        = DUMP_REG32(0x9148);
 
             /* GCVM registers */
             dump->GcvmL2Cntl          = DUMP_REG32(0x0B360);
@@ -6041,7 +6050,7 @@ DreamV3DeviceControl(
             #define BIOS_KIQ_BASE_HI  0xE064
             #define BIOS_KIQ_RPTR_OFF 0xE06C
             #define BIOS_KIQ_WPTR_OFF 0xE078
-            #define BIOS_HQD_ACTIVE   0xDAC0
+            #define BIOS_HQD_ACTIVE   0x910C  /* CORRECTED: was 0xDAC0 (old uncorrected offset) */
             #define BIOS_GCVM_CONTEXT0_CNTL    0x0B460
             #define BIOS_GCVM_CONTEXT0_PT_BASE_LO 0x6C8C
 
@@ -6078,8 +6087,9 @@ DreamV3DeviceControl(
             /* If KIQ_BASE is still 0xFFFFFFFF (GFXOFF) or 0, try HQD_PQ_BASE as fallback */
             if (ringPa.LowPart == 0xFFFFFFFF || ringPa.HighPart == 0xFFFFFFFF ||
                 (ringPa.LowPart == 0 && ringPa.HighPart == 0)) {
-                UINT32 pqLo = BIOS_READ(0xDAD8);
-                UINT32 pqHi = BIOS_READ(0xDADC);
+                /* CORRECTED offsets: was 0xDAD8/0xDADC (old uncorrected) */
+                UINT32 pqLo = BIOS_READ(0x9124);
+                UINT32 pqHi = BIOS_READ(0x9128);
                 KdPrint(("KIQ_BIOS_RING KIQ_BASE=0x%08X%08X trying HQD_PQ_BASE=0x%08X%08X\n",
                     ringPa.HighPart, ringPa.LowPart, pqHi, pqLo));
                 if (pqLo != 0xFFFFFFFF && pqLo != 0) {

@@ -2,7 +2,6 @@
 #include <windows.h>
 #include <stdio.h>
 #include <stdint.h>
-#include <memory.h>
 #include "..\inc\amdbc250_ioctl.h"
 
 static HANDLE h;
@@ -28,7 +27,7 @@ int main(){
     if(h==INVALID_HANDLE_VALUE){printf("FAIL gle=%lu\n",GetLastError());return 1;}
     AMDBC250_IOCTL_INIT_HARDWARE ih; DWORD br=0;
     ZeroMemory(&ih,sizeof(ih)); ih.MmioPhysicalBase=0xFE800000ULL; ih.MmioSize=0x80000; ih.Flags=AMDBC250_INIT_FLAG_NBIO_MAP;
-    if(!DeviceIoControl(h,IOCTL_AMDBC250_INIT_HARDWARE,&ih,sizeof(ih),&ih,sizeof(ih),&br,NULL)){printf("INIT fail\n");return 1;}
+    if(!DeviceIoControl(h,IOCTL_AMDBC250_INIT_HARDWARE,&ih,sizeof(ih),&ih,sizeof(ih),&br,NULL)){printf("INIT fail\n");CloseHandle(h);return 1;}
 
     printf("=== DCN 2.1 Display Engine Probe ===\n\n");
 

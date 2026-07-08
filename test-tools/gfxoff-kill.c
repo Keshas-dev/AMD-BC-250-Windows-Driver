@@ -71,8 +71,9 @@ int main(){
     if(r==1){ uint32_t c=q2_arg(); printf("  Q2_0x03 constant = %u (expect 23)\n",c); }
 
     r=q2(4,0,0); /* device name chunk index 0 */
-    printf("Q2 device_name[0]=0x%08X ('%c%c%c%c')\n",q2_arg(),
-        (char)(q2_arg()&0xFF),(char)((q2_arg()>>8)&0xFF),(char)((q2_arg()>>16)&0xFF),(char)((q2_arg()>>24)&0xFF));
+    uint32_t devname=q2_arg();
+    printf("Q2 device_name[0]=0x%08X ('%c%c%c%c')\n",devname,
+        (char)(devname&0xFF),(char)((devname>>8)&0xFF),(char)((devname>>16)&0xFF),(char)((devname>>24)&0xFF));
 
     /* Disable GFXOFF: mask_low=bit2=4, mask_high=0 */
     printf("Sending disable_smu_features(mask=4) for GFXOFF...\n");
@@ -109,8 +110,8 @@ int main(){
     q2(5,4,0); /* enable GFXOFF */
     q0(0x3A,0); q0(0x3C,0);
     Sleep(100);
-    r=q0(0x37,0); printf("Final Freq=%u\n",q0_arg());
-    r=q0(0x3D,0); printf("Final Feat=0x%08X GFXOFF=%s\n",q0_arg(),(q0_arg()&4)?"ON":"OFF");
+    r=q0(0x37,0); uint32_t final_freq=q0_arg(); printf("Final Freq=%u\n",final_freq);
+    r=q0(0x3D,0); uint32_t final_feat=q0_arg(); printf("Final Feat=0x%08X GFXOFF=%s\n",final_feat,(final_feat&4)?"ON":"OFF");
 
     CloseHandle(h);
     return 0;

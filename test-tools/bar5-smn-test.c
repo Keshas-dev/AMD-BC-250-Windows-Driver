@@ -35,6 +35,7 @@ static int WaitC2p90(uint32_t exp, int ms) {
 static uint32_t SmuQuery(uint16_t msg) {
     uint32_t c90 = SmnRead(C2PMSG_90);
     if (c90 == 1) SmnWrite(C2PMSG_90, 0);
+    SmnWrite(C2PMSG_82, 0);  /* clear ARG before CMD */
     SmnWrite(C2PMSG_66, msg);
     if (!WaitC2p90(1, 500)) return 0xFFFFFFFF;
     return SmnRead(C2PMSG_82);
@@ -87,8 +88,8 @@ int main() {
     v = SmuQuery(0x3);  printf("GetDriverIfVersion:  0x%08X (%u)\n", v, v);
     v = SmuQuery(0x3D); printf("Features:            0x%08X (GFXCLK=%s GFXOFF=%s)\n", v,
         (v&1)?"ON":"OFF", (v&4)?"ON":"OFF");
-    v = SmuQuery(0x37); printf("GfxFreq:             %u MHz\n", v/100);
-    v = SmuQuery(0x0F); printf("GfxClk:              %u MHz\n", v/100);
+    v = SmuQuery(0x37); printf("GfxFreq:             %u MHz\n", v);
+    v = SmuQuery(0x0F); printf("GfxClk:              %u MHz\n", v);
     v = SmuQuery(0x38); printf("GfxVid:              0x%08X\n", v);
     v = SmuQuery(0x1E); printf("ActiveWgp:           %u\n", v);
     v = SmuQuery(0x0C); printf("CorePstate:          0x%08X\n", v);
@@ -102,7 +103,7 @@ int main() {
     v = SmuQueryParam(0x35, 20000);
     printf("  Response: 0x%08X\n", v);
     Sleep(100);
-    v = SmuQuery(0x37); printf("  GfxFreq after: %u MHz\n", v/100);
+    v = SmuQuery(0x37); printf("  GfxFreq after: %u MHz\n", v);
     v = SmuQuery(0x1E); printf("  ActiveWgp: %u\n", v);
 
     /* SetSoftMaxCclk (0x36) — set maximum GFX clock */
@@ -110,7 +111,7 @@ int main() {
     v = SmuQueryParam(0x36, 40000);
     printf("  Response: 0x%08X\n", v);
     Sleep(500);
-    v = SmuQuery(0x37); printf("  GfxFreq after: %u MHz\n", v/100);
+    v = SmuQuery(0x37); printf("  GfxFreq after: %u MHz\n", v);
     v = SmuQuery(0x1E); printf("  ActiveWgp: %u\n", v);
 
     /* Try SetSoftMinDeepSleepGfxclkFreq (0x19) with 0 = disable deep sleep */
@@ -119,7 +120,7 @@ int main() {
     v = SmuQueryParam(0x19, 0);
     printf("  Response: 0x%08X\n", v);
     Sleep(500);
-    v = SmuQuery(0x37); printf("  GfxFreq: %u MHz\n", v/100);
+    v = SmuQuery(0x37); printf("  GfxFreq: %u MHz\n", v);
     v = SmuQuery(0x1E); printf("  ActiveWgp: %u\n", v);
 
     /* NOTE: SMU v11.8 has NO DisableSmuFeatures/EnableSmuFeatures messages.
@@ -131,21 +132,21 @@ int main() {
     v = SmuQueryParam(0x19, 5000);
     printf("  Response: 0x%08X\n", v);
     Sleep(300);
-    v = SmuQuery(0x37); printf("  GfxFreq: %u MHz\n", v/100);
+    v = SmuQuery(0x37); printf("  GfxFreq: %u MHz\n", v);
 
     /* SetMaxDeepSleepDfllGfxDiv (0x1A) = minimize divider during deep sleep */
     printf("\nSetMaxDeepSleepDfllGfxDiv(0x1A, 1)...\n");
     v = SmuQueryParam(0x1A, 1);
     printf("  Response: 0x%08X\n", v);
     Sleep(300);
-    v = SmuQuery(0x37); printf("  GfxFreq: %u MHz\n", v/100);
+    v = SmuQuery(0x37); printf("  GfxFreq: %u MHz\n", v);
 
     /* Try RequestActiveWgp (0x18) — valid v11.8 msg, may wake GFX */
     printf("\nRequestActiveWgp(0x18)...\n");
     v = SmuQueryParam(0x18, 0);
     printf("  Response: 0x%08X\n", v);
     Sleep(100);
-    v = SmuQuery(0x37); printf("  GfxFreq: %u MHz\n", v/100);
+    v = SmuQuery(0x37); printf("  GfxFreq: %u MHz\n", v);
     v = SmuQuery(0x1E); printf("  ActiveWgp: %u\n", v);
 
     /* NOTE: RequestGfxclk(0xE, 1000) set freq to 10 MHz (side effect).
@@ -162,7 +163,7 @@ int main() {
     printf("\n=== Cleanup ===\n");
     SmuQueryParam(0x35, 0);  /* Reset soft min */
     SmuQueryParam(0x36, 0);  /* Reset soft max */
-    v = SmuQuery(0x37); printf("GfxFreq after reset: %u MHz\n", v/100);
+    v = SmuQuery(0x37); printf("GfxFreq after reset: %u MHz\n", v);
 
     CloseHandle(g_hDev);
     printf("\nDONE\n");

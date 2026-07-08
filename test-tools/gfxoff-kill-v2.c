@@ -55,10 +55,10 @@ int main(){
     if(r!=1||tst!=124){printf("SMU dead\n");CloseHandle(h);return 1;}
 
     /* Save initial state */
-    uint32_t savedFeat=q0_arg();
+    r=q0(0x3D,0); uint32_t savedFeat=q0_arg();
     r=q0(0x37,0); uint32_t savedFreq=q0_arg();
     r=q0(0x1E,0); uint32_t savedWgp=q0_arg();
-    printf("Initial: Freq=%u Wgp=%u\n",savedFreq,savedWgp);
+    printf("Initial: Freq=%u Wgp=%u Feat=0x%08X\n",savedFreq,savedWgp,savedFeat);
 
     /* Save BAR5 registers we'll modify */
     uint32_t savedCcCfg=R32(0x9C1C);

@@ -151,8 +151,6 @@ DreamV3SmuWaitForResponse(
     const ULONG PollIntervalUs = 100;
     ULONG SmuStatus;
 
-    UNREFERENCED_PARAMETER(DevExt);
-
     while (ElapsedUs < TimeoutUs) {
         SmuStatus = SmnRead(DevExt, SMU_SMN_C2PMSG_90);
 

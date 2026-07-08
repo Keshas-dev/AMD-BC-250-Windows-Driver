@@ -68,11 +68,12 @@ int main() {
     printf("=== Pre-init SMU state ===\n");
     uint32_t v;
     printf("  Features:  0x%08X\n", SmuQuery(0x3D));
-    printf("  GfxFreq:   %u MHz\n", SmuQuery(0x37)/100);
+    printf("  GfxFreq:   %u MHz\n", SmuQuery(0x37));
     printf("  GfxVid:    0x%08X\n", SmuQuery(0x38));
     printf("  ActiveWgp: %u\n",   SmuQuery(0x1E));
 
     printf("\n=== Step 1: SetDriverDramAddr (PPSMC 0x04/0x05) ===\n");
+    printf("  *** WARNING: These require DRAM table setup, will likely fail ***\n");
     uint64_t pa = 0xC0000000ULL;
     printf("  Using VRAM base PA=0x%016llX\n", pa);
     v = SmuSend(0x4, (uint32_t)(pa>>32));
@@ -81,10 +82,13 @@ int main() {
     printf("  SetDriverDramAddrLow:  0x%08X %s\n", v, v==1?"OK":"FAIL");
 
     printf("\n=== Step 2: TransferTableDram2Smu (PPSMC 0x07) ===\n");
+    printf("  *** WARNING: Known to hang SMN bus! ***\n");
     v = SmuSend(0x7, 0);
     printf("  TransferTableDram2Smu: 0x%08X %s\n", v, v==1?"OK":"FAIL");
 
     printf("\n=== Step 3: RequestGfxclk (PPSMC 0x0E) ===\n");
+    printf("  *** WARNING: RequestGfxclk(0x0E) can CRASH the SMU! ***\n");
+    printf("  *** Use ForceGfxFreq(0x39) with governor sequence instead ***\n");
     uint32_t freqs[] = {50000, 100000, 150000, 200000};
     const char* labels[] = {"500 MHz", "1000 MHz", "1500 MHz", "2000 MHz"};
     for (int i = 0; i < 4; i++) {
@@ -98,7 +102,7 @@ int main() {
 
     printf("\n=== Post-init SMU state ===\n");
     uint32_t feat = SmuQuery(0x3D);
-    v = SmuQuery(0x37)/100;
+    v = SmuQuery(0x37);
     printf("  Features:  0x%08X (GFXCLK=%s GFXOFF=%s)\n", feat,
         (feat&1)?"ON":"OFF", (feat&4)?"ON":"OFF");
     printf("  GfxFreq:   %u MHz\n", v);
