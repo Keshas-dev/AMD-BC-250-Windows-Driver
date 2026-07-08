@@ -50,44 +50,45 @@ AMD BC-250 Windows driver project by Keshas. Goal: fully working GPU driver for 
 - ✅ **PATH 3 fallback** in SEND_PM4 — when PSP KIQ and GfxRing are both unavailable
 - ✅ Recursion depth guard (max 32) — prevents stack overflow
 
-## Recent Bug Fixes & Findings (2026-07-03)
+## Latest Bug Fixes & Findings (2026-07-08)
 
-### ✓ PSP GPU PM4 Submit IOCTL Works!
-- **Root cause of error 87**: `METHOD_BUFFERED` buffer sharing bug — `RtlZeroMemory` was clearing `req->CommandCount` before it was read
-- **Fix**: Save/restore fields around RtlZeroMemory
-- IOCTL now succeeds: PM4 commands written to KIQ ring, WPTR kicked (0→5→10)
-- GPU MEC still doesn't process (ME halted, KIQ_BASE/KIQ_SIZE=0)
+### ✓ PSP Driver Signing Fixed!
+- **Root cause**: `build.bat` searched only `x64\` for Inf2Cat, but WDK 10.0.26100.0 has it in `x86\` directory
+- **Fallback**: Without Inf2Cat, build fell back to `makecat.exe` which generates an incomplete catalog (1565 bytes vs Inf2Cat's 4439 bytes)
+- **Result**: Windows rejected the PSP driver with "not digitally signed" for System class drivers
+- **Fix**: Added `x86\` path search for Inf2Cat, fixed build order (sign .sys → Inf2Cat → sign .cat), fixed OS param (`11_X64` → `10_X64`)
 
-### ✓ PSP Driver Bug Fixes (6 critical/high bugs found by agent analysis)
-1. **CRITICAL**: `PspGpuProxyInit` holds spinlock while calling `ZwCreateFile` (DISPATCH_LEVEL violation)
-2. **HIGH**: IOCTL size check requires full 268-byte struct → dynamic via FIELD_OFFSET
-3. **HIGH**: METHOD_BUFFERED buffer sharing → RtlZeroMemory corrupts request fields
-4. **HIGH**: NBIO unlock writes to GPU BAR5 instead of PSP BAR0 → silently failing
-5. **HIGH**: Handle leak race in PspGpuProxyInit
-6. **MEDIUM**: GRBM_STATUS reads CC_CONFIG (0x3264) instead of GRBM_STATUS (0x3260)
+### ✓ SMU v88.6.0 Fully Functional via SMN (NBIO 0x38/0x3C)
+- **SMN access via NBIO** BAR5+0x38/0x3C works — Linux `WREG32_PCIE`/`RREG32_PCIE` path
+- **SMU firmware running**: FW_FLAGS=0x00000001, PUB_CTRL=0, version 88.6.0, driver_if=8
+- **Enabled features**: 0xDD602C7D (GFXCLK DPM, GFXOFF, CG, PG — all standard)
+- **C2PMSG mailbox** via SMN (0x03B10A08/0x03B10A48/0x03B10A68), NOT BAR5 direct (reads 0)
 
-### ✓ GFX Ring Investigation Finalized
-- **Range A (0xDA60+)**: WPTR writable, BASE read-only=0, RPTR=0x01200000 (bit 24 fixed), **does not process**
-- **Range B (Linux 0x89E0+)**: Mostly dead/read-only, **does not process**
-- **Conclusion**: MEC/CP engines appear permanently disabled at hardware level
+### ✓ Governor Sequence Works (Frequency Control)
+- Full SafePoint sequence proven safe: Q3 test → max temp → unforce → perf profile → force VID → force freq
+- **1500→1166 MHz frequency change** confirmed working without DPM tables
+- GPU never crashes when following the exact governor sequence
 
-### SMU v11.8
-- ✅ **MP1_BASE**=0x16000, C2PMSG_66/82/90, THM_BASE=0x16600
-- ✅ Protocol: clear C2PMSG_90 → arg → msg → poll
-- ✅ SMU minimal: no PowerUpGfx, EnableDpmFeature, SetFanSpeedPercent
+### ✓ All 6 Test Executables Pass
+| Test | Result | Purpose |
+|------|--------|---------|
+| `psp-status-test` | ✅ | PSP driver, BAR5 mapping, SOS status |
+| `bar5-smn-test` | ✅ | SMU mailbox via SMN, freq, VID, features |
+| `smu-monitor` | ✅ | Live telemetry: freq, temp, fans, power |
+| `governor-sequence` | ✅ | SMU freq/voltage control via governor |
+| `gfxoff-kill-v2` | ✅ | GFXOFF+CG+PG disable, compute trigger |
+| `dcn-init-test` | ✅ | DCN display engine probe, OTG counter |
 
-### Bug Detection & Fixes
-- ✅ **PM4 TYPE3 header encoding** — all tests used wrong `0xC0370003` (opcode=0, count=56 instead of IT_WRITE_DATA)
-- ✅ **IC_BASE offsets** — were 0x7C10-0x7C18, correct 0x17390-0x17398
-- ✅ **IC_BASE_CNTL** — wrote 0x100 (ENABLE) before setting base address; fixed to LO→HI→CNTL=0
-- ✅ **UCODE_ADDR** — missing polling (500ms timeout) before unhalt
-- ✅ **SDMA init** — caused BSOD 0x1a (MEMORY_MANAGEMENT); fixed with sanity check + double-init guard
-- ✅ **KIQ deactivation** — must deactivate before writing KIQ registers (otherwise hang)
-- ✅ **GRBM_GFX_INDEX** — must restore to broadcast (0xE0000000) after tests
-- ✅ **fw_load.c BAR5_U32** — CRITICAL: volatile ptr silently dropped on Win11 26100; fixed to WRITE_REGISTER_ULONG
-- ✅ **Integer overflow** fw validation + JT bounds + ring wrap + READ/WRITE_REG bounds — all 4 fixed
-- ✅ **LOAD_CP_FW halt scope** — no longer halts ALL engines for MEC-only loads
-- ✅ **PSP driver fixes** — body_size mismatch, ring size cap (9-bit WPTR), proxy write return checks, race condition
+### ✓ Compute Confirmed Fused Off
+- DISPATCH_INITIATOR(0x80E0) accepts VALID command (consumed=YES)
+- GRBM_STATUS=0, Scratch unchanged, QueryActiveWgp=0 — no shader execution
+- SPI_PG_ENABLE_STATIC_WGP_MASK(0x5C3C) = READ-ONLY 0 — WGPs hardware-fused
+- Consistent with Mesa MR 33116, ROCm issue #6313, RADV `RADV_DEBUG=nocompute`
+
+### Previous Bug Fixes (2026-07-03)
+- ✅ PSP GPU PM4 Submit IOCTL: METHOD_BUFFERED buffer sharing bug fixed
+- ✅ 6 critical/high PSP driver bugs fixed (spinlock in ZwCreateFile, OOB size check, etc.)
+- ✅ GFX Ring investigation finalized: MEC/CP engines do not process
 
 ---
 
@@ -99,6 +100,7 @@ AMD BC-250 Windows driver project by Keshas. Goal: fully working GPU driver for 
 3. **CP_HQD writability claim** — previously claimed 0xDAC0+ are writable; actually NBIO-blocked. Misled by aliased/stale readback values.
 4. **RLC firmware loading** — attempted to load RLC firmware via 0x3A00 registers which are in FREEZE ZONE (0x3400-0x8100) — BC-250 BIOS/SMU loads RLC.
 5. **KIQ_SIZE patch expectation** — believed MEC firmware could be patched to fix KIQ_SIZE=0; but 0xE068 address not found in firmware binary — check is hardware-level.
+6. **PSP driver signing — Inf2Cat in x86\ not x64\** — build.bat only searched x64\ for Inf2Cat, but WDK 10.0.26100.0 has it in x86\. Fallback to makecat generated incomplete catalog — PSP driver rejected as "not digitally signed".
 
 ### Wasted Effort
 1. **GRBM_GFX_CNTL (0x2022)** — attempted to unlock HQD access; doesn't work on BC-250.
@@ -233,12 +235,15 @@ build.bat
 
 ### Test
 ```cmd
-output\gcvm-pt-test.exe         # GCVM page table setup + KIQ test
-output\gpu-kiq-test.exe         # PM4 ring execution test (uses wrong header)
-output\safe-test.exe            # Safe read-only register test
-output\iommu-gcvm-check.exe     # IOMMU + GCVM register scan
-output\kiq-diag.exe             # Full KIQ diagnostic
-test-tools\sw-pm4-test.exe      # Software PM4 executor test (confirmed working)
+output\bar5-smn-test.exe         # SMU mailbox via SMN (freq, VID, features)
+output\smu-monitor.exe           # Live SMU telemetry (CSV logging)
+output\governor-sequence.exe     # SMU frequency control test
+output\gfxoff-kill-v2.exe        # GFXOFF+CG+PG disable + compute trigger
+output\dcn-init-test.exe         # DCN display engine probe
+output\psp-status-test.exe       # PSP driver status + BAR5 mapping
+output\gcvm-pt-test.exe          # GCVM page table setup + KIQ test
+output\smu-scan-all.exe          # SMU register space scanner
+test-tools\sw-pm4-test.exe       # Software PM4 executor test (confirmed working)
 ```
 
 ---
