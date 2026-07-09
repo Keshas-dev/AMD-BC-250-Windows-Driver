@@ -158,9 +158,13 @@ DreamV3ReadVbiosFromFile(
 
     status = ZwQueryInformationFile(handle, &ioStatus, &fileInfo,
         sizeof(fileInfo), FileStandardInformation);
-    if (!NT_SUCCESS(status) || fileInfo.EndOfFile.QuadPart == 0) {
+    if (!NT_SUCCESS(status)) {
         ZwClose(handle);
         return status;
+    }
+    if (fileInfo.EndOfFile.QuadPart == 0) {
+        ZwClose(handle);
+        return STATUS_END_OF_FILE;
     }
 
     ULONG fileSize = (ULONG)fileInfo.EndOfFile.QuadPart;

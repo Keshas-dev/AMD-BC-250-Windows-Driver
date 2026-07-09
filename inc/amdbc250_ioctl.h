@@ -440,6 +440,24 @@ typedef struct _AMDBC250_IOCTL_GPU_KIQ_TEST {
     UINT32 HqdProgrammed;             /* OUT: 1 if HQD/IB registers written */
     UINT32 Pm4Submitted;              /* OUT: 1 if PM4 written to ring */
     UINT32 UseIB;                     /* IN: 1=use IB (0x3BAC/0x3BB0/0x3BC0) instead of KIQ/HQD */
+    UINT32 HqdRptr;                  /* OUT: HQD_PQ_RPTR (0x912C) after submit (HW-consumed ptr) */
+    UINT32 KiQ_RP;                   /* OUT: KIQ_RPTR (0xE06C) after submit */
+    UINT32 GrbmStat;                /* OUT: GRBM_STATUS (0x3260) after submit */
+    UINT32 FwLoaded;                 /* OUT: 1 if DreamV3LoadAllFirmware succeeded */
+    UINT32 MecCntlBefore;            /* OUT: CP_MEC_CNTL (0x4B14) at entry */
+    UINT32 MecUnhalted;              /* OUT: 1 if we cleared MEC halt before submit */
+    UINT32 ScratchAfter2;            /* OUT: SCRATCH after MEC-unhalt retry submit */
+    UINT32 HqdRptr2;                /* OUT: HQD_PQ_RPTR after retry */
+    UINT32 KiQ_RP2;                  /* OUT: KIQ_RPTR after retry */
+    UINT32 GrbmStat2;                /* OUT: GRBM_STATUS after retry */
+    UINT32 FbLocationBase;           /* OUT: MC_VM_FB_LOCATION_BASE (RO, VRAM GPU-VA base) */
+    UINT32 FbOffset;                /* OUT: MC_VM_FB_OFFSET (RO) */
+    UINT64 RingGpuVa;              /* OUT: ring GPU virtual address programmed into PQ_BASE */
+    UINT32 HqdPqWptrRb;           /* OUT: HQD_PQ_WPTR_LO readback (CP view) */
+    UINT32 DoorKicked;              /* OUT: 1 if we kicked via doorbell */
+    UINT32 DbLoRb;                 /* OUT: CP_MEC_DOORBELL_RANGE_LOWER readback */
+    UINT32 DbHiRb;                 /* OUT: CP_MEC_DOORBELL_RANGE_UPPER readback */
+    UINT32 DbCtlRb;                /* OUT: CP_HQD_PQ_DOORBELL_CONTROL readback */
 } AMDBC250_IOCTL_GPU_KIQ_TEST, *PAMDBC250_IOCTL_GPU_KIQ_TEST;
 
 /* --- Direct CP firmware load via MMIO (bypasses PSP entirely) --- */

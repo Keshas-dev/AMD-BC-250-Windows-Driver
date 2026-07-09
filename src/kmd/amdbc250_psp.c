@@ -572,7 +572,7 @@ static NTSTATUS Amdbc250PspBootloaderLoadSysdrv(VOID)
     NTSTATUS status;
     BOOLEAN alive;
     status = Amdbc250PspIsSosAlive(&alive);
-    if (!NT_SUCCESS(status) || alive) { return STATUS_SUCCESS; }
+    if (alive) { return STATUS_SUCCESS; }
     status = Amdbc250PspWaitForBootloader();
     if (!NT_SUCCESS(status)) return status;
     if (!g_PspContext.SosFirmware || g_PspContext.SosFirmwareSize == 0) return STATUS_NO_SUCH_DEVICE;
@@ -589,7 +589,7 @@ static NTSTATUS Amdbc250PspBootloaderLoadSos(VOID)
     LARGE_INTEGER delay;
     ULONG i;
     status = Amdbc250PspIsSosAlive(&alive);
-    if (!NT_SUCCESS(status) || alive) return STATUS_SUCCESS;
+    if (alive) return STATUS_SUCCESS;
     status = Amdbc250PspWaitForBootloader();
     if (!NT_SUCCESS(status)) return status;
     if (!g_PspContext.SosFirmware || g_PspContext.SosFirmwareSize == 0) return STATUS_NO_SUCH_DEVICE;

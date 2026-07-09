@@ -75,28 +75,30 @@ int main(void) {
     PspReadReg(hPsp, 0x32D4, &val); printf("  SCRATCH (0x32D4)        = 0x%08X\n", val);
     PspReadReg(hPsp, 0x4A74, &val); printf("  ME_CNTL (0x4A74)        = 0x%08X\n", val);
     PspReadReg(hPsp, 0xE060, &val); printf("  KIQ_BASE_LO (0xE060)    = 0x%08X\n", val);
+    PspReadReg(hPsp, 0xE06C, &val); printf("  KIQ_RPTR (0xE06C)        = %u\n", val);
+    unsigned kiqRptrBefore = val;
 
     /* Step 4: Prepare PM4 commands */
     printf("\n--- Preparing PM4 Commands ---\n");
     PSP_GPU_PM4_SUBMIT_REQUEST req;
     PSP_GPU_PM4_SUBMIT_RESPONSE resp;
     
-    // PM4 IT_WRITE_DATA to SCRATCH (0x32D4) = 0xCAFEBABE
-    // Header: TYPE=3(11), COUNT=3, OPCODE=0x37 -> 0xC0370003
-    req.CommandCount = 5;     // 5 DWORDs: header + control + addr_lo + addr_hi + data
+    // PM4 WRITE_DATA to SCRATCH (0x32D4) = 0xCAFEBABE
+    // Correct format (Type-3): header(TYPE=3, OPCODE=0x37, DST_SEL=Register=0,
+    //   COUNT=3) + DWORD1=register offset + DWORD2=data + DWORD3=NOP(pad)
+    //   COUNT = number of DWORDs after the header = addr(1) + data(2)
+    req.CommandCount = 4;     // 4 DWORDs: header + addr + data + NOP
     req.WaitMs = 100;         // Wait 100ms after kick
-    req.Commands[0] = 0xC0043700;   // PM4: IT_WRITE_DATA (count=4 DWORDS after hdr)
-    req.Commands[1] = 0x00000102;   // CONTROL: DST_SEL=register(1) | WR_CONFIRM
-    req.Commands[2] = 0x000032D4;   // ADDR_LO = SCRATCH register byte offset
-    req.Commands[3] = 0x00000000;   // ADDR_HI
-    req.Commands[4] = 0xCAFEBABE;   // DATA
-    
+    req.Commands[0] = 0xC0033700;   // WRITE_DATA, dst=Register, count=3
+    req.Commands[1] = 0x000032D4;   // SCRATCH register offset (DWORD1 = address)
+    req.Commands[2] = 0xCAFEBABE;   // DATA
+    req.Commands[3] = 0xC0001000;   // NOP (padding data DWORD)
+
     printf("Prepared %d DWORDs of PM4 commands\n", req.CommandCount);
-    printf("  CMD[0] = 0x%08X (IT_WRITE_DATA)\n", req.Commands[0]);
-    printf("  CMD[1] = 0x%08X (CONTROL)\n", req.Commands[1]);
-    printf("  CMD[2] = 0x%08X (SCRATCH offset = 0x32D4)\n", req.Commands[2]);
-    printf("  CMD[3] = 0x%08X (ADDR_HI = 0)\n", req.Commands[3]);
-    printf("  CMD[4] = 0x%08X (DATA = 0xCAFEBABE)\n", req.Commands[4]);
+    printf("  CMD[0] = 0x%08X (WRITE_DATA, Register, count=3)\n", req.Commands[0]);
+    printf("  CMD[1] = 0x%08X (SCRATCH offset = 0x32D4)\n", req.Commands[1]);
+    printf("  CMD[2] = 0x%08X (DATA = 0xCAFEBABE)\n", req.Commands[2]);
+    printf("  CMD[3] = 0x%08X (NOP pad)\n", req.Commands[3]);
 
     /* Step 5: Submit via PSP GPU PM4 SUBMIT */
     printf("\n--- Submitting via PSP GPU PM4 SUBMIT ---\n");
@@ -117,6 +119,12 @@ int main(void) {
     printf("  HqdPqWptrAfter    = %u\n", resp.HqdPqWptrAfter);
     printf("  HqdActive         = 0x%08X\n", resp.HqdActive);
     printf("  Pm4Dwords         = %u\n", resp.Pm4Dwords);
+
+    /* Step 6b: Read KIQ_RPTR after to see if the CP CONSUMED the ring */
+    unsigned kiqRptrAfter;
+    PspReadReg(hPsp, 0xE06C, &kiqRptrAfter);
+    printf("  KIQ_RPTR (0xE06C)    = %u  (before=%u; advanced => CP consumed ring)\n",
+        kiqRptrAfter, kiqRptrBefore);
 
     if (resp.ScratchAfter == 0xCAFEBABE) {
         printf("\n  *** SUCCESS: GPU executed PM4 via PSP KIQ! SCRATCH=0xCAFEBABE ***\n");

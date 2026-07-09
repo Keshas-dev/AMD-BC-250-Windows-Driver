@@ -17,7 +17,7 @@ Signature="$Windows NT$"
 Provider=%AMD%
 Class=Display
 ClassGUID={4D36E968-E325-11CE-BFC1-08002BE10318}
-DriverVer=06/04/2026,4.3.0.0
+DriverVer=07/09/2026,4.3.0.10
 CatalogFile=amdbc250_dream.CAT
 
 [DestinationDirs]

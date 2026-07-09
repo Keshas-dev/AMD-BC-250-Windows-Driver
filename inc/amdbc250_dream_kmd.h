@@ -66,8 +66,8 @@ NTSYSAPI NTSTATUS NTAPI ZwQuerySystemInformation(
 
 #define AMDBC250_DREAM_V3_VERSION_MAJOR    4
 #define AMDBC250_DREAM_V3_VERSION_MINOR    3
-#define AMDBC250_DREAM_V3_VERSION_PATCH    0
-#define AMDBC250_DREAM_V3_VERSION_STRING   L"4.3.0.0"
+#define AMDBC250_DREAM_V3_VERSION_PATCH    10
+#define AMDBC250_DREAM_V3_VERSION_STRING   L"4.3.0.10"
 #define AMDBC250_DREAM_V3_DESCRIPTION      L"AMD BC-250 Dream Drivers v4.3 (RDNA2/Cyan Skillfish)"
 
 /*===========================================================================

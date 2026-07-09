@@ -13,7 +13,25 @@ typedef struct {
     UINT32 RingAllocated;
     UINT32 HqdProgrammed;
     UINT32 Pm4Submitted;
-    UINT32 RingWptr;
+    UINT32 UseIB;
+    UINT32 HqdRptr;
+    UINT32 KiQ_RP;
+    UINT32 GrbmStat;
+    UINT32 FwLoaded;
+    UINT32 MecCntlBefore;
+    UINT32 MecUnhalted;
+    UINT32 ScratchAfter2;
+    UINT32 HqdRptr2;
+    UINT32 KiQ_RP2;
+    UINT32 GrbmStat2;
+    UINT32 FbLocationBase;
+    UINT32 FbOffset;
+    UINT64 RingGpuVa;
+    UINT32 HqdPqWptrRb;
+    UINT32 DoorKicked;
+    UINT32 DbLoRb;
+    UINT32 DbHiRb;
+    UINT32 DbCtlRb;
 } GPU_KIQ_TEST_OUT;
 
 int main(int argc, char *argv[])
@@ -52,9 +70,24 @@ int main(int argc, char *argv[])
             kiqOut.MmioMapped, kiqOut.RingAllocated, kiqOut.HqdProgrammed, kiqOut.Pm4Submitted);
         printf("SCRATCH before: 0x%08X\n", kiqOut.ScratchBefore);
         printf("SCRATCH after:  0x%08X\n", kiqOut.ScratchAfter);
-        printf("WPTR readback:  0x%08X\n", kiqOut.Result);
-        if (kiqOut.ScratchAfter == 0xCAFEBABE)
-            printf("\n*** PM4 EXECUTED! SCRATCH = 0xCAFEBABE ***\n");
+        printf("Result:         0x%08X\n", kiqOut.Result);
+        printf("HQD_PQ_RPTR:   0x%08X  (HW-consumed; 7=fetched+done, 0=never fetched)\n", kiqOut.HqdRptr);
+        printf("KIQ_RPTR:      0x%08X\n", kiqOut.KiQ_RP);
+        printf("GRBM_STATUS:    0x%08X\n", kiqOut.GrbmStat);
+    printf("FW_LOADED:      %u  (1=ME/PFP/CE/MEC microcode uploaded)\n", kiqOut.FwLoaded);
+        printf("CP_MEC_CNTL(before): 0x%08X  MEC_UNHALTED=%u\n", kiqOut.MecCntlBefore, kiqOut.MecUnhalted);
+        printf("RingGpuVa:     0x%016llX  (GPU VA programmed into PQ_BASE; must be in VRAM window)\n", (unsigned long long)kiqOut.RingGpuVa);
+        printf("FB_LOC_BASE:    0x%08X  (VRAM GPU-VA base, dmesg=0xF4000000)\n", kiqOut.FbLocationBase);
+        printf("HQD_PQ_WPTR_RB: 0x%08X  (CP WPTR readback; 7=kick fetched ring)\n", kiqOut.HqdPqWptrRb);
+        printf("DOORBELL_KICK:  %u  (1=wrote 64-bit WPTR to PCI BAR2)\n", kiqOut.DoorKicked);
+        printf("DB_RANGE_LO:   0x%08X  DB_RANGE_HI: 0x%08X  DB_CTL: 0x%08X\n",
+            kiqOut.DbLoRb, kiqOut.DbHiRb, kiqOut.DbCtlRb);
+        if (kiqOut.ScratchAfter != 0x5AFEBABE) {
+            printf("RETRY KICK:  HQD_PQ_RPTR=0x%08X KIQ_RPTR=0x%08X GRBM=0x%08X SCRATCH=0x%08X\n",
+                kiqOut.HqdRptr2, kiqOut.KiQ_RP2, kiqOut.GrbmStat2, kiqOut.ScratchAfter2);
+        }
+        if (kiqOut.ScratchAfter == 0x5AFEBABE)
+            printf("\n*** PM4 EXECUTED! SCRATCH = 0x5AFEBABE ***\n");
         else if (kiqOut.ScratchAfter != kiqOut.ScratchBefore)
             printf("\n*** SCRATCH CHANGED! 0x%08X -> 0x%08X ***\n",
                 kiqOut.ScratchBefore, kiqOut.ScratchAfter);

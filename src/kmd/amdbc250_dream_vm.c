@@ -62,6 +62,41 @@ static ULONG64 DreamV3VmEncodePde(
     _In_ PHYSICAL_ADDRESS PhysicalAddr
     );
 
+/*===========================================================================
+   DreamV3ReadRegDword — read a DWORD from the driver Parameters key.
+   Returns non-success if the value is absent (caller treats as "unset").
+   Used by gated experiment knobs (SystemApertureEnabled, etc.).
+===========================================================================*/
+static NTSTATUS
+DreamV3ReadRegDword(
+    _In_  PCWSTR ValueName,
+    _Out_ PULONG Out
+    )
+{
+    UNICODE_STRING path;
+    RtlInitUnicodeString(&path,
+        L"\\Registry\\Machine\\SYSTEM\\CurrentControlSet\\Services\\atikmdag\\Parameters");
+    OBJECT_ATTRIBUTES oa;
+    InitializeObjectAttributes(&oa, &path, OBJ_CASE_INSENSITIVE, NULL, NULL);
+    HANDLE hKey = NULL;
+    NTSTATUS st = ZwOpenKey(&hKey, KEY_READ, &oa);
+    if (!NT_SUCCESS(st)) return st;
+    UNICODE_STRING vn;
+    RtlInitUnicodeString(&vn, ValueName);
+    UCHAR buf[sizeof(KEY_VALUE_PARTIAL_INFORMATION) + sizeof(ULONG)] = {0};
+    ULONG ret = 0;
+    st = ZwQueryValueKey(hKey, &vn, KeyValuePartialInformation,
+                         buf, sizeof(buf), &ret);
+    if (NT_SUCCESS(st)) {
+        PKEY_VALUE_PARTIAL_INFORMATION pi = (PKEY_VALUE_PARTIAL_INFORMATION)buf;
+        if (pi->DataLength == sizeof(ULONG))
+            *Out = *(PULONG)pi->Data;
+        else st = STATUS_INVALID_PARAMETER;
+    }
+    ZwClose(hKey);
+    return st;
+}
+
 static ULONG64 DreamV3VmEncodePte(
     _In_ PHYSICAL_ADDRESS PhysicalAddr,
     _In_ ULONG Flags
@@ -750,16 +785,18 @@ DreamV3VmInvalidateTLB(
         return STATUS_INVALID_PARAMETER;
     }
 
-    /* Write invalidation request */
+    /* Write invalidation request. GFX10 uses a SINGLE ENG0 REQ/ACK pair;
+     * the VMID is encoded in the request word, NOT by per-VMID register
+     * addresses — drop the (VmId*0x10) stride that hit foreign regs. */
     DreamV3WriteRegister(DevExt,
-                         AMDBC250_REG_GCVM_INVALIDATE_ENG0_REQ + (VmId * 0x10),
+                         AMDBC250_REG_GCVM_INVALIDATE_ENG0_REQ,
                          1);
 
     /* Wait for acknowledgment */
     ULONG Timeout = 1000;
     while (Timeout-- > 0) {
         VmCntl = DreamV3ReadRegister(DevExt,
-                                     AMDBC250_REG_GCVM_INVALIDATE_ENG0_ACK + (VmId * 0x10));
+                                     AMDBC250_REG_GCVM_INVALIDATE_ENG0_ACK);
         if (VmCntl & 0x1) {
             return STATUS_SUCCESS;
         }
@@ -816,6 +853,38 @@ DreamV3VmConfigureSystemAperture(_In_ PDREAM_V3_DEVICE_EXTENSION DevExt)
         DreamV3WriteRegister(DevExt, 
                              AMDBC250_REG_MC_VM_SYSTEM_APERTURE_DEFAULT_ADDR,
                              (ULONG)(ScratchPage.QuadPart >> 12));
+    }
+
+    /* [EXPERIMENT] System aperture bounds — GATED.
+       GCMC_VM_SYSTEM_APERTURE_LOW/HIGH (BAR5 0x9540/0x9544,
+       hw_extra.h) define the physical DRAM range the GPU can DMA to.
+       A KIQ ring buffer allocated in system DRAM is UNREACHABLE by the
+       CP unless this aperture covers it -> ring test fails (RPTR stuck).
+       These offsets are OUTSIDE the 0x3400-0x8100 "freeze zone", so
+       writing them is safe (unlike RLC_CNTL in 0x3A00).
+       DEFAULT OFF: read SystemApertureEnabled (DWORD) from the driver
+       Parameters key. When 0/unset, behavior is unchanged. When 1,
+       write LOW/HIGH (registry-tunable SystemApertureLow/High,
+       default 0x0 / 0xFFFFFFFF covers all 4GB DRAM). */
+    {
+        ULONG apEn = 0;
+        if (NT_SUCCESS(DreamV3ReadRegDword(L"SystemApertureEnabled", &apEn)) && apEn != 0) {
+            ULONG lo = 0x00000000, hi = 0xFFFFFFFF;
+            ULONG t = 0;
+            if (NT_SUCCESS(DreamV3ReadRegDword(L"SystemApertureLow",  &t))) lo = t;
+            if (NT_SUCCESS(DreamV3ReadRegDword(L"SystemApertureHigh", &t))) hi = t;
+            __try {
+                DreamV3WriteRegister(DevExt,
+                    0x00009540,  lo);  /* MC_VM_SYSTEM_APERTURE_LOW (raw BAR5) */
+                DreamV3WriteRegister(DevExt,
+                    0x00009544,  hi);  /* MC_VM_SYSTEM_APERTURE_HIGH (raw BAR5) */
+                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+                    "AMDBC250-VM: system aperture set LOW=0x%08X HIGH=0x%08X\n", lo, hi));
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
+                    "AMDBC250-VM: EXCEPTION setting system aperture\n"));
+            }
+        }
     }
 
     /* Enable VM contexts */

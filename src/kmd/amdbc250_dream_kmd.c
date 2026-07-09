@@ -1718,24 +1718,23 @@ DreamV3SwPm4Process(
 
             case IT_DISPATCH_DIRECT: {
                 /* DISPATCH_DIRECT: dim_x, dim_y, dim_z, dispatch_initiator.
-                 * COMPUTE registers are in SEG1 (GC_BASE + 0xA000).
-                 * COMPUTE_DISPATCH_DIRECT at SEG1 + 0x2A00 = BAR5 0xDC60 (read-only status).
-                 * COMPUTE_DISPATCH_START  at SEG1 + 0x2A04 = BAR5 0xDC64 (W1C trigger).
+                 * COMPUTE registers use GC_BASE + mm*4 (BASE_IDX=0), NOT SEG1.
+                 * COMPUTE_DISPATCH_INITIATOR = BAR5 0x80E0 (W1C trigger, VALID consumed).
+                 * COMPUTE_DIM_X/Y/Z        = BAR5 0x80E4/0x80E8/0x80EC.
                  *
-                 * Must select ME=1 (MEC/compute) via GRBM_GFX_INDEX before
-                 * writing COMPUTE pipe registers. */
+                 * Select ME=1 (MEC/compute) via GRBM_GFX_INDEX before writes. */
                 if (count >= 4) {
                     ULONG dimX = Commands[i + 0];
                     ULONG dimY = Commands[i + 1];
                     ULONG dimZ = Commands[i + 2];
                     ULONG initiator = Commands[i + 3];
-                    ULONG packedDim = (dimX & 0xFFF) | ((dimY & 0xFFF) << 12) |
-                                      ((dimZ & 0xFF) << 24);
                     /* Select ME=1 (MEC/compute engine) */
                     DreamV3WriteRegister(DevExt, DevExt->GrbmGfxIndexOffset,
                         AMDBC250_GRBM_GFX_INDEX_KIQ_VAL);
-                    /* Write dispatch dimensions (may be read-only status shadow) */
-                    DreamV3WriteRegister(DevExt, AMDBC250_REG_COMPUTE_DISPATCH_INITIATOR, packedDim);
+                    /* Write dispatch dimensions (read-only shadow on BC-250, but correct registers) */
+                    DreamV3WriteRegister(DevExt, AMDBC250_REG_COMPUTE_DIM_X, dimX);
+                    DreamV3WriteRegister(DevExt, AMDBC250_REG_COMPUTE_DIM_Y, dimY);
+                    DreamV3WriteRegister(DevExt, AMDBC250_REG_COMPUTE_DIM_Z, dimZ);
                     /* Trigger dispatch with VALID=1 */
                     DreamV3WriteRegister(DevExt, AMDBC250_REG_COMPUTE_DISPATCH_INITIATOR, initiator);
                     /* Restore broadcast */
@@ -5060,6 +5059,38 @@ DreamV3DeviceControl(
             kiqTest->MmioMapped = 1;
             kiqTest->UseIB = useIb;
 
+            /* Save live GPU state we are about to perturb, so cleanup can restore it
+             * and we don't blank a display-driving GPU.
+             * Non-GRBM-indexed regs (GCVM/ME/RLC) read fine in broadcast mode.
+             * KIQ_BASE/WPTR are GRBM-indexed: must select KIQ (ME=1) first or
+             * they read 0 in broadcast (the live value only appears with ME=1). */
+            ULONG savedGcvmCntl  = DreamV3ReadRegister(DevExt, 0x0B460); /* GCVM_CONTEXT0_CNTL */
+            ULONG savedGcvmPtLo  = DreamV3ReadRegister(DevExt, 0x6C8C);  /* GCVM_CONTEXT0_PT_BASE_LO */
+            ULONG savedGcvmPtHi  = DreamV3ReadRegister(DevExt, 0x6C90);  /* GCVM_CONTEXT0_PT_BASE_HI */
+            ULONG savedMeCntl    = DreamV3ReadRegister(DevExt, 0x4A74);  /* ME_CNTL */
+            ULONG savedMecCntl   = DreamV3ReadRegister(DevExt, 0x4B14);  /* CP_MEC_CNTL (GC) */
+            ULONG savedRlcSched  = DreamV3ReadRegister(DevExt, 0xECA8);  /* RLC_CP_SCHEDULERS */
+
+            ULONG grbmLive = DreamV3ReadRegister(DevExt, 0x34D0);        /* GRBM_INDEX */
+            DreamV3WriteRegister(DevExt, 0x34D0, 0x00010000);           /* select KIQ (ME=1) */
+            ULONG savedKiQBaseLo = DreamV3ReadRegister(DevExt, 0xE060);  /* KIQ_BASE_LO */
+            ULONG savedKiQBaseHi = DreamV3ReadRegister(DevExt, 0xE064);  /* KIQ_BASE_HI */
+            ULONG savedKiQWptr   = DreamV3ReadRegister(DevExt, 0xE078);  /* KIQ_WPTR */
+            DreamV3WriteRegister(DevExt, 0x34D0, grbmLive);              /* restore live GRBM */
+
+            /* Step 2a: Load CP microcode (ME/PFP/CE/MEC) so MEC0 can run the KIQ.
+             * In NBIO_MAP fallback DreamV3HwInitialize() is skipped, so firmware
+             * was never loaded -> MEC0 had no microcode and could not fetch/execute.
+             * DreamV3LoadAllFirmware() uploads via IC_BASE DMA from bc-250\*.bin. */
+            {
+                NTSTATUS fwStatus = DreamV3LoadAllFirmware(DevExt);
+                kiqTest->FwLoaded = (NT_SUCCESS(fwStatus)) ? 1 : 0;
+                kiqTest->MecCntlBefore = savedMecCntl;
+                KdPrint((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                    "GPU_KIQ_TEST: DreamV3LoadAllFirmware -> 0x%08X (FwLoaded=%u) CP_MEC_CNTL=0x%08X\n",
+                    fwStatus, kiqTest->FwLoaded, savedMecCntl));
+            }
+
             /* PT page variables (declared here for cleanup access) */
             PVOID ptPml4Va = NULL, ptPdpVa = NULL, ptPdVa = NULL, ptPtVa = NULL;
             PHYSICAL_ADDRESS ptPml4Pa = {0}, ptPdpPa = {0}, ptPdPa = {0}, ptPtPa = {0};
@@ -5078,18 +5109,18 @@ DreamV3DeviceControl(
             #define HQD_PQ_BASE     0x9124
             #define HQD_PQ_BASE_HI  0x9128
             #define HQD_PQ_RPTR     0x912C
-            #define HQD_PQ_CONTROL  0x90F0
+            #define HQD_PQ_CONTROL  0x914C  /* Linux mmCP_HQD_PQ_CONTROL=0x1FBB (header line 376 typo: 0x9148 is PQ_WPTR_POLL_ADDR_HI) */
             #define HQD_PQ_WPTR_LO  0x91DC
             #define HQD_PQ_WPTR_HI  0x91E0
-            #define HQD_PQ_WP_POLL  0x914C
-            #define HQD_PQ_DOORBELL 0x9150
+            #define HQD_PQ_WP_POLL  0x9150  /* CP_HQD_PQ_WPTR_POLL_CNTL */
+            #define HQD_PQ_DOORBELL 0x9154  /* CP_HQD_PQ_DOORBELL_CONTROL */
             #define HQD_EOP_BASE    0x90EC
             #define HQD_EOP_BASE_HI 0x90F4
             #define HQD_EOP_CNTL    0x90F8
             #define HQD_RPTR_RPT    0x913C
             #define HQD_RPTR_RPT_HI 0x9140
-            #define HQD_WP_POLL_A   0x9144
-            #define HQD_WP_POLL_A_HI 0x9148
+            #define HQD_WP_POLL_A   0x9144  /* CP_HQD_PQ_WPTR_POLL_ADDR */
+            #define HQD_WP_POLL_A_HI 0x9148  /* CP_HQD_PQ_WPTR_POLL_ADDR_HI */
             #define KIQ_BASE_LO     0xE060
             #define KIQ_BASE_HI     0xE064
             #define KIQ_RPTR        0xE06C
@@ -5103,16 +5134,60 @@ DreamV3DeviceControl(
             /* Step 2: Allocate 4KB ring buffer (contiguous, non-cached) */
             PVOID ringVa = NULL;
             PHYSICAL_ADDRESS ringPa = {0};
+            ULONG64 ringGpuVa = 0;   /* GPU virtual address of ring (CP translates via GPUVM) */
+            PVOID doorbellVa = NULL; /* mapped doorbell BAR2 (0xD0000000) for KIQ kick */
+            ULONG savedDbRangeLo = 0, savedDbRangeHi = 0, savedDbCtl = 0;
             {
-                PHYSICAL_ADDRESS low = {0}, high = {0}, boundary = {0};
-                high.QuadPart = 0xFFFFFFFFULL;
-                ringVa = MmAllocateContiguousMemorySpecifyCache(
-                    0x1000, low, high, boundary, MmNonCached);
-                if (ringVa) {
-                    RtlZeroMemory(ringVa, 0x1000);
-                    ringPa = MmGetPhysicalAddress(ringVa);
+                /* Ring MUST live in real VRAM so FB_LOCATION maps its GPU-VA
+                 * (0xF400000000 window) to the right physical page. A system-RAM
+                 * ring addressed via a VRAM-window GPU-VA would be mis-translated
+                 * by FB_LOCATION to VRAM, not to the ring. Use a LOW VRAM offset
+                 * (within the 256MB CPU-visible PCIe BAR0) so MmMapIoSpace
+                 * succeeds (allocating at FbSize-0x6000 fails: BAR0 is too small). */
+                LARGE_INTEGER vramOff;
+                vramOff.QuadPart = 0x100000;   /* 1MB into VRAM, clear of VBIOS/display */
+                PHYSICAL_ADDRESS vramBase;
+                vramBase.QuadPart = DevExt->FbPhysicalBase.QuadPart + vramOff.QuadPart;
+                PVOID vramVa = MmMapIoSpace(vramBase, 0x6000, MmNonCached);
+                if (vramVa) {
+                    RtlZeroMemory(vramVa, 0x6000);
+                    ringVa = vramVa;
+                    ringPa = vramBase;
+                    /* GPU-VA in the VRAM window so FB_LOCATION translates it.
+                     * ringGpuVa = ring_phys + (VRAM_GPU_VA_BASE - FB_phys_base). */
+                    ringGpuVa = ringPa.QuadPart +
+                        (0xF400000000ULL - DevExt->FbPhysicalBase.QuadPart);
+                    kiqTest->RingGpuVa = ringGpuVa;
                     kiqTest->RingAllocated = 1;
-                    KdPrint(("GPU_KIQ_TEST: Ring VA=%p PA=0x%llX\n", ringVa, ringPa.QuadPart));
+                    KdPrint(("GPU_KIQ_TEST: VRAM ring VA=%p PA=0x%llX GpuVa=0x%llX\n",
+                        ringVa, ringPa.QuadPart, ringGpuVa));
+                }
+            }
+            /* Allocate the 4 page-table levels in system RAM (<4GB). The MMU
+             * reads these via the system aperture (SOS-configured) during the walk. */
+            if (ringVa) {
+                PHYSICAL_ADDRESS hi4gb;
+                hi4gb.QuadPart = 0xFFFFFFFFULL;
+                ptPml4Va = MmAllocateContiguousMemory(0x1000, hi4gb);
+                ptPdpVa  = MmAllocateContiguousMemory(0x1000, hi4gb);
+                ptPdVa   = MmAllocateContiguousMemory(0x1000, hi4gb);
+                ptPtVa   = MmAllocateContiguousMemory(0x1000, hi4gb);
+                if (ptPml4Va && ptPdpVa && ptPdVa && ptPtVa) {
+                    ptPml4Pa = MmGetPhysicalAddress(ptPml4Va);
+                    ptPdpPa  = MmGetPhysicalAddress(ptPdpVa);
+                    ptPdPa   = MmGetPhysicalAddress(ptPdVa);
+                    ptPtPa   = MmGetPhysicalAddress(ptPtVa);
+                    KdPrint(("GPU_KIQ_TEST: PT pages: PML4=0x%llX PDP=0x%llX PD=0x%llX PT=0x%llX\n",
+                        ptPml4Pa.QuadPart, ptPdpPa.QuadPart, ptPdPa.QuadPart, ptPtPa.QuadPart));
+                } else {
+                    if (ptPml4Va) MmFreeContiguousMemory(ptPml4Va);
+                    if (ptPdpVa)  MmFreeContiguousMemory(ptPdpVa);
+                    if (ptPdVa)   MmFreeContiguousMemory(ptPdVa);
+                    if (ptPtVa)   MmFreeContiguousMemory(ptPtVa);
+                    ptPml4Va = ptPdpVa = ptPdVa = ptPtVa = NULL;
+                    MmUnmapIoSpace(ringVa, 0x6000);
+                    ringVa = NULL;
+                    kiqTest->RingAllocated = 0;
                 }
             }
 
@@ -5121,6 +5196,23 @@ DreamV3DeviceControl(
                 status = STATUS_SUCCESS;
                 bytesReturned = sizeof(*kiqTest);
                 break;
+            }
+
+            /* Step 2a2: Map doorbell BAR (GPU PCI BAR2 @ 0xD0000000, 2MB).
+             * The KIQ kick is a 64-bit write to the KIQ doorbell in this
+             * BAR -- CP_HQD_PQ_WPTR is READ-ONLY, so writing it does NOT
+             * kick the ring (this was the second root bug). The NBIO_MAP
+             * path only maps BAR5 + VRAM, so map BAR2 here and unmap later. */
+            {
+                PHYSICAL_ADDRESS dbPa;
+                dbPa.QuadPart = 0xD0000000ULL;
+                doorbellVa = MmMapIoSpace(dbPa, 0x200000, MmNonCached);
+                if (doorbellVa) {
+                    KdPrint(("GPU_KIQ_TEST: doorbell BAR mapped VA=%p\n", doorbellVa));
+                } else {
+                    KdPrint((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
+                        "GPU_KIQ_TEST: doorbell BAR map FAILED\n"));
+                }
             }
 
             /* Step 2b: Set up GCVM page tables for identity mapping
@@ -5137,42 +5229,31 @@ DreamV3DeviceControl(
              * We create identity mapping (VA=PA) for the ring buffer page.
              */
             #define GCVM_CONTEXT0_CNTL_REG     0x0B460   /* OLD offset � verified WRITABLE */
+            #define MC_VM_FB_LOCATION_BASE      0x6EE0    /* GC_BASE+0x1720*4; RO, VRAM GPU-VA base (dmesg 0xF4000000) */
             #define GCVM_CONTEXT0_PT_BASE_LO   0x6C8C    /* Linux offset � verified WRITABLE */
             #define GCVM_CONTEXT0_PT_BASE_HI   0x6C90    /* Linux offset � verified WRITABLE */
             #define GCVM_L2_CNTL_REG           0x0B360   /* OLD offset � verified WRITABLE */
 
             /* Step 2b: Set up GCVM page tables for identity mapping */
             {
-                PHYSICAL_ADDRESS low = {0}, high = {0}, boundary = {0};
-                high.QuadPart = 0xFFFFFFFFULL;
-
-                ptPml4Va = MmAllocateContiguousMemorySpecifyCache(0x1000, low, high, boundary, MmNonCached);
-                ptPdpVa  = MmAllocateContiguousMemorySpecifyCache(0x1000, low, high, boundary, MmNonCached);
-                ptPdVa   = MmAllocateContiguousMemorySpecifyCache(0x1000, low, high, boundary, MmNonCached);
-                ptPtVa   = MmAllocateContiguousMemorySpecifyCache(0x1000, low, high, boundary, MmNonCached);
-
                 if (ptPml4Va && ptPdpVa && ptPdVa && ptPtVa) {
                     RtlZeroMemory(ptPml4Va, 0x1000);
                     RtlZeroMemory(ptPdpVa, 0x1000);
                     RtlZeroMemory(ptPdVa, 0x1000);
                     RtlZeroMemory(ptPtVa, 0x1000);
 
-                    ptPml4Pa = MmGetPhysicalAddress(ptPml4Va);
-                    ptPdpPa  = MmGetPhysicalAddress(ptPdpVa);
-                    ptPdPa   = MmGetPhysicalAddress(ptPdVa);
-                    ptPtPa   = MmGetPhysicalAddress(ptPtVa);
-
                     KdPrint(("GPU_KIQ_TEST: PT pages: PML4=0x%llX PDP=0x%llX PD=0x%llX PT=0x%llX\n",
                         ptPml4Pa.QuadPart, ptPdpPa.QuadPart, ptPdPa.QuadPart, ptPtPa.QuadPart));
 
-                    ULONG64 ringAddr = ringPa.QuadPart;
-                    ULONG pml4Idx = 0;
-                    ULONG pdpIdx  = (ULONG)((ringAddr >> 30) & 0x1FF);
-                    ULONG pdIdx   = (ULONG)((ringAddr >> 21) & 0x1FF);
-                    ULONG ptIdx   = (ULONG)((ringAddr >> 12) & 0x1FF);
+                    /* Index the page table by the GPU VIRTUAL address (ringGpuVa),
+                     * but the PTE must point at the ring's PHYSICAL address. */
+                    ULONG pml4Idx = (ULONG)((ringGpuVa >> 39) & 0x1FF);
+                    ULONG pdpIdx  = (ULONG)((ringGpuVa >> 30) & 0x1FF);
+                    ULONG pdIdx   = (ULONG)((ringGpuVa >> 21) & 0x1FF);
+                    ULONG ptIdx   = (ULONG)((ringGpuVa >> 12) & 0x1FF);
 
-                    KdPrint(("GPU_KIQ_TEST: VA=0x%llX -> PML4[%lu] PDP[%lu] PD[%lu] PT[%lu]\n",
-                        ringAddr, pml4Idx, pdpIdx, pdIdx, ptIdx));
+                    KdPrint(("GPU_KIQ_TEST: ringPhys=0x%llX ringGpuVa=0x%llX -> PML4[%lu] PDP[%lu] PD[%lu] PT[%lu]\n",
+                        ringPa.QuadPart, ringGpuVa, pml4Idx, pdpIdx, pdIdx, ptIdx));
 
                     PULONG64 pml4 = (PULONG64)ptPml4Va;
                     PULONG64 pdp = (PULONG64)ptPdpVa;
@@ -5180,14 +5261,15 @@ DreamV3DeviceControl(
                     PULONG64 pt = (PULONG64)ptPtVa;
 
                     /* PDE: VALID(bit0) | SYSTEM(bit1) */
-                    pml4[0] = (ptPdpPa.QuadPart & 0xFFFFFFFFF000ULL) | 0x03;
+                    pml4[pml4Idx] = (ptPdpPa.QuadPart & 0xFFFFFFFFF000ULL) | 0x03;
                     pdp[pdpIdx] = (ptPdPa.QuadPart & 0xFFFFFFFFF000ULL) | 0x03;
                     pd[pdIdx] = (ptPtPa.QuadPart & 0xFFFFFFFFF000ULL) | 0x03;
-                    /* PTE: VALID(bit0) | SYSTEM(bit1) | READABLE(bit5) | WRITABLE(bit6) */
-                    pt[ptIdx] = (ringAddr & 0xFFFFFFFFF000ULL) | 0x63;
+                    /* PTE: VALID(bit0) | SYSTEM(bit1) | READABLE(bit5) | WRITABLE(bit6)
+                     * Maps GPU VA (ringGpuVa) -> ring PHYSICAL (ringPa). */
+                    pt[ptIdx] = (ringPa.QuadPart & 0xFFFFFFFFF000ULL) | 0x63;
 
-                    KdPrint(("GPU_KIQ_TEST: PML4[0]=0x%llX PDP[%lu]=0x%llX PD[%lu]=0x%llX PT[%lu]=0x%llX\n",
-                        pml4[0], pdpIdx, pdp[pdpIdx], pdIdx, pd[pdIdx], ptIdx, pt[ptIdx]));
+                    KdPrint(("GPU_KIQ_TEST: PML4[%lu]=0x%llX PDP[%lu]=0x%llX PD[%lu]=0x%llX PT[%lu]=0x%llX\n",
+                        pml4Idx, pml4[pml4Idx], pdpIdx, pdp[pdpIdx], pdIdx, pd[pdIdx], ptIdx, pt[ptIdx]));
 
                     /* Set GCVM_CONTEXT0_PT_BASE to PML4 physical address */
                     BAR5_WRITE(GCVM_CONTEXT0_PT_BASE_LO, (ULONG)(ptPml4Pa.QuadPart & 0xFFFFFFFF));
@@ -5197,18 +5279,28 @@ DreamV3DeviceControl(
                         BAR5_READ(GCVM_CONTEXT0_PT_BASE_HI),
                         BAR5_READ(GCVM_CONTEXT0_PT_BASE_LO)));
 
-                    /* Enable GCVM context 0 */
+                    /* Enable GCVM context 0 — MUST be 4-level (PAGE_TABLE_DEPTH=3).
+                     * Ring GPU VA is 0xF4FFFA000 (bits[39:30]=0xD); a flat
+                     * (depth=0) single-level PT can't walk those top bits -> VM
+                     * fault -> ring never fetched. depth field = bits[2:1]=0x06. */
                     ULONG cntlBefore = BAR5_READ(GCVM_CONTEXT0_CNTL_REG);
-                    BAR5_WRITE(GCVM_CONTEXT0_CNTL_REG, cntlBefore | 0x01);
-                    KdPrint(("GPU_KIQ_TEST: GCVM_CNTL: before=0x%08X after=0x%08X\n",
+                    BAR5_WRITE(GCVM_CONTEXT0_CNTL_REG, cntlBefore | 0x07);
+                    KdPrint(("GPU_KIQ_TEST: GCVM_CNTL: before=0x%08X after=0x%08X (expect depth=3)\n",
                         cntlBefore, BAR5_READ(GCVM_CONTEXT0_CNTL_REG)));
-                } else {
-                    KdPrint(("GPU_KIQ_TEST: PT alloc failed\n"));
-                    if (ptPml4Va) MmFreeContiguousMemory(ptPml4Va);
-                    if (ptPdpVa) MmFreeContiguousMemory(ptPdpVa);
-                    if (ptPdVa) MmFreeContiguousMemory(ptPdVa);
-                    if (ptPtVa) MmFreeContiguousMemory(ptPtVa);
-                    ptPml4Va = ptPdpVa = ptPdVa = ptPtVa = NULL;
+
+                    /* CRITICAL: shoot down GCVM TLB for VMID 0 so the new PTEs
+                     * for the ring/scratch take effect before the CP fetches.
+                     * (DreamV3VmInvalidateTLB is static in vm.c; inline it here.) */
+                    {
+                        BAR5_WRITE(AMDBC250_REG_GCVM_INVALIDATE_ENG0_REQ, 1);
+                        ULONG invT = 1000;
+                        while (invT-- > 0) {
+                            if (BAR5_READ(AMDBC250_REG_GCVM_INVALIDATE_ENG0_ACK) & 0x1)
+                                break;
+                            KeStallExecutionProcessor(10);
+                        }
+                        KdPrint(("GPU_KIQ_TEST: GCVM TLB invalidate VMID0 done\n"));
+                    }
                 }
             }
 
@@ -5242,16 +5334,18 @@ DreamV3DeviceControl(
             BAR5_WRITE(HQD_WP_POLL_A, 0);
             BAR5_WRITE(HQD_WP_POLL_A_HI, 0);
 
-            /* Step 9: Set PQ_BASE = ring physical address */
-            BAR5_WRITE(HQD_PQ_BASE, (ULONG)(ringPa.QuadPart & 0xFFFFFF00));
-            BAR5_WRITE(HQD_PQ_BASE_HI, (ULONG)(ringPa.QuadPart >> 32));
+            /* Step 9: Set PQ_BASE = ring GPU VIRTUAL address (>>8 form).
+             * CP_HQD_PQ_BASE is a VMID0 VA translated by the gfxhub VM.
+             * A raw physical write VM-faults (ring never fetched). */
+            BAR5_WRITE(HQD_PQ_BASE, (ULONG)(ringGpuVa >> 8));
+            BAR5_WRITE(HQD_PQ_BASE_HI, (ULONG)(ringGpuVa >> 40));
 
-            /* Step 9b: Set KIQ_BASE = ring physical address (KIQ engine reads from KIQ_BASE!) */
-            BAR5_WRITE(KIQ_BASE_LO, (ULONG)(ringPa.QuadPart & 0xFFFFFFFF));
-            BAR5_WRITE(KIQ_BASE_HI, (ULONG)(ringPa.QuadPart >> 32));
+            /* Step 9b: Set KIQ_BASE = ring GPU VA (MEC KIQ reads from KIQ_BASE!) */
+            BAR5_WRITE(KIQ_BASE_LO, (ULONG)(ringGpuVa >> 8));
+            BAR5_WRITE(KIQ_BASE_HI, (ULONG)(ringGpuVa >> 40));
 
-            /* Step 10: PQ_CONTROL = log2(256 dwords) = 8 */
-            BAR5_WRITE(HQD_PQ_CONTROL, 8);
+            /* Step 10: PQ_CONTROL = PQ_EN(bit0) | log2(256 dwords)=8 -> (8<<1)|1 = 0x11 */
+            BAR5_WRITE(HQD_PQ_CONTROL, 0x11);
 
             /* Step 11: VMID = 0 */
             BAR5_WRITE(HQD_VMID, 0);
@@ -5281,22 +5375,34 @@ DreamV3DeviceControl(
                 ULONG meVal = BAR5_READ(ME_CNTL);
                 BAR5_WRITE(ME_CNTL, meVal & ~((1 << 28) | (1 << 30)));  /* clear ME_HALT | PFP_HALT */
             }
+            /* Step 18b: UNHALT MEC — KIQ runs on MEC0; if MEC is left halted
+             * (minimal PSP SOS / firmware load may leave it halted) the ring is
+             * never fetched even though WPTR advances. This was the missing piece. */
+            {
+                ULONG mecVal = BAR5_READ(0x4B14);
+                if (mecVal != 0) {
+                    BAR5_WRITE(0x4B14, 0);  /* clear all MEC halt bits */
+                    kiqTest->MecUnhalted = 1;
+                    KdPrint((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                        "GPU_KIQ_TEST: CP_MEC_CNTL was 0x%08X -> unhalted\n", mecVal));
+                    KeStallExecutionProcessor(100);
+                }
+            }
             KeStallExecutionProcessor(100);
 
             /* Step 19: Write PM4 WRITE_DATA + NOPs to SCRATCH into ring */
             {
                 volatile PULONG ring = (volatile PULONG)ringVa;
-                /* PM4 Type 3: IT_WRITE_DATA (0x37), count=4
-                 * Header = (3<<30) | (0x37<<16) | 4 = 0xC0370004
-                 * CONTROL: DST_SEL=1(register), WR_CONFIRM=1 -> 0x00000100 */
-                ring[0] = 0xC0370003;  /* HEADER: IT_WRITE_DATA, count=3 */
-                ring[1] = 0x10100000;  /* CONTROL: DST_SEL=register(1<<28), WR_CONFIRM(1<<20) */
+                /* PM4 Type 3: IT_WRITE_DATA (0x37), count=3 -> [header][control][addr][data] = 4 DWORDs
+                 * Header = (3<<30) | (0x37<<8) | (3<<16) = 0xC0033700
+                 * CONTROL: DST_SEL=0(register) | WR_CONFIRM(bit20) = 0x00100000 */
+                ring[0] = 0xC0033700;  /* HEADER: IT_WRITE_DATA, count=3 */
+                ring[1] = 0x00100000;  /* CONTROL: DST_SEL=register | WR_CONFIRM */
                 ring[2] = 0x000032D4;  /* ADDRESS_LO = SCRATCH */
-                ring[3] = 0x00000000;  /* ADDRESS_HI */
-                ring[4] = 0xCAFEBABE;  /* DATA to write */
-                ring[5] = 0xC0001000;  /* NOP (count=0) */
+                ring[3] = 0x5AFEBABE;  /* DATA (SCRATCH top nibble HW-forced to 0x5) */
+                ring[4] = 0xC0001000;  /* NOP (count=0) */
+                ring[5] = 0xC0001000;  /* NOP */
                 ring[6] = 0xC0001000;  /* NOP */
-                ring[7] = 0xC0001000;  /* NOP */
                 KeMemoryBarrier();
                 kiqTest->Pm4Submitted = 1;
 
@@ -5313,10 +5419,27 @@ DreamV3DeviceControl(
                     BAR5_WRITE(GRBM_INDEX, 0xE0000000);  /* restore broadcast */
                     kiqTest->HqdProgrammed = 2;  /* IB mode */
                 } else {
-                    /* KIQ/HQD path: update WPTR = 8 DWORDs */
-                    BAR5_WRITE(HQD_PQ_WPTR_LO, 8);
+                    /* KIQ/HQD path: KICK via DOORBELL (CP_HQD_PQ_WPTR is
+                     * READ-ONLY, so a WPTR-register write does NOT kick the ring).
+                     * Program the MEC doorbell range + HQD doorbell control, then
+                     * write the 64-bit WPTR to the KIQ doorbell in PCI BAR2. */
+                    savedDbRangeLo = BAR5_READ(0x89F0);  /* CP_MEC_DOORBELL_RANGE_LOWER (kiq idx 0) */
+                    savedDbRangeHi = BAR5_READ(0x89F4);  /* CP_MEC_DOORBELL_RANGE_UPPER */
+                    savedDbCtl    = BAR5_READ(HQD_PQ_DOORBELL);  /* CP_HQD_PQ_DOORBELL_CONTROL (0x9154) */
+                    BAR5_WRITE(0x89F0, 0);            /* MEC owns doorbell idx 0 */
+                    BAR5_WRITE(0x89F4, 0x2000);     /* range covers KIQ doorbell */
+                    BAR5_WRITE(HQD_PQ_DOORBELL, 0x1); /* DOORBELL_ENABLE (bit0) */
+                    /* Also poke WPTR regs (RO; diagnostics only) */
+                    BAR5_WRITE(HQD_PQ_WPTR_LO, 7);
                     BAR5_WRITE(HQD_PQ_WPTR_HI, 0);
-                    BAR5_WRITE(KIQ_WPTR, 8);
+                    BAR5_WRITE(KIQ_WPTR, 7);
+                    if (doorbellVa) {
+                        /* 64-bit doorbell write: lo@+0, hi@+4, KIQ doorbell idx 0 */
+                        *(volatile ULONG64*)((PUCHAR)doorbellVa + 0) = (ULONG64)7;
+                        kiqTest->DoorKicked = 1;
+                        KdPrint((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                            "GPU_KIQ_TEST: doorbell kick (WPTR=7) @BAR2+0\n"));
+                    }
                 }
             }
 
@@ -5327,40 +5450,94 @@ DreamV3DeviceControl(
                 KeDelayExecutionThread(KernelMode, FALSE, &delay);
             }
 
-            /* Step 23: Read SCRATCH back */
+            /* Step 23: Read ring/engine status back (diagnostic) */
+            kiqTest->HqdRptr = BAR5_READ(HQD_PQ_RPTR);       /* HW-consumed ptr (0 if not fetched) */
+            kiqTest->KiQ_RP = BAR5_READ(KIQ_RPTR);           /* KIQ ring RPTR */
+            kiqTest->GrbmStat = BAR5_READ(0x3260);           /* GRBM_STATUS: CP/ME busy? */
+            kiqTest->RingGpuVa = ringGpuVa;               /* ring GPU VA in PQ_BASE */
+            kiqTest->FbLocationBase = BAR5_READ(0x6EE0); /* MC_VM_FB_LOCATION_BASE (RO): VRAM GPU-VA base */
+            kiqTest->FbOffset = 0;                           /* MC_VM_FB_OFFSET (unread) */
+            kiqTest->HqdPqWptrRb = BAR5_READ(HQD_PQ_WPTR_LO); /* CP WPTR view (RO reg) */
+            kiqTest->DbLoRb = BAR5_READ(0x89F0);  /* CP_MEC_DOORBELL_RANGE_LOWER readback */
+            kiqTest->DbHiRb = BAR5_READ(0x89F4);  /* CP_MEC_DOORBELL_RANGE_UPPER readback */
+            kiqTest->DbCtlRb = BAR5_READ(HQD_PQ_DOORBELL); /* CP_HQD_PQ_DOORBELL_CONTROL readback */
+
+            /* Step 24: Read SCRATCH back */
             kiqTest->ScratchAfter = BAR5_READ(SCRATCH_OFF);
 
             if (useIb) {
-                kiqTest->Result = (kiqTest->ScratchAfter == 0xCAFEBABE) ? 1 : 0;
+                kiqTest->Result = (kiqTest->ScratchAfter == 0x5AFEBABE) ? 1 : 0;
             } else {
-                kiqTest->Result = BAR5_READ(HQD_PQ_WPTR_LO);
+                kiqTest->Result = (kiqTest->ScratchAfter == 0x5AFEBABE) ? 1 : 0;
             }
 
             KdPrint(("GPU_KIQ_TEST(%s): ScratchBefore=0x%08X ScratchAfter=0x%08X Result=0x%08X\n",
                 useIb ? "IB" : "KIQ",
                 kiqTest->ScratchBefore, kiqTest->ScratchAfter, kiqTest->Result));
 
-            /* Cleanup: halt and free ring */
-            BAR5_WRITE(GRBM_INDEX, 0x00010000);
+            /* Step 22b: Retry kick — if MEC was just unhalted (or the engine
+             * simply needed a second WPTR kick / more time), re-assert WPTR and
+             * wait again. Capture retry diagnostics into the *_2 fields. */
+            if (kiqTest->ScratchAfter != 0x5AFEBABE) {
+                if (!useIb) {
+                    BAR5_WRITE(GRBM_INDEX, 0x00010000);  /* ME=1 */
+                    BAR5_WRITE(HQD_PQ_WPTR_LO, 7);
+                    BAR5_WRITE(HQD_PQ_WPTR_HI, 0);
+                    BAR5_WRITE(KIQ_WPTR, 7);
+                }
+                {
+                    LARGE_INTEGER delay;
+                    delay.QuadPart = -10000LL * 100;  /* 100ms */
+                    KeDelayExecutionThread(KernelMode, FALSE, &delay);
+                }
+                kiqTest->HqdRptr2 = BAR5_READ(HQD_PQ_RPTR);
+                kiqTest->KiQ_RP2  = BAR5_READ(KIQ_RPTR);
+                kiqTest->GrbmStat2 = BAR5_READ(0x3260);
+                kiqTest->ScratchAfter2 = BAR5_READ(SCRATCH_OFF);
+                KdPrint((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                    "GPU_KIQ_TEST retry: HqdRptr=0x%08X KiQ_RP=0x%08X Grbm=0x%08X Scratch=0x%08X\n",
+                    kiqTest->HqdRptr2, kiqTest->KiQ_RP2, kiqTest->GrbmStat2, kiqTest->ScratchAfter2));
+            }
+
+            /* Cleanup: restore live state BEFORE freeing our buffers, so a
+             * (possibly display-driving) GPU keeps working after the test. */
+            BAR5_WRITE(GRBM_INDEX, 0x00010000);  /* select KIQ (ME=1) */
             if (!useIb) BAR5_WRITE(HQD_ACTIVE, 0);
             if (useIb) {
                 BAR5_WRITE(0x3BAC, 0);  /* clear IB_BASE_LO */
                 BAR5_WRITE(0x3BB0, 0);  /* clear IB_BASE_HI */
                 BAR5_WRITE(0x3BC0, 0);  /* clear IB_BUFSZ */
             }
-            {
-                ULONG meVal = BAR5_READ(ME_CNTL);
-                BAR5_WRITE(ME_CNTL, meVal | (1 << 28) | (1 << 30));  /* set ME_HALT | PFP_HALT */
-            }
+            /* Restore KIQ ring pointers to the live ring FIRST (GRBM still KIQ-select) */
+            BAR5_WRITE(KIQ_WPTR, savedKiQWptr);
+            BAR5_WRITE(KIQ_BASE_LO, savedKiQBaseLo);
+            BAR5_WRITE(KIQ_BASE_HI, savedKiQBaseHi);
+
+            /* Restore GCVM context 0 mapping to original */
+            BAR5_WRITE(GCVM_CONTEXT0_PT_BASE_LO, savedGcvmPtLo);
+            BAR5_WRITE(GCVM_CONTEXT0_PT_BASE_HI, savedGcvmPtHi);
+            BAR5_WRITE(GCVM_CONTEXT0_CNTL_REG, savedGcvmCntl);
+
+            /* Restore engine halt state + RLC scheduler, then GRBM (do NOT force-halt) */
+            BAR5_WRITE(ME_CNTL, savedMeCntl);
+            BAR5_WRITE(0x4B14, savedMecCntl);   /* restore CP_MEC_CNTL */
+            BAR5_WRITE(RLC_SCHEDULERS, savedRlcSched);
             BAR5_WRITE(GRBM_INDEX, savedGrbmIndex);
 
-            MmFreeContiguousMemory(ringVa);
+            /* Restore doorbell range + HQD doorbell control (saved before kick) */
+            BAR5_WRITE(0x89F0, savedDbRangeLo);  /* CP_MEC_DOORBELL_RANGE_LOWER */
+            BAR5_WRITE(0x89F4, savedDbRangeHi);  /* CP_MEC_DOORBELL_RANGE_UPPER */
+            BAR5_WRITE(HQD_PQ_DOORBELL, savedDbCtl); /* CP_HQD_PQ_DOORBELL_CONTROL */
 
-            /* Free GCVM page table pages */
+            /* Now safe to free our test resources (GPU no longer points at them) */
+            /* Ring is VRAM (MmMapIoSpace); PT pages are system RAM (MmFreeContiguousMemory) */
             if (ptPml4Va) MmFreeContiguousMemory(ptPml4Va);
-            if (ptPdpVa) MmFreeContiguousMemory(ptPdpVa);
-            if (ptPdVa) MmFreeContiguousMemory(ptPdVa);
-            if (ptPtVa) MmFreeContiguousMemory(ptPtVa);
+            if (ptPdpVa)  MmFreeContiguousMemory(ptPdpVa);
+            if (ptPdVa)   MmFreeContiguousMemory(ptPdVa);
+            if (ptPtVa)   MmFreeContiguousMemory(ptPtVa);
+            if (ringVa) MmUnmapIoSpace(ringVa, 0x6000);
+            /* Unmap the doorbell BAR2 we mapped for the KIQ kick */
+            if (doorbellVa) MmUnmapIoSpace(doorbellVa, 0x200000);
 
             #undef BAR5_WRITE
             #undef BAR5_READ

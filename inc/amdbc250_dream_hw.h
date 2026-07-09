@@ -489,11 +489,11 @@ typedef struct _DREAM_V3_DEVICE_EXTENSION *PDREAM_V3_DEVICE_EXTENSION;
 #define GRBM_STATUS__RLC_BUSY               (1 << 27)
 
 /* --- CC (Compute Cores) Registers --- */
-#define AMDBC250_REG_CC_GC_SHADER_ARRAY_CONFIG  (AMDBC250_GC_BASE + 0x00002004)  /* 0x3264 */
+#define AMDBC250_REG_CC_GC_SHADER_ARRAY_CONFIG  (AMDBC250_GC_BASE + 0x000089BC)  /* 0x9C1C (corrected: mmCC_GC_SHADER_ARRAY_CONFIG=0x226F) */
 #define AMDBC250_REG_CC_GC_SHADER_RATE_CONFIG   (AMDBC250_GC_BASE + 0x00002010)  /* 0x3270 */
 
 /* --- SPI (Shader Processor Input) Registers --- */
-#define AMDBC250_REG_SPI_PG_ENABLE_STATIC_WGP_MASK (AMDBC250_GC_BASE + 0x0000229C)  /* 0x34FC */
+#define AMDBC250_REG_SPI_PG_ENABLE_STATIC_WGP_MASK (AMDBC250_GC_BASE + 0x000049DC)  /* 0x5C3C (corrected: mmSPI_PG_ENABLE_STATIC_WGP_MASK=0x1277) */
 #define AMDBC250_REG_RLC_PG_ALWAYS_ON_WGP_MASK  (AMDBC250_GC_BASE + 0x00002B04)     /* 0x3D64 */
 
 /* --- KIQ (Kernel Interface Queue, BC-250: shift by GC_BASE=0x1260) --- */
@@ -525,16 +525,18 @@ typedef struct _DREAM_V3_DEVICE_EXTENSION *PDREAM_V3_DEVICE_EXTENSION;
 #define AMDBC250_REG_IH_CNTL                0x00003820  /* IH control        */
 
 /* --- Memory Controller (MC) ??? GFX10 --- */
+/* CORRECTED: entire MC_VM block was off by 0x9000 (raw 0x5xx -> 0x95xx).
+ * Matches AGENTS.md-confirmed MC_VM_SYSTEM_APERTURE_LOW/HIGH = 0x9540/0x9544. */
 #define AMDBC250_REG_MC_VM_FB_OFFSET        0x00000000  /* FB offset         */
-#define AMDBC250_REG_MC_VM_FB_LOCATION_BASE 0x00000520  /* FB location base  */
-#define AMDBC250_REG_MC_VM_FB_LOCATION_TOP  0x00000524  /* FB location top   */
-#define AMDBC250_REG_MC_VM_AGP_BASE         0x00000528  /* AGP base          */
-#define AMDBC250_REG_MC_VM_AGP_TOP          0x0000052C  /* AGP top           */
-#define AMDBC250_REG_MC_VM_AGP_BOT          0x00000530  /* AGP bottom        */
-#define AMDBC250_REG_MC_VM_AGP_CNTL         0x00000534  /* AGP control       */
-#define AMDBC250_REG_MC_VM_SYSTEM_APERTURE_LOW_ADDR  0x00000540
-#define AMDBC250_REG_MC_VM_SYSTEM_APERTURE_HIGH_ADDR  0x00000544
-#define AMDBC250_REG_MC_VM_SYSTEM_APERTURE_DEFAULT_ADDR 0x00000548
+#define AMDBC250_REG_MC_VM_FB_LOCATION_BASE 0x00009520  /* FB location base  */
+#define AMDBC250_REG_MC_VM_FB_LOCATION_TOP  0x00009524  /* FB location top   */
+#define AMDBC250_REG_MC_VM_AGP_BASE         0x00009528  /* AGP base          */
+#define AMDBC250_REG_MC_VM_AGP_TOP          0x0000952C  /* AGP top           */
+#define AMDBC250_REG_MC_VM_AGP_BOT          0x00009530  /* AGP bottom        */
+#define AMDBC250_REG_MC_VM_AGP_CNTL         0x00009534  /* AGP control       */
+#define AMDBC250_REG_MC_VM_SYSTEM_APERTURE_LOW_ADDR  0x00009540
+#define AMDBC250_REG_MC_VM_SYSTEM_APERTURE_HIGH_ADDR 0x00009544
+#define AMDBC250_REG_MC_VM_SYSTEM_APERTURE_DEFAULT_ADDR 0x00009548
 
 /* --- GCVM (GFX Hub GPU Virtual Memory) ??? GC_BASE-shifted --- */
 /* Formula: BAR5_offset = GC_BASE(0x1260) + Linux_DWORD_offset * 4 */

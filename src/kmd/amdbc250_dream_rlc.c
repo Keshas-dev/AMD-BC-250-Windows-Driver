@@ -58,48 +58,112 @@ Environment:
 #define RLC_CNTL__FPGA_HALT           (1 << 8)
 
 /*===========================================================================
-  DreamV3InitRlc — Initialize RLC for scheduler control
+  DreamV3ReadRegDword — read a DWORD from the driver Parameters key.
+     Returns non-success if the value is absent (caller treats as "unset").
+  ===========================================================================*/
+  static NTSTATUS
+  DreamV3ReadRegDword(
+      _In_  PCWSTR ValueName,
+      _Out_ PULONG Out
+      )
+  {
+      UNICODE_STRING path;
+      RtlInitUnicodeString(&path,
+          L"\\Registry\\Machine\\SYSTEM\\CurrentControlSet\\Services\\atikmdag\\Parameters");
+      OBJECT_ATTRIBUTES oa;
+      InitializeObjectAttributes(&oa, &path, OBJ_CASE_INSENSITIVE, NULL, NULL);
+      HANDLE hKey = NULL;
+      NTSTATUS st = ZwOpenKey(&hKey, KEY_READ, &oa);
+      if (!NT_SUCCESS(st)) return st;
+      UNICODE_STRING vn;
+      RtlInitUnicodeString(&vn, ValueName);
+      UCHAR buf[sizeof(KEY_VALUE_PARTIAL_INFORMATION) + sizeof(ULONG)] = {0};
+      ULONG ret = 0;
+      st = ZwQueryValueKey(hKey, &vn, KeyValuePartialInformation,
+                           buf, sizeof(buf), &ret);
+      if (NT_SUCCESS(st)) {
+          PKEY_VALUE_PARTIAL_INFORMATION pi = (PKEY_VALUE_PARTIAL_INFORMATION)buf;
+          if (pi->DataLength == sizeof(ULONG))
+              *Out = *(PULONG)pi->Data;
+          else st = STATUS_INVALID_PARAMETER;
+      }
+      ZwClose(hKey);
+      return st;
+  }
   
-  The RLC (Run List Controller) is responsible for GFX power management
-  and scheduler control. Even though BC-250 has cg_flags=0 and pg_flags=0
-  (no clock/power gating), the RLC must be initialized for proper
-  queue scheduling.
+  /*===========================================================================
+     DreamV3InitRlc — RLC RESUME (GATED experiment)
   
-  Linux sequence:
-    1. Halt RLC
-    2. Load RLC firmware via UCODE_ADDR/DATA
-    3. Configure RLC parameters
-    4. Unhalt RLC
-    
-  Parameters:
-    DevExt - Device extension with BAR5 mapping
-    
-  Returns:
-    STATUS_SUCCESS on success
-===========================================================================*/
-
-NTSTATUS
-DreamV3InitRlc(
-    _In_ PDREAM_V3_DEVICE_EXTENSION DevExt
-    )
-{
-    UNREFERENCED_PARAMETER(DevExt);
-
-    /* ======================================================================
-     * RLC registers (0x3A00-0x3A50) are in the 0x3400-0x8100 FREEZE ZONE.
-     * Direct MMIO access causes hardware hang on BC-250.
-     *
-     * BC-250 has cg_flags=0, pg_flags=0 (no clock/power gating).
-     * RLC firmware is loaded by BIOS/SMU. OS-level RLC programming
-     * is NOT needed for basic GFX ring operation.
-     *
-     * TODO: If RLC programming is needed later, use PSP proxy IOCTLs.
-     * ====================================================================== */
-
-    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-        "AMDBC250-RLC: RLC init SKIPPED (registers in freeze zone 0x3A00+)\n"));
-    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-        "AMDBC250-RLC: BC-250 cg_flags=0 pg_flags=0 — RLC not needed for basic GFX\n"));
-
-    return STATUS_SUCCESS;
-}
+     Linux gfx_v10_0_hw_init() calls gfx_v10_0_rlc_resume() BEFORE
+     cp_resume()/ring tests. rlc_resume programs RLC_CNTL (RLC_ENABLE_F32)
+     and the RLC save/restore buffer. WITHOUT it, the Command Processor
+     (CP) cannot schedule/run rings — so a CP-level ring test
+     (SET_UCONFIG_REG -> SCRATCH) fails with RPTR stuck, even though
+     the WGP shader fuse is a SEPARATE, upstream concern.
+  
+     This is the most likely reason our CP-level ring test fails.
+  
+     The old code SKIPPED this entirely ("RLC registers in freeze zone
+     0x3A00+"), assuming it was not needed. That assumption was
+     never verified — and it contradicts the Linux init order.
+  
+     GATED: RlcResumeEnabled (DWORD, default 0) must be set to 1 in
+       HKLM\SYSTEM\CurrentControlSet\Services\atikmdag\Parameters
+     to actually program RLC_CNTL. Default 0 = identical to old
+     behavior (no register writes, no hang risk).
+  
+     RlcCntlOffset (DWORD, default 0x3A00) selects the BAR5 offset
+     of RLC_CNTL. It is UNVERIFIED on BC-250 (candidates seen in
+     test tools: 0x3A00 [driver], 0x4A80 [Linux formula
+     GC_BASE+mmRLC_CNTL*4], 0x4B20 [ring-probe], 0x4C00 [Gemini],
+     0x3398). Tune via registry after probing (see rl* test tools).
+  
+     SEH-guarded: a wrong/frozen offset may fault MMIO. The guard
+     converts a clean fault to a no-op. (A hard bus freeze still
+     needs a reboot — which is why this is OFF by default.)
+  
+     NOTE: RLC_CP_SCHEDULERS (0xECA8) is already programmed in
+     the KIQ HQD init (hw_init.c) — this function adds the master
+     RLC_CNTL enable that was previously skipped.
+  ===========================================================================*/
+  
+  NTSTATUS
+  DreamV3InitRlc(
+      _In_ PDREAM_V3_DEVICE_EXTENSION DevExt
+      )
+  {
+      ULONG enabled = 0;
+      if (!NT_SUCCESS(DreamV3ReadRegDword(L"RlcResumeEnabled", &enabled)) || enabled == 0) {
+          KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+              "AMDBC250-RLC: RLC resume SKIPPED (RlcResumeEnabled=0).\n"
+              "  Set ...\\Parameters\\RlcResumeEnabled=1 to attempt RLC_CNTL program.\n"));
+          return STATUS_SUCCESS;
+      }
+  
+      /* Offset is unverified — make it registry-tunable, default 0x3A00. */
+      ULONG off = 0x3A00;
+      ULONG ignore = 0;
+      if (NT_SUCCESS(DreamV3ReadRegDword(L"RlcCntlOffset", &ignore)))
+          off = ignore;
+  
+      KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+          "AMDBC250-RLC: RLC resume ENABLED — writing RLC_CNTL at BAR5+0x%X\n", off));
+  
+      NTSTATUS st = STATUS_SUCCESS;
+      __try {
+          ULONG val = RLC_CNTL__RLC_ENABLE_F32 | RLC_CNTL__ENABLE;
+          DreamV3WriteRegister(DevExt, off, val);
+          ULONG rb = DreamV3ReadRegister(DevExt, off);
+          KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+              "AMDBC250-RLC: RLC_CNTL written 0x%08X, readback 0x%08X\n", val, rb));
+          /* Re-assert KIQ scheduler slot (already wired in KIQ HQD init). */
+          DreamV3WriteRegister(DevExt,
+                               AMDBC250_REG_RLC_CP_SCHEDULERS,
+                               AMDBC250_RLC_CP_SCHEDULERS_KIQ_VAL);
+      } __except (EXCEPTION_EXECUTE_HANDLER) {
+          st = STATUS_DEVICE_NOT_READY;
+          KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
+              "AMDBC250-RLC: EXCEPTION writing RLC_CNTL at 0x%X (freeze?)\n", off));
+      }
+      return st;
+  }
