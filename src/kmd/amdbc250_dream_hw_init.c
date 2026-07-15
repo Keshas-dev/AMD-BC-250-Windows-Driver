@@ -50,6 +50,55 @@ static NTSTATUS DreamV3WaitForRegister(
     _In_ ULONG TimeoutUs
     );
 
+/* Persistent step marker so a TDR/reboot reveals the last-entered step.
+ * Written to the driver's service key (same RegistryPath the driver uses
+ * for DriverBuildId / Step_* markers); survives reboot. */
+VOID
+DreamV3MarkHwInitStep(_In_ ULONG Step)
+{
+    UNICODE_STRING Path;
+    RtlInitUnicodeString(&Path,
+        L"\\Registry\\Machine\\SYSTEM\\CurrentControlSet\\Services\\atikmdag");
+    OBJECT_ATTRIBUTES Oa;
+    InitializeObjectAttributes(&Oa, &Path, OBJ_CASE_INSENSITIVE, NULL, NULL);
+    HANDLE hKey = NULL;
+    if (NT_SUCCESS(ZwOpenKey(&hKey, KEY_SET_VALUE, &Oa))) {
+        UNICODE_STRING Name;
+        RtlInitUnicodeString(&Name, L"Step_HwInit");
+        ZwSetValueKey(hKey, &Name, 0, REG_DWORD, &Step, sizeof(Step));
+        ZwClose(hKey);
+    }
+}
+
+/* Read HwInitMaxStep cap (0 = run all steps). Used to binary-search the
+ * TDR step without relying on registry persistence across a hard reboot:
+ * set the cap in the service root, run full init; the last SUCCESSFUL cap
+ * is the step before the crash. */
+static ULONG
+DreamV3ReadMaxStep(void)
+{
+    UNICODE_STRING Path;
+    RtlInitUnicodeString(&Path,
+        L"\\Registry\\Machine\\SYSTEM\\CurrentControlSet\\Services\\atikmdag");
+    OBJECT_ATTRIBUTES Oa;
+    InitializeObjectAttributes(&Oa, &Path, OBJ_CASE_INSENSITIVE, NULL, NULL);
+    HANDLE hKey = NULL;
+    ULONG val = 0;
+    if (NT_SUCCESS(ZwOpenKey(&hKey, KEY_READ, &Oa))) {
+        UNICODE_STRING vn;
+        RtlInitUnicodeString(&vn, L"HwInitMaxStep");
+        UCHAR buf[sizeof(KEY_VALUE_PARTIAL_INFORMATION) + sizeof(ULONG)] = {0};
+        ULONG ret = 0;
+        if (NT_SUCCESS(ZwQueryValueKey(hKey, &vn, KeyValuePartialInformation,
+                                        buf, sizeof(buf), &ret))) {
+            PKEY_VALUE_PARTIAL_INFORMATION pi = (PKEY_VALUE_PARTIAL_INFORMATION)buf;
+            if (pi->DataLength == sizeof(ULONG)) val = *(PULONG)pi->Data;
+        }
+        ZwClose(hKey);
+    }
+    return val;
+}
+
 /*===========================================================================
   DreamV3HwInitialize — Top-level hardware initialization
   
@@ -68,13 +117,23 @@ DreamV3HwInitialize(
     )
 {
     NTSTATUS Status;
+    ULONG MaxStep = DreamV3ReadMaxStep();
 
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                "AMDBC250-DREAM-V4.3: HwInitialize — RDNA2/Cyan Skillfish init\n"));
 
+    if (MaxStep != 0) {
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+                   "AMDBC250-DREAM-V4.3: HwInit CAPPED at step %u\n", MaxStep));
+    }
+
+    DreamV3MarkHwInitStep(0); /* reset marker */
+
     /* Step 1: Memory controller (GDDR6) */
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-               "AMDBC250-DREAM-V4.3: [STEP 1/12] Memory controller init\n"));
+                "AMDBC250-DREAM-V4.3: [STEP 1/12] Memory controller init\n"));
+    if (MaxStep != 0 && 1 > MaxStep) { KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL, "AMDBC250-DREAM-V4.3: HwInit STOP at cap %u\n", MaxStep)); return STATUS_SUCCESS; }
+    DreamV3MarkHwInitStep(1);
     Status = DreamV3InitMemoryController(DevExt);
     if (!NT_SUCCESS(Status)) {
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
@@ -87,6 +146,8 @@ DreamV3HwInitialize(
     /* Step 2: Program golden registers (hardware workarounds) — 47+ from Linux */
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                "AMDBC250-DREAM-V4.3: [STEP 2/12] Golden registers (47+)\n"));
+    if (MaxStep != 0 && 2 > MaxStep) { KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL, "AMDBC250-DREAM-V4.3: HwInit STOP at cap %u\n", MaxStep)); return STATUS_SUCCESS; }
+    DreamV3MarkHwInitStep(2);
     Status = DreamV3ProgramGoldenSettings(DevExt);
     if (!NT_SUCCESS(Status)) {
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
@@ -99,6 +160,8 @@ DreamV3HwInitialize(
     /* Step 3: HDP register initialization (coherency) */
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                "AMDBC250-DREAM-V4.3: [STEP 3/12] HDP registers\n"));
+    if (MaxStep != 0 && 3 > MaxStep) { KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL, "AMDBC250-DREAM-V4.3: HwInit STOP at cap %u\n", MaxStep)); return STATUS_SUCCESS; }
+    DreamV3MarkHwInitStep(3);
     Status = DreamV3InitHdpRegisters(DevExt);
     if (!NT_SUCCESS(Status)) {
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
@@ -111,6 +174,8 @@ DreamV3HwInitialize(
     /* Step 4: Interrupt handler ring */
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                "AMDBC250-DREAM-V4.3: [STEP 4/12] IH ring\n"));
+    if (MaxStep != 0 && 4 > MaxStep) { KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL, "AMDBC250-DREAM-V4.3: HwInit STOP at cap %u\n", MaxStep)); return STATUS_SUCCESS; }
+    DreamV3MarkHwInitStep(4);
     Status = DreamV3HwInitIhRing(DevExt);
     if (!NT_SUCCESS(Status)) {
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
@@ -123,12 +188,46 @@ DreamV3HwInitialize(
     /* Step 5: Halt all CP engines before firmware load */
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                "AMDBC250-DREAM-V4.3: [STEP 5/13] Halt CP engines\n"));
+    if (MaxStep != 0 && 5 > MaxStep) { KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL, "AMDBC250-DREAM-V4.3: HwInit STOP at cap %u\n", MaxStep)); return STATUS_SUCCESS; }
+    DreamV3MarkHwInitStep(5);
     DreamV3HaltAllEngines(DevExt);
 
     /* Step 5b: Load all CP firmware via IC_BASE DMA (ME, PFP, CE, MEC) */
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                "AMDBC250-DREAM-V4.3: [STEP 6/13] Load CP firmware\n"));
-    Status = DreamV3LoadAllFirmware(DevExt);
+    if (MaxStep != 0 && 6 > MaxStep) { KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL, "AMDBC250-DREAM-V4.3: HwInit STOP at cap %u\n", MaxStep)); return STATUS_SUCCESS; }
+    DreamV3MarkHwInitStep(6);
+    {
+        /* Kill-switch (HwInitFirmware=0) to isolate the 0x1A BSOD: skip the
+         * IC_BASE DMA firmware load + engine unhalt (which lets the GPU run
+         * loaded microcode and may rogue-DMA host memory). */
+        UNICODE_STRING Path;
+        RtlInitUnicodeString(&Path,
+            L"\\Registry\\Machine\\SYSTEM\\CurrentControlSet\\Services\\atikmdag");
+        OBJECT_ATTRIBUTES Oa;
+        InitializeObjectAttributes(&Oa, &Path, OBJ_CASE_INSENSITIVE, NULL, NULL);
+        HANDLE hKey = NULL;
+        ULONG FwEnable = 1; /* firmware load itself is safe; only the engine
+                              * unhalt (HwUnhaltCp) is dangerous — kept 0 */
+        if (NT_SUCCESS(ZwOpenKey(&hKey, KEY_READ, &Oa))) {
+            UNICODE_STRING vn;
+            RtlInitUnicodeString(&vn, L"HwInitFirmware");
+            UCHAR buf[sizeof(KEY_VALUE_PARTIAL_INFORMATION) + sizeof(ULONG)] = {0};
+            ULONG ret = 0;
+            if (NT_SUCCESS(ZwQueryValueKey(hKey, &vn, KeyValuePartialInformation,
+                                           buf, sizeof(buf), &ret))) {
+                PKEY_VALUE_PARTIAL_INFORMATION pi = (PKEY_VALUE_PARTIAL_INFORMATION)buf;
+                if (pi->DataLength == sizeof(ULONG)) FwEnable = *(PULONG)pi->Data;
+            }
+            ZwClose(hKey);
+        }
+        if (FwEnable == 0) {
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+                       "AMDBC250-DREAM-V4.3: Firmware load SKIPPED (HwInitFirmware=0)\n"));
+        } else {
+            Status = DreamV3LoadAllFirmware(DevExt);
+        }
+    }
     if (!NT_SUCCESS(Status)) {
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
                    "AMDBC250-DREAM-V4.3: [STEP 6/13] Firmware load failed (non-fatal): 0x%08X\n", Status));
@@ -141,6 +240,8 @@ DreamV3HwInitialize(
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                "AMDBC250-DREAM-V4.3: [STEP 7/13] GFX ring\n"));
     if (DevExt->GfxRing.VirtualAddress == NULL) {
+        if (MaxStep != 0 && 7 > MaxStep) { KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL, "AMDBC250-DREAM-V4.3: HwInit STOP at cap %u\n", MaxStep)); return STATUS_SUCCESS; }
+        DreamV3MarkHwInitStep(7);
         Status = DreamV3HwInitGfxRing(DevExt);
         if (!NT_SUCCESS(Status)) {
             KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
@@ -157,7 +258,38 @@ DreamV3HwInitialize(
     /* Step 8: SDMA engine */
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                "AMDBC250-DREAM-V4.3: [STEP 8/13] SDMA ring\n"));
-    Status = DreamV3HwInitSdmaRing(DevExt);
+    if (MaxStep != 0 && 8 > MaxStep) { KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL, "AMDBC250-DREAM-V4.3: HwInit STOP at cap %u\n", MaxStep)); return STATUS_SUCCESS; }
+    DreamV3MarkHwInitStep(8);
+    {
+        /* Kill-switch (HwInitSdmaRing=0): SDMA ring init is a suspected 0x1A
+         * source (kmd.c:3832) — same class of problem as the GFX ring (BASE
+         * host-read-only / engine rogue-DMA). Skip to keep init stable. */
+        UNICODE_STRING Path;
+        RtlInitUnicodeString(&Path,
+            L"\\Registry\\Machine\\SYSTEM\\CurrentControlSet\\Services\\atikmdag");
+        OBJECT_ATTRIBUTES Oa;
+        InitializeObjectAttributes(&Oa, &Path, OBJ_CASE_INSENSITIVE, NULL, NULL);
+        HANDLE hKey = NULL;
+        ULONG SdmaEnable = 0;
+        if (NT_SUCCESS(ZwOpenKey(&hKey, KEY_READ, &Oa))) {
+            UNICODE_STRING vn;
+            RtlInitUnicodeString(&vn, L"HwInitSdmaRing");
+            UCHAR buf[sizeof(KEY_VALUE_PARTIAL_INFORMATION) + sizeof(ULONG)] = {0};
+            ULONG ret = 0;
+            if (NT_SUCCESS(ZwQueryValueKey(hKey, &vn, KeyValuePartialInformation,
+                                           buf, sizeof(buf), &ret))) {
+                PKEY_VALUE_PARTIAL_INFORMATION pi = (PKEY_VALUE_PARTIAL_INFORMATION)buf;
+                if (pi->DataLength == sizeof(ULONG)) SdmaEnable = *(PULONG)pi->Data;
+            }
+            ZwClose(hKey);
+        }
+        if (SdmaEnable == 0) {
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+                       "AMDBC250-DREAM-V4.3: SDMA ring init SKIPPED (HwInitSdmaRing=0)\n"));
+        } else {
+            Status = DreamV3HwInitSdmaRing(DevExt);
+        }
+    }
     if (!NT_SUCCESS(Status)) {
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
                    "AMDBC250-DREAM-V4.3: [STEP 8/13] SDMA ring failed (non-fatal): 0x%08X\n", Status));
@@ -169,7 +301,38 @@ DreamV3HwInitialize(
     /* Step 9: GART table */
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                "AMDBC250-DREAM-V4.3: [STEP 9/13] GART\n"));
-    Status = DreamV3GartInitialize(DevExt);
+    if (MaxStep != 0 && 9 > MaxStep) { KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL, "AMDBC250-DREAM-V4.3: HwInit STOP at cap %u\n", MaxStep)); return STATUS_SUCCESS; }
+    DreamV3MarkHwInitStep(9);
+    {
+        /* Kill-switch (HwInitGart=0): DreamV3GartInitialize writes MC_VM_AGP_*
+         * aperture registers that trigger the 0x1A BSOD on BC-250 (SOS-owned
+         * memory controller — no host AGP aperture). Skip to keep init stable. */
+        UNICODE_STRING Path;
+        RtlInitUnicodeString(&Path,
+            L"\\Registry\\Machine\\SYSTEM\\CurrentControlSet\\Services\\atikmdag");
+        OBJECT_ATTRIBUTES Oa;
+        InitializeObjectAttributes(&Oa, &Path, OBJ_CASE_INSENSITIVE, NULL, NULL);
+        HANDLE hKey = NULL;
+        ULONG GartEnable = 0;
+        if (NT_SUCCESS(ZwOpenKey(&hKey, KEY_READ, &Oa))) {
+            UNICODE_STRING vn;
+            RtlInitUnicodeString(&vn, L"HwInitGart");
+            UCHAR buf[sizeof(KEY_VALUE_PARTIAL_INFORMATION) + sizeof(ULONG)] = {0};
+            ULONG ret = 0;
+            if (NT_SUCCESS(ZwQueryValueKey(hKey, &vn, KeyValuePartialInformation,
+                                           buf, sizeof(buf), &ret))) {
+                PKEY_VALUE_PARTIAL_INFORMATION pi = (PKEY_VALUE_PARTIAL_INFORMATION)buf;
+                if (pi->DataLength == sizeof(ULONG)) GartEnable = *(PULONG)pi->Data;
+            }
+            ZwClose(hKey);
+        }
+        if (GartEnable == 0) {
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+                       "AMDBC250-DREAM-V4.3: GART init SKIPPED (HwInitGart=0)\n"));
+        } else {
+            Status = DreamV3GartInitialize(DevExt);
+        }
+    }
     if (!NT_SUCCESS(Status)) {
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
                    "AMDBC250-DREAM-V4.3: [STEP 9/13] GART init failed (non-fatal): 0x%08X\n", Status));
@@ -181,7 +344,38 @@ DreamV3HwInitialize(
     /* Step 10: GPU Virtual Memory */
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                "AMDBC250-DREAM-V4.3: [STEP 10/13] GPUVM\n"));
-    Status = DreamV3VmInitialize(DevExt);
+    if (MaxStep != 0 && 10 > MaxStep) { KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL, "AMDBC250-DREAM-V4.3: HwInit STOP at cap %u\n", MaxStep)); return STATUS_SUCCESS; }
+    DreamV3MarkHwInitStep(10);
+    {
+        /* Kill-switch (HwInitVm=0): DreamV3VmInitialize -> ConfigureSystemAperture
+         * writes MC_VM system-aperture registers; same 0x1A class as GART on
+         * BC-250 (SOS-owned memory controller). Skip to keep init stable. */
+        UNICODE_STRING Path;
+        RtlInitUnicodeString(&Path,
+            L"\\Registry\\Machine\\SYSTEM\\CurrentControlSet\\Services\\atikmdag");
+        OBJECT_ATTRIBUTES Oa;
+        InitializeObjectAttributes(&Oa, &Path, OBJ_CASE_INSENSITIVE, NULL, NULL);
+        HANDLE hKey = NULL;
+        ULONG VmEnable = 0;
+        if (NT_SUCCESS(ZwOpenKey(&hKey, KEY_READ, &Oa))) {
+            UNICODE_STRING vn;
+            RtlInitUnicodeString(&vn, L"HwInitVm");
+            UCHAR buf[sizeof(KEY_VALUE_PARTIAL_INFORMATION) + sizeof(ULONG)] = {0};
+            ULONG ret = 0;
+            if (NT_SUCCESS(ZwQueryValueKey(hKey, &vn, KeyValuePartialInformation,
+                                           buf, sizeof(buf), &ret))) {
+                PKEY_VALUE_PARTIAL_INFORMATION pi = (PKEY_VALUE_PARTIAL_INFORMATION)buf;
+                if (pi->DataLength == sizeof(ULONG)) VmEnable = *(PULONG)pi->Data;
+            }
+            ZwClose(hKey);
+        }
+        if (VmEnable == 0) {
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+                       "AMDBC250-DREAM-V4.3: GPUVM init SKIPPED (HwInitVm=0)\n"));
+        } else {
+            Status = DreamV3VmInitialize(DevExt);
+        }
+    }
     if (!NT_SUCCESS(Status)) {
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
                    "AMDBC250-DREAM-V4.3: [STEP 10/13] GPUVM init failed (non-fatal): 0x%08X\n", Status));
@@ -193,6 +387,8 @@ DreamV3HwInitialize(
     /* Step 11: Display engine (DCN 2.1) */
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                "AMDBC250-DREAM-V4.3: [STEP 11/13] Display (DCN 2.1)\n"));
+    if (MaxStep != 0 && 11 > MaxStep) { KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL, "AMDBC250-DREAM-V4.3: HwInit STOP at cap %u\n", MaxStep)); return STATUS_SUCCESS; }
+    DreamV3MarkHwInitStep(11);
     Status = DreamV3HwInitDisplay(DevExt);
     if (!NT_SUCCESS(Status)) {
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
@@ -205,6 +401,8 @@ DreamV3HwInitialize(
     /* Step 12: PSP & NBIO unlock (GPU BAR5, MP0 discovery, ring, NBIO bypass) */
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                "AMDBC250-DREAM-V4.3: [STEP 12/13] PSP init\n"));
+    if (MaxStep != 0 && 12 > MaxStep) { KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL, "AMDBC250-DREAM-V4.3: HwInit STOP at cap %u\n", MaxStep)); return STATUS_SUCCESS; }
+    DreamV3MarkHwInitStep(12);
     Status = DreamV3PspHardwareInit(DevExt);
     if (DevExt->PspAlive) {
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
@@ -218,6 +416,8 @@ DreamV3HwInitialize(
     /* Step 13: RLC initialization (power/scheduler) */
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                "AMDBC250-DREAM-V4.3: [STEP 13/13] RLC init\n"));
+    if (MaxStep != 0 && 13 > MaxStep) { KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL, "AMDBC250-DREAM-V4.3: HwInit STOP at cap %u\n", MaxStep)); return STATUS_SUCCESS; }
+    DreamV3MarkHwInitStep(13);
     Status = DreamV3InitRlc(DevExt);
     if (!NT_SUCCESS(Status)) {
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
@@ -230,6 +430,8 @@ DreamV3HwInitialize(
     /* Step 13b: VRAM detection (MC_VM_FB_LOCATION, VBIOS, PCI BAR) */
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                "AMDBC250-DREAM-V4.3: [STEP 13b/13] VRAM detection\n"));
+    if (MaxStep != 0 && 14 > MaxStep) { KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL, "AMDBC250-DREAM-V4.3: HwInit STOP at cap %u\n", MaxStep)); return STATUS_SUCCESS; }
+    DreamV3MarkHwInitStep(14);
     DreamV3DetectVram(DevExt);
 
     DevExt->UsedVramBytes = 0;
@@ -400,6 +602,35 @@ DreamV3HwInitGfxRing(
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                "AMDBC250-DREAM-V4.3: InitGfxRing — Allocating %d KB\n", RingSize / 1024));
 
+    /* Kill-switch (HwInitGfxRing=0) to isolate the 0x1A MEMORY_MANAGEMENT
+     * BSOD seen at cap=7. Returns BEFORE any allocation/register write. */
+    {
+        UNICODE_STRING Path;
+        RtlInitUnicodeString(&Path,
+            L"\\Registry\\Machine\\SYSTEM\\CurrentControlSet\\Services\\atikmdag");
+        OBJECT_ATTRIBUTES Oa;
+        InitializeObjectAttributes(&Oa, &Path, OBJ_CASE_INSENSITIVE, NULL, NULL);
+        HANDLE hKey = NULL;
+        ULONG GfxRingEnable = 0;
+        if (NT_SUCCESS(ZwOpenKey(&hKey, KEY_READ, &Oa))) {
+            UNICODE_STRING vn;
+            RtlInitUnicodeString(&vn, L"HwInitGfxRing");
+            UCHAR buf[sizeof(KEY_VALUE_PARTIAL_INFORMATION) + sizeof(ULONG)] = {0};
+            ULONG ret = 0;
+            if (NT_SUCCESS(ZwQueryValueKey(hKey, &vn, KeyValuePartialInformation,
+                                           buf, sizeof(buf), &ret))) {
+                PKEY_VALUE_PARTIAL_INFORMATION pi = (PKEY_VALUE_PARTIAL_INFORMATION)buf;
+                if (pi->DataLength == sizeof(ULONG)) GfxRingEnable = *(PULONG)pi->Data;
+            }
+            ZwClose(hKey);
+        }
+        if (GfxRingEnable == 0) {
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+                       "AMDBC250-DREAM-V4.3: GFX ring init SKIPPED (HwInitGfxRing=0)\n"));
+            return STATUS_SUCCESS;
+        }
+    }
+
     /* Allocate ring buffer */
     RingVirt = DreamV3AllocateContiguousMemory(RingSize, &RingPhys);
     if (RingVirt == NULL) {
@@ -459,106 +690,21 @@ DreamV3HwInitGfxRing(
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
                    "AMDBC250-DREAM-V4.3: GFX ring BASE read-only (got LO=0x%08X HI=0x%08X, expected LO=0x%08X HI=0x%08X)\n",
                    GfxBaseCheckLo, GfxBaseCheckHi, BaseLoVal, BaseHiVal));
+        /* DISPLAY FIX (HwInitMaxStep bisection: cap=6 OK, cap=7 white-screen):
+         * On BC-250 BOTH GFX and KIQ ring BASE are host-read-only (locked by
+         * SOS/PSP). Probing the KIQ ring requires selecting ME=1 via
+         * GRBM_GFX_INDEX, and writing GRBM_GFX_INDEX while the live display is
+         * active corrupts the display (white screen). Skip the KIQ probe + all
+         * GRBM_GFX_INDEX writes, free the ring, keep CP halted, and continue.
+         * The CP/MEC cannot be woken on the host anyway (rings are locked). */
+        DreamV3FreeContiguousMemory(FenceVirt, PAGE_SIZE);
+        DreamV3FreeContiguousMemory(RingVirt, RingSize);
+        DevExt->GfxRing.VirtualAddress = NULL;
+        DevExt->GfxRing.Initialized = FALSE;
+        DevExt->GlobalFence.VirtualAddress = NULL;
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
-                   "AMDBC250-DREAM-V4.3: Falling back to KIQ ring (BASE_LO at 0xE060 is writable)\n"));
-
-        /* Try KIQ ring instead — KIQ_BASE_LO at 0xE060 is writable!
-         * IMPORTANT: KIQ_BASE_LO (native 0xCE00) is per-ME register — must
-         * target ME=1 via GRBM_GFX_INDEX for the write to take effect. */
-        DreamV3WriteRegister(DevExt, AMDBC250_REG_GRBM_GFX_INDEX,
-            AMDBC250_GRBM_GFX_INDEX_KIQ_VAL);
-        KeStallExecutionProcessor(1);
-
-        DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_KIQ_BASE_LO, BaseLoVal);
-        DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_KIQ_BASE_HI, BaseHiVal);
-        KeStallExecutionProcessor(1);
-
-        ULONG KiqBaseCheck = DreamV3ReadRegister(DevExt, AMDBC250_REG_CP_KIQ_BASE_LO);
-        if (KiqBaseCheck == BaseLoVal) {
-            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-                       "AMDBC250-DREAM-V4.3: KIQ BASE_LO write VERIFIED (0x%08X)\n", KiqBaseCheck));
-            DevExt->UseKiqRing = TRUE;
-
-            /* === SRBM+HQD KIQ Init (Linux gfx_v10_0.c method) === */
-            DevExt->UseHqdKiq = FALSE;
-
-            /* GRBM_GFX_INDEX confirmed at AMDBC250_REG_GRBM_GFX_INDEX (0x34D0).
-             * No probe needed — offset verified empirically on BC-250 P5.00 BIOS. */
-            DevExt->GrbmGfxIndexOffset = AMDBC250_REG_GRBM_GFX_INDEX;
-
-            /* Full HQD init sequence (Linux gfx_v10_0_kiq_init_register) */
-                /* Full HQD init sequence (Linux gfx_v10_0_kiq_init_register) */
-                /* 0. Select KIQ queue: ME=1, PIPE=0, QUEUE=0 */
-                DreamV3WriteRegister(DevExt, DevExt->GrbmGfxIndexOffset,
-                    AMDBC250_GRBM_GFX_INDEX_KIQ_VAL);
-                KeStallExecutionProcessor(1);
-
-                /* 1. Deactivate queue */
-                DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_HQD_ACTIVE, 0);
-                KeStallExecutionProcessor(1);
-
-                /* 2. Disable wptr polling */
-                DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_HQD_PQ_WPTR_POLL_CNTL, 0);
-
-                /* 3. Disable doorbell */
-                DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_HQD_PQ_DOORBELL_CONTROL, 0);
-
-                /* 4. Set EOP base/control */
-                DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_HQD_EOP_BASE_ADDR, 0);
-                DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_HQD_EOP_BASE_ADDR_HI, 0);
-                DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_HQD_EOP_CONTROL, 0x08000000);
-
-                /* 5. Set MQD base (zero — not using MQD) */
-                DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_MQD_BASE_ADDR, 0);
-                DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_MQD_BASE_ADDR_HI, 0);
-
-                /* 6. Set PQ base (ring buffer address) */
-                DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_HQD_PQ_BASE_LO, BaseLoVal);
-                DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_HQD_PQ_BASE_HI, BaseHiVal);
-
-                /* 7. Set PQ control (ring size in log2 DWORDs) */
-                DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_HQD_PQ_CONTROL, RbBufSz - 1);
-
-                /* 8. Clear RPTR report addr and WPTR poll addr */
-                DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_HQD_PQ_RPTR_REPORT_ADDR, 0);
-                DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_HQD_PQ_RPTR_REPORT_ADDR_HI, 0);
-                DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_HQD_PQ_WPTR_POLL_ADDR, 0);
-                DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_HQD_PQ_WPTR_POLL_ADDR_HI, 0);
-
-                /* 9. Set WPTR = 0 */
-                DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_HQD_PQ_WPTR_LO, 0);
-                DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_HQD_PQ_WPTR_HI, 0);
-
-                /* 10. Set VMID = 0 */
-                DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_HQD_VMID, 0);
-
-                /* 11. Set persistent state (process quantum flag + WPTR loop filter) */
-                DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_HQD_PERSISTENT_STATE, 0xE001);
-
-                /* 12. Activate queue */
-                DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_HQD_ACTIVE, 1);
-                KeStallExecutionProcessor(1);
-
-                /* 13. Restore GRBM_GFX_INDEX to full broadcast */
-                DreamV3WriteRegister(DevExt, DevExt->GrbmGfxIndexOffset,
-                    AMDBC250_GRBM_GFX_INDEX_BROADCAST_VAL);
-
-                /* 14. Notify RLC scheduler */
-                DreamV3WriteRegister(DevExt, AMDBC250_REG_RLC_CP_SCHEDULERS,
-                    AMDBC250_RLC_CP_SCHEDULERS_KIQ_VAL);
-
-                DevExt->UseHqdKiq = TRUE;
-                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-                    "AMDBC250-DREAM-V4.3: KIQ HQD init complete (GRBM_GFX_INDEX at 0x%04X)\n",
-                    DevExt->GrbmGfxIndexOffset));
-        } else {
-            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
-                       "AMDBC250-DREAM-V4.3: KIQ BASE_LO also read-only (0x%08X) — ring unusable\n",
-                       KiqBaseCheck));
-            /* Restore GRBM_GFX_INDEX to broadcast */
-            DreamV3WriteRegister(DevExt, AMDBC250_REG_GRBM_GFX_INDEX,
-                AMDBC250_GRBM_GFX_INDEX_BROADCAST_VAL);
-        }
+                    "AMDBC250-DREAM-V4.3: GFX ring init SKIPPED (no writable ring base) — CP stays halted\n"));
+        return STATUS_SUCCESS;
     } else {
         /* GFX ring base IS writable (unusual for BC-250) — use it */
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,

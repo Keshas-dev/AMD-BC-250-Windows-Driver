@@ -448,6 +448,11 @@ DreamV3HwInitialize(
     _In_ PDREAM_V3_DEVICE_EXTENSION DevExt
     );
 
+VOID
+DreamV3MarkHwInitStep(
+    _In_ ULONG Step
+    );
+
 NTSTATUS
 DreamV3HwReset(
     _In_ PDREAM_V3_DEVICE_EXTENSION DevExt

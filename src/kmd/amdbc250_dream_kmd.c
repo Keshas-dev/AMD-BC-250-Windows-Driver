@@ -3838,6 +3838,11 @@ DreamV3DeviceControl(
                 break;
             }
 
+            /* FULL INIT path entered (Flags=0). Sentinel marker 100 = before
+             * DreamV3HwInitialize; if a TDR occurs in the PCI scan / GPU-alive
+             * test below, Step_HwInit stays 100. */
+            DreamV3MarkHwInitStep(100);
+
             /* Verify GPU is alive � read a known register */
             {
                 ULONG gpuId = DreamV3ReadRegister(DevExt, 0x0000); /* GPU_ID or scratch */

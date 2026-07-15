@@ -325,23 +325,52 @@ DreamV3LoadSingleFirmware(
                 pollTimeoutUs, pollResult));
         }
         
-        /* Step 5: Unhalt the loaded engine (keep others halted) */
-        switch (FwType) {
-        case FW_TYPE_ME:
-            DreamV3WriteRegister(DevExt, REG_CP_ME_CNTL,
-                ME_CNTL__PFP_HALT | ME_CNTL__CE_HALT);
-            break;
-        case FW_TYPE_PFP:
-            DreamV3WriteRegister(DevExt, REG_CP_ME_CNTL,
-                ME_CNTL__ME_HALT | ME_CNTL__CE_HALT);
-            break;
-        case FW_TYPE_CE:
-            DreamV3WriteRegister(DevExt, REG_CP_ME_CNTL,
-                ME_CNTL__ME_HALT | ME_CNTL__PFP_HALT);
-            break;
-        case FW_TYPE_MEC:
-            DreamV3WriteRegister(DevExt, REG_MEC_ME1_CNTL, 0);
-            break;
+        /* Step 5: Unhalt the loaded engine (keep others halted).
+         * Kill-switch (HwUnhaltCp=0): skip the unhalt to isolate the 0x1A
+         * MEMORY_MANAGEMENT BSOD — if skipping the unhalt avoids the crash,
+         * the running loaded microcode is doing a rogue host DMA write. */
+        {
+            ULONG UnhaltCp = 0;
+            UNICODE_STRING Path;
+            RtlInitUnicodeString(&Path,
+                L"\\Registry\\Machine\\SYSTEM\\CurrentControlSet\\Services\\atikmdag");
+            OBJECT_ATTRIBUTES Oa;
+            InitializeObjectAttributes(&Oa, &Path, OBJ_CASE_INSENSITIVE, NULL, NULL);
+            HANDLE hKey = NULL;
+            if (NT_SUCCESS(ZwOpenKey(&hKey, KEY_READ, &Oa))) {
+                UNICODE_STRING vn;
+                RtlInitUnicodeString(&vn, L"HwUnhaltCp");
+                UCHAR buf[sizeof(KEY_VALUE_PARTIAL_INFORMATION) + sizeof(ULONG)] = {0};
+                ULONG ret = 0;
+                if (NT_SUCCESS(ZwQueryValueKey(hKey, &vn, KeyValuePartialInformation,
+                                               buf, sizeof(buf), &ret))) {
+                    PKEY_VALUE_PARTIAL_INFORMATION pi = (PKEY_VALUE_PARTIAL_INFORMATION)buf;
+                    if (pi->DataLength == sizeof(ULONG)) UnhaltCp = *(PULONG)pi->Data;
+                }
+                ZwClose(hKey);
+            }
+            if (UnhaltCp == 0) {
+                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+                           "AMDBC250-FW: Engine UNHALT SKIPPED (HwUnhaltCp=0)\n"));
+            } else {
+                switch (FwType) {
+                case FW_TYPE_ME:
+                    DreamV3WriteRegister(DevExt, REG_CP_ME_CNTL,
+                        ME_CNTL__PFP_HALT | ME_CNTL__CE_HALT);
+                    break;
+                case FW_TYPE_PFP:
+                    DreamV3WriteRegister(DevExt, REG_CP_ME_CNTL,
+                        ME_CNTL__ME_HALT | ME_CNTL__CE_HALT);
+                    break;
+                case FW_TYPE_CE:
+                    DreamV3WriteRegister(DevExt, REG_CP_ME_CNTL,
+                        ME_CNTL__ME_HALT | ME_CNTL__PFP_HALT);
+                    break;
+                case FW_TYPE_MEC:
+                    DreamV3WriteRegister(DevExt, REG_MEC_ME1_CNTL, 0);
+                    break;
+                }
+            }
         }
         KeStallExecutionProcessor(10);
         
