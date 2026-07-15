@@ -589,4 +589,63 @@ DEFAULT_QUEUE_ADDRS = {
 - DISPATCH_INITIATOR(0x80E0) accepts VALID command but shader array never executes (WGPs=0)
 - SPI_PG_ENABLE_STATIC_WGP_MASK(0x5C3C) confirmed hardware read-only at 0 — compute permanently fused
 
+## 2026-07-14: DreamV3HwInitialize TDR/0x1A fully diagnosed — host compute init IMPOSSIBLE
+
+### Method
+Binary-searched the full-init crash with two mechanisms added to `amdbc250_dream_hw_init.c`:
+- `DreamV3ReadMaxStep()` reads `HwInitMaxStep` DWORD from the service root — caps init at step N
+  (0 = run all). Each step `N` is gated: `if (MaxStep != 0 && N > MaxStep) return STATUS_SUCCESS;`
+- `DreamV3MarkHwInitStep(Step)` writes `Step_HwInit` DWORD to the service root (survives reboot,
+  unlike in-memory markers which a hard reboot discards).
+- Per-step **kill-switches** (registry DWORDs, default 1) skip individual dangerous steps.
+
+### Symptom progression
+- Full init (`Flags=0`) → white screen / hard hang / **0x1A MEMORY_MANAGEMENT** BSOD (dump screen, not display freeze).
+- cap=4 OK, cap=6 OK, cap=7 = 0x1A. Then isolated each step.
+
+### Root causes of 0x1A (all confirmed by skipping the step → crash gone)
+| Step | What | Why it crashes | Kill-switch (default) |
+|------|------|----------------|----------------------|
+| 6 Firmware | **CP engine UNHALT** after host-loaded firmware | GPU runs loaded microcode and performs a **rogue host DMA write** → corrupts page tables → 0x1A | `HwUnhaltCp=0` (firmware still loaded via IC_BASE DMA, CP stays halted) |
+| 9 GART | `DreamV3GartInitialize` writes `MC_VM_AGP_BASE/TOP/BOT` (0x9528/2C/30) | MC is SOS-owned on BC-250; no host AGP aperture — writing these triggers 0x1A | `HwInitGart=0` |
+| 10 VM | `DreamV3VmInitialize`→`ConfigureSystemAperture` writes MC_VM system-aperture regs | Same SOS-owned MC class as GART | `HwInitVm=0` |
+| 7 GFX ring | ring BASE registers host-read-only (SOS-locked); old code wrote GRBM_GFX_INDEX + allocated 2MB ring | GRBM_GFX_INDEX write is a known display-corruption/BSOD cause; ring BASE unwritable | `HwInitGfxRing=0` |
+| 8 SDMA ring | same class as GFX ring (BASE host-read-only) | suspected 0x1A source (kmd.c:3832) | `HwInitSdmaRing=0` |
+
+Steps 11 (Display/DCN), 12 (PSP/NBIO), 13 (RLC), 14 (VRAM detect) are **SAFE** and run normally.
+RLC resume (`DreamV3InitRlc`) is gated by `RlcResumeEnabled` (reads from non-existent
+`...\atikmdag\Parameters` subkey → unreachable) and is OFF by default anyway.
+
+### Final outcome
+- All dangerous defaults flipped to **0** in commit `7aa984f`. Driver now loads **stably with NO
+  registry keys set** — full init (`Flags=0`) returns SUCCESS, no 0x1A, no white screen.
+- `HwInitFirmware` stays `1`: firmware IS loaded (safe), only the engine unhalt is disabled.
+- The 5 kill-switches remain as opt-in registry overrides for future experimentation.
+
+### FINAL CONCLUSION: host compute init is physically impossible on BC-250
+1. **CP cannot be unhalted** from the host — doing so makes the GPU rogue-DMA host memory (0x1A).
+2. **Ring BASE registers (GFX 0xDA60, KIQ 0xE060) are host-read-only** (SOS/PSP-locked) → no ring
+   can be based on the host, so even with microcode the CP/MEC have no command buffer.
+3. **WGPs are fused off** (SPI_PG_ENABLE_STATIC_WGP_MASK 0x5C3C = 0, hardware read-only) — confirmed
+   independently by Linux (24 CUs but ROCm reports SDMA/KIQ/CP timeouts; Mesa uses RADV_DEBUG=nocompute).
+4. Compute firmware and engine control belong to the **PSP/SOS**, not the host driver.
+
+The GPU driver is therefore a **stable register/display/PSP-proxy control driver** only. Compute
+via the host path will never work; any compute must go through the PSP mailbox (see 2026-07-01
+breakthrough), which loads firmware but cannot wake the host-locked CP either.
+
+### How to re-run the bisection (if needed)
+```
+reg add "HKLM\SYSTEM\CurrentControlSet\Services\atikmdag" /v HwInitMaxStep /t REG_DWORD /d <N> /f
+# plus any of: HwInitFirmware=1 HwUnhaltCp=0 HwInitGfxRing=0 HwInitSdmaRing=0 HwInitGart=0 HwInitVm=0
+```
+Then reboot and run `test-tools\full-init-test.exe` as Admin (Flags=0 full init).
+Last *successful* cap = step before the crash.
+
+### New test tools
+- `test-tools/full-init-test.c` + `compile-full-init.bat` — triggers `INIT_HARDWARE` Flags=0 (full init).
+- `test-tools/seg1-dispatch-test.c` + `compile-seg1-dispatch.bat` — dispatches via SEG1 alias
+  0x120E0 (live/writable PGM_RSRC, but execution still silent — confirms SEG1 is not the compute unlock).
+
+
 
