@@ -330,9 +330,11 @@ NTSTATUS Amdbc250PspAllocateFirmwareBuffer(ULONG Size)
 
     PHYSICAL_ADDRESS low = {0};
     PHYSICAL_ADDRESS high = {0};
+    PHYSICAL_ADDRESS boundary = {0};
     high.QuadPart = 0xFFFFFFFFULL;
 
-    g_FwBuffer = MmAllocateContiguousMemory(Size, low);
+    g_FwBuffer = MmAllocateContiguousMemorySpecifyCache(
+        Size, low, high, boundary, MmNonCached);
     if (!g_FwBuffer) {
         KeReleaseSpinLock(&g_FwLock, oldIrql);
         return STATUS_INSUFFICIENT_RESOURCES;
