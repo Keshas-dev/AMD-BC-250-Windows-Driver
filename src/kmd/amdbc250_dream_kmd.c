@@ -3759,6 +3759,11 @@ DreamV3DeviceControl(
             KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                 "AMDBC250-DREAM-V4.3: MMIO mapped: VA=%p\n", DevExt->MmioVirtualBase));
 
+            /* Publish the BAR5 mapping to the PSP proxy so it can read SOS
+             * status (C2PMSG_81) directly without depending on the PSP driver's
+             * own BAR5 mapping (which is often NULL on Win11 26100). */
+            Amdbc250PspSetGpuBar5Va(DevExt->MmioVirtualBase);
+
             /* Map VRAM framebuffer BAR (BAR0) if provided (new struct with Fb fields) */
             if (inputLen >= sizeof(AMDBC250_IOCTL_INIT_HARDWARE) &&
                 InitHw->FbPhysicalBase != 0 && InitHw->FbSize != 0) {
@@ -7418,5 +7423,14 @@ Amdbc250PspGetGpuBar5Va(VOID)
         (PDREAM_V3_DEVICE_EXTENSION)g_ControlDevice->DeviceExtension;
     if (!ext) return NULL;
     return ext->MmioVirtualBase;
+}
+
+/* Publish the GPU BAR5 virtual mapping for the PSP proxy (called by INIT_HARDWARE). */
+VOID
+Amdbc250PspSetGpuBar5Va(PVOID Va)
+{
+    /* Forward to the PSP proxy module so it doesn't depend on g_ControlDevice. */
+    extern VOID Amdbc250PspPublishGpuBar5(PVOID Va);
+    Amdbc250PspPublishGpuBar5(Va);
 }
 

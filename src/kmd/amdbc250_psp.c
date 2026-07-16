@@ -68,6 +68,11 @@ static KSPIN_LOCK g_FwLock;
 /* Shared PSP/SOS context (SOS alive state, etc.) — declared early so the
  * proxy init path can update it. */
 static AMDBC250_PSP_CONTEXT g_PspContext = {0};
+
+/* GPU BAR5 virtual mapping, published by the INIT_HARDWARE IOCTL handler so
+ * the PSP proxy can read SOS status (C2PMSG_81) directly without depending on
+ * the PSP driver's own BAR5 mapping. */
+static PVOID g_GpuBar5Va = NULL;
 /* NOTE: g_GpcomRingVa points to the PSP GPCOM ring, NOT a KIQ ring.
    The KIQ ring is a separate GPU ring. The current code incorrectly
    writes PM4 packets into the GPCOM ring, which does not work.
@@ -104,20 +109,22 @@ static BOOLEAN PspProxyInit(VOID)
             g_GpcomRingSize = 0x1000;
             g_GpcomRingAvailable = (gpuInfo.RingBufferPA != 0) ? TRUE : FALSE;
 
-            /* Fallback: the PSP driver's GpuMmioBase may be NULL if its InitHw
-             * ran before the GPU driver mapped BAR5 (common on Win11 26100). In
-             * that case GET_GPU_INFO returns C2pmsg81=0xFFFFFFFF. Read SOS status
-             * directly from the GPU BAR5 mapping we already hold (INIT_HARDWARE
-             * is done before this proxy is opened by the test tools). */
-            ULONG c2pmsg81 = gpuInfo.C2pmsg81;
-            if (c2pmsg81 == 0xFFFFFFFF) {
-                PVOID bar5 = Amdbc250PspGetGpuBar5Va();
-                if (bar5) {
-                    c2pmsg81 = READ_REGISTER_ULONG(
-                        (PULONG)((PUCHAR)bar5 + GPU_BAR5_C2PMSG_81_OFFSET));
-                    KdPrint(("BC250-PSP: GET_GPU_INFO C2PMSG_81 was 0xFFFFFFFF, "
-                        "read GPU BAR5 directly -> 0x%08X\n", c2pmsg81));
-                }
+            /* Determine SOS-alive. Prefer reading C2PMSG_81 directly from the GPU
+             * BAR5 mapping we already hold (INIT_HARDWARE is done before this proxy
+             * is opened by the test tools). The PSP driver's own GpuMmioBase is
+             * often NULL on Win11 26100 because its InitHw ran before the GPU
+             * driver mapped BAR5, so GET_GPU_INFO cannot see SOS status. */
+            ULONG c2pmsg81 = 0;
+            PVOID bar5 = Amdbc250PspGetGpuBar5Va();
+            if (bar5) {
+                c2pmsg81 = READ_REGISTER_ULONG(
+                    (PULONG)((PUCHAR)bar5 + GPU_BAR5_C2PMSG_81_OFFSET));
+                KdPrint(("BC250-PSP: Read C2PMSG_81 directly from GPU BAR5 -> 0x%08X\n", c2pmsg81));
+            }
+            if (c2pmsg81 == 0) {
+                /* Fall back to PSP driver's report. */
+                c2pmsg81 = gpuInfo.C2pmsg81;
+                KdPrint(("BC250-PSP: Falling back to PSP GET_GPU_INFO C2PMSG_81=0x%08X\n", c2pmsg81));
             }
 
             KdPrint(("BC250-PSP: Proxy opened, C2PMSG_81=0x%08X FW=%u RingPA=0x%08X Ring=%s\n",
@@ -364,6 +371,12 @@ NTSTATUS Amdbc250PspCopyFirmwareData(PUCHAR FirmwareData, ULONG Size)
 PHYSICAL_ADDRESS Amdbc250PspFirmwarePa(VOID)
 {
     return g_FwBufferPa;
+}
+
+/* Accept the GPU BAR5 VA published by the GPU driver's INIT_HARDWARE handler. */
+VOID Amdbc250PspPublishGpuBar5(PVOID Va)
+{
+    g_GpuBar5Va = Va;
 }
 
 /* Initialize KIQ ring for command submission */
