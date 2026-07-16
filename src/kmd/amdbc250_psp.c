@@ -266,13 +266,12 @@ ULONG Amdbc250PspKiqReadReg(ULONG GpuRegOffset)
 
 /*
  * Load GPU firmware via the PSP driver's LOAD_IP_FW mailbox path.
- * Uses PSP_IOCTL_KIQ_LOAD_FW (0x822), whose input layout is:
- *   inputBuffer[0] = fwType
- *   inputBuffer[1] = fwSize
- *   inputBuffer[2..] = firmware blob (fwSize bytes)
- * The PSP driver copies the blob and submits it to the SOS secure mailbox
- * (GFX_CMD_ID_LOAD_IP_FW = 0x06). This is the path that actually works on
- * BC-250 (verified via psp-mailbox-rlc-test.exe).
+ * Uses PSP_IOCTL_LOAD_IP_FW_DIRECT (0x824), whose input layout is:
+ *   PSP_LOAD_IP_FW_REQUEST { FwType, FwSize }
+ *   firmware blob (FwSize bytes) immediately after the header.
+ * The PSP driver submits the blob to the SOS secure mailbox
+ * (GFX_CMD_ID_LOAD_IP_FW = 0x06) via C2PMSG_35/36/37/81. This is the path
+ * that actually works on BC-250 (verified via psp-mailbox-rlc-test.exe).
  */
 NTSTATUS Amdbc250PspKiqLoadFirmware(ULONG FwType, ULONG FwSize, PHYSICAL_ADDRESS FwPa)
 {
@@ -290,29 +289,30 @@ NTSTATUS Amdbc250PspKiqLoadFirmware(ULONG FwType, ULONG FwSize, PHYSICAL_ADDRESS
     }
 
     /* The firmware blob must already be in the shared buffer
-     * (Amdbc250PspCopyFirmwareData). Build the 0x822 input layout. */
+     * (Amdbc250PspCopyFirmwareData). Build the 0x824 input layout. */
     if (!g_FwBuffer || FwSize > g_FwBufferSize) {
         KdPrint(("KIQ_LOAD_FW: firmware buffer not ready (buf=%p size=%u)\n",
             g_FwBuffer, g_FwBufferSize));
         return STATUS_INVALID_PARAMETER;
     }
 
-    /* Allocate a contiguous input buffer: 2 ULONGs + fwSize bytes. */
-    ULONG inSize = sizeof(ULONG) * 2 + FwSize;
-    PULONG inBuf = (PULONG)ExAllocatePool2(POOL_FLAG_NON_PAGED, inSize, 'fw');
+    /* Allocate a contiguous input buffer: header + fwSize bytes. */
+    ULONG inSize = sizeof(PSP_LOAD_IP_FW_REQUEST) + FwSize;
+    PSP_LOAD_IP_FW_REQUEST *inBuf =
+        (PSP_LOAD_IP_FW_REQUEST *)ExAllocatePool2(POOL_FLAG_NON_PAGED, inSize, 'fw');
     if (!inBuf) {
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
-    inBuf[0] = FwType;
-    inBuf[1] = FwSize;
-    RtlCopyMemory((PUCHAR)inBuf + sizeof(ULONG) * 2, g_FwBuffer, FwSize);
+    inBuf->FwType = FwType;
+    inBuf->FwSize = FwSize;
+    RtlCopyMemory((PUCHAR)inBuf + sizeof(PSP_LOAD_IP_FW_REQUEST), g_FwBuffer, FwSize);
 
-    KdPrint(("KIQ_LOAD_FW: type=%u size=%u via PSP_IOCTL_KIQ_LOAD_FW\n", FwType, FwSize));
+    KdPrint(("KIQ_LOAD_FW: type=%u size=%u via PSP_IOCTL_LOAD_IP_FW_DIRECT\n", FwType, FwSize));
 
     IO_STATUS_BLOCK iosb;
     NTSTATUS status = ZwDeviceIoControlFile(g_PspProxyHandle, NULL, NULL, NULL,
-        &iosb, PSP_IOCTL_KIQ_LOAD_FW, inBuf, inSize, NULL, 0);
+        &iosb, PSP_IOCTL_LOAD_IP_FW_DIRECT, inBuf, inSize, NULL, 0);
 
     ExFreePoolWithTag(inBuf, 'fw');
     return status;

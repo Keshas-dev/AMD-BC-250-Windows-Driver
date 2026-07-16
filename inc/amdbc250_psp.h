@@ -14,6 +14,16 @@
 #define MP0_C2PMSG_81_BYTE            0x0244
 #define MP0_C2PMSG_101_BYTE           0x0294
 
+/* PSP driver IOCTL to load GPU IP firmware via the SOS secure mailbox
+ * (C2PMSG_35/36/37/81). This is the working path on BC-250. */
+#define PSP_IOCTL_LOAD_IP_FW_DIRECT  CTL_CODE(FILE_DEVICE_UNKNOWN, 0x824, METHOD_BUFFERED, FILE_ANY_ACCESS)
+
+typedef struct _PSP_LOAD_IP_FW_REQUEST {
+    ULONG FwType;
+    ULONG FwSize;
+    /* Firmware blob (FwSize bytes) follows immediately after this header. */
+} PSP_LOAD_IP_FW_REQUEST, *PPSP_LOAD_IP_FW_REQUEST;
+
 typedef struct _AMDBC250_PSP_CONTEXT {
     PUCHAR MmioBase;
     ULONG MmioSize;
