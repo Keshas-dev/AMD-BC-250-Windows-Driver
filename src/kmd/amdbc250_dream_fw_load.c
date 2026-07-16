@@ -28,6 +28,7 @@ Environment:
 --*/
 
 #include "amdbc250_dream_kmd.h"
+#include "amdbc250_psp.h"
 
 /* Firmware type IDs (matching Linux AMDGPU_UCODE_ID) */
 #define FW_TYPE_ME      1
@@ -482,16 +483,28 @@ DreamV3LoadAllFirmware(
     UINT32 loadedCount = 0;
 
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-        "AMDBC250-FW: Loading all CP firmware (direct IC_BASE DMA)\n"));
+        "AMDBC250-FW: Loading all CP firmware via PSP KIQ mailbox (LOAD_IP_FW)\n"));
 
-    if (!DevExt->MmioVirtualBase) {
+    /* We deliberately do NOT use the host IC_BASE DMA path (DreamV3LoadSingleFirmware):
+     * on BC-250 the host cannot un-halt the CP after loading microcode — doing so
+     * makes the GPU run the loaded firmware and perform a rogue host DMA write,
+     * which corrupts system memory (0x1A MEMORY_MANAGEMENT). Instead we hand the
+     * firmware blob to the PSP driver, which loads it through the SOS secure
+     * mailbox (GFX_CMD_ID_LOAD_IP_FW) — the same path Linux uses for this ASIC.
+     * The PSP/SOS owns CP/ring bring-up; the host must not touch CP_ME_CNTL. */
+
+    /* Ensure the PSP proxy is open (initializes SOS context). */
+    if (!NT_SUCCESS(Amdbc250PspKiqInit())) {
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
-            "AMDBC250-FW: No BAR5 mapping\n"));
+            "AMDBC250-FW: PSP/SOS proxy init failed — cannot load firmware via mailbox\n"));
         return STATUS_DEVICE_NOT_READY;
     }
 
-    /* Halt all engines before loading firmware */
-    DreamV3HaltAllEngines(DevExt);
+    if (!Amdbc250PspGetContext() || !Amdbc250PspGetContext()->SosAlive) {
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
+            "AMDBC250-FW: PSP/SOS not available — cannot load firmware via mailbox\n"));
+        return STATUS_DEVICE_NOT_READY;
+    }
 
     for (UINT32 i = 0; i < ARRAYSIZE(g_FwLoadTable); i++) {
         PUCHAR fwData = NULL;
@@ -507,24 +520,42 @@ DreamV3LoadAllFirmware(
             continue;
         }
 
-        NTSTATUS fwStatus = DreamV3LoadSingleFirmware(DevExt,
-            g_FwLoadTable[i].FwType, fwData, fwSize);
-
+        /* Copy blob into a contiguous shared buffer the PSP can DMA from. */
+        NTSTATUS bufStatus = Amdbc250PspAllocateFirmwareBuffer(fwSize);
+        if (!NT_SUCCESS(bufStatus)) {
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
+                "AMDBC250-FW: Failed to alloc fw buffer for type=%u (0x%08X)\n",
+                g_FwLoadTable[i].FwType, bufStatus));
+            ExFreePoolWithTag(fwData, 'fw');
+            continue;
+        }
+        bufStatus = Amdbc250PspCopyFirmwareData(fwData, fwSize);
         ExFreePoolWithTag(fwData, 'fw');
+        if (!NT_SUCCESS(bufStatus)) {
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
+                "AMDBC250-FW: Failed to copy fw data for type=%u (0x%08X)\n",
+                g_FwLoadTable[i].FwType, bufStatus));
+            continue;
+        }
+
+        PHYSICAL_ADDRESS fwPa = Amdbc250PspFirmwarePa();
+
+        NTSTATUS fwStatus = Amdbc250PspKiqLoadFirmware(
+            g_FwLoadTable[i].FwType, fwSize, fwPa);
 
         if (NT_SUCCESS(fwStatus)) {
             loadedCount++;
             KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-                "AMDBC250-FW: Loaded type=%u OK\n", g_FwLoadTable[i].FwType));
+                "AMDBC250-FW: Loaded type=%u via PSP OK\n", g_FwLoadTable[i].FwType));
         } else {
             KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
-                "AMDBC250-FW: Loading type=%u failed (0x%08X)\n",
+                "AMDBC250-FW: PSP load type=%u failed (0x%08X)\n",
                 g_FwLoadTable[i].FwType, fwStatus));
         }
     }
 
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-        "AMDBC250-FW: Loaded %u/%llu firmware types\n",
+        "AMDBC250-FW: Loaded %u/%llu firmware types via PSP mailbox\n",
         loadedCount, (ULONGLONG)ARRAYSIZE(g_FwLoadTable)));
 
     return (loadedCount > 0) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;

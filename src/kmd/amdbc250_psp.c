@@ -332,6 +332,12 @@ NTSTATUS Amdbc250PspCopyFirmwareData(PUCHAR FirmwareData, ULONG Size)
     return STATUS_SUCCESS;
 }
 
+/* Return the physical address of the shared firmware buffer (or 0 if none). */
+PHYSICAL_ADDRESS Amdbc250PspFirmwarePa(VOID)
+{
+    return g_FwBufferPa;
+}
+
 /* Initialize KIQ ring for command submission */
 NTSTATUS Amdbc250PspKiqInit(VOID)
 {

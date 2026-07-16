@@ -58,6 +58,7 @@ ULONG Amdbc250PspKiqReadReg(ULONG GpuRegOffset);
 NTSTATUS Amdbc250PspKiqLoadFirmware(ULONG FwType, ULONG FwSize, PHYSICAL_ADDRESS FwPa);
 NTSTATUS Amdbc250PspAllocateFirmwareBuffer(ULONG Size);
 NTSTATUS Amdbc250PspCopyFirmwareData(PUCHAR FirmwareData, ULONG Size);
+PHYSICAL_ADDRESS Amdbc250PspFirmwarePa(VOID);
 VOID Amdbc250PspKiqCleanup(VOID);
 VOID Amdbc250PspProxyCleanup(VOID);
 
