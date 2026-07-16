@@ -40,6 +40,7 @@ NTSTATUS Amdbc250PspInit(ULONG64 MmioPhysicalBase);
 VOID Amdbc250PspCleanup(VOID);
 NTSTATUS Amdbc250PspSendCommand(ULONG Command, PUCHAR Data, ULONG DataSize);
 PAMDBC250_PSP_CONTEXT Amdbc250PspGetContext(VOID);
+PVOID Amdbc250PspGetGpuBar5Va(VOID);
 ULONG Amdbc250PspReadRegister(ULONG RegisterOffset);
 VOID Amdbc250PspWriteRegister(ULONG RegisterOffset, ULONG Value);
 VOID Amdbc250PspUnmapRegisters(VOID);

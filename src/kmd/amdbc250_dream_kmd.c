@@ -7406,3 +7406,17 @@ DreamV3ShaderCompileStub(
 // Output: ULONG Value (register value read)
 // This allows PSP driver to access mailbox registers on Windows 11 26100
 // where MmMapIoSpace for BAR5 is blocked from the PSP driver.
+
+/* Return the GPU BAR5 virtual mapping (or NULL if INIT_HARDWARE not done).
+ * Used by the PSP proxy so it can read SOS status (C2PMSG_81) directly from
+ * the GPU MMIO when the PSP driver's own GpuMmioBase is not yet established. */
+PVOID
+Amdbc250PspGetGpuBar5Va(VOID)
+{
+    if (!g_ControlDevice) return NULL;
+    PDREAM_V3_DEVICE_EXTENSION ext =
+        (PDREAM_V3_DEVICE_EXTENSION)g_ControlDevice->DeviceExtension;
+    if (!ext) return NULL;
+    return ext->MmioVirtualBase;
+}
+

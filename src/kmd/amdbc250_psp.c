@@ -24,6 +24,9 @@ typedef struct _PSP_KIQ_SUBMIT_REQUEST {
 #define PSP_IOCTL_KIQ_LOAD_FW   CTL_CODE(FILE_DEVICE_UNKNOWN, 0x822, METHOD_BUFFERED, FILE_ANY_ACCESS) /* KIQ LOAD_IP_FW via PM4 */
 #define PSP_CMD_BUF_SIZE        1024  /* Command buffer size for PSP firmware commands */
 
+/* C2PMSG_81 (SOS alive) byte offset within GPU BAR5 (0xFE800000). */
+#define GPU_BAR5_C2PMSG_81_OFFSET   0x10614
+
 /* PSP ring frame command IDs (from Linux psp_gfx_if.h) */
 #define GFX_CMD_ID_LOAD_IP_FW   0x00000006
 
@@ -61,6 +64,10 @@ static PHYSICAL_ADDRESS g_FwBufferPa = {0};
 static ULONG g_FwBufferSize = 0;
 static ULONG g_FwCount = 0;
 static KSPIN_LOCK g_FwLock;
+
+/* Shared PSP/SOS context (SOS alive state, etc.) — declared early so the
+ * proxy init path can update it. */
+static AMDBC250_PSP_CONTEXT g_PspContext = {0};
 /* NOTE: g_GpcomRingVa points to the PSP GPCOM ring, NOT a KIQ ring.
    The KIQ ring is a separate GPU ring. The current code incorrectly
    writes PM4 packets into the GPCOM ring, which does not work.
@@ -96,8 +103,25 @@ static BOOLEAN PspProxyInit(VOID)
             g_GpcomRingPa = gpuInfo.RingBufferPA;
             g_GpcomRingSize = 0x1000;
             g_GpcomRingAvailable = (gpuInfo.RingBufferPA != 0) ? TRUE : FALSE;
+
+            /* Fallback: the PSP driver's GpuMmioBase may be NULL if its InitHw
+             * ran before the GPU driver mapped BAR5 (common on Win11 26100). In
+             * that case GET_GPU_INFO returns C2pmsg81=0xFFFFFFFF. Read SOS status
+             * directly from the GPU BAR5 mapping we already hold (INIT_HARDWARE
+             * is done before this proxy is opened by the test tools). */
+            ULONG c2pmsg81 = gpuInfo.C2pmsg81;
+            if (c2pmsg81 == 0xFFFFFFFF) {
+                PVOID bar5 = Amdbc250PspGetGpuBar5Va();
+                if (bar5) {
+                    c2pmsg81 = READ_REGISTER_ULONG(
+                        (PULONG)((PUCHAR)bar5 + GPU_BAR5_C2PMSG_81_OFFSET));
+                    KdPrint(("BC250-PSP: GET_GPU_INFO C2PMSG_81 was 0xFFFFFFFF, "
+                        "read GPU BAR5 directly -> 0x%08X\n", c2pmsg81));
+                }
+            }
+
             KdPrint(("BC250-PSP: Proxy opened, C2PMSG_81=0x%08X FW=%u RingPA=0x%08X Ring=%s\n",
-                gpuInfo.C2pmsg81, gpuInfo.FwCount, (ULONG)g_GpcomRingPa,
+                c2pmsg81, gpuInfo.FwCount, (ULONG)g_GpcomRingPa,
                 g_GpcomRingAvailable ? "YES" : "NO"));
             if (g_GpcomRingAvailable && g_GpcomRingPa) {
                 PHYSICAL_ADDRESS ringPhys;
@@ -105,7 +129,11 @@ static BOOLEAN PspProxyInit(VOID)
                 g_GpcomRingVa = MmMapIoSpace(ringPhys, g_GpcomRingSize, MmNonCached);
                 KdPrint(("BC250-PSP: GPCOM ring PA=0x%llX VA=%p\n", ringPhys.QuadPart, g_GpcomRingVa));
             }
-            
+
+            /* Update SOS-alive in the shared PSP context (the loader checks this). */
+            g_PspContext.SosAlive = (c2pmsg81 == 0xF0000010) ? TRUE : FALSE;
+            g_PspContext.Initialized = TRUE;
+
             /* Initialize KIQ ring for command submission */
             if (NT_SUCCESS(Amdbc250PspKiqInit())) {
                 g_PspProxyAvailable = TRUE;
@@ -430,8 +458,6 @@ VOID Amdbc250PspProxyCleanup(VOID)
 #define PSP_MAX_WAIT_MS               5000
 #define PSP_BOOTLOADER_WAIT_MS        1000
 #define PSP_RING_SIZE                 0x1000
-
-static AMDBC250_PSP_CONTEXT g_PspContext = {0};
 
 static ULONG g_Mp0BaseDword = 0;
 
