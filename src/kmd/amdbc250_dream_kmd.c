@@ -5714,257 +5714,80 @@ DreamV3DeviceControl(
         }
 
         RtlCopyMemory(fwVa, fwBlob, fwSize);
-        PHYSICAL_ADDRESS fwPa = MmGetPhysicalAddress(fwVa);
 
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-            "AMDBC250-DREAM-V4.3: LOAD_CP_FW firmware PA=0x%llX size=%u\n",
-            fwPa.QuadPart, fwSize));
+            "AMDBC250-DREAM-V4.3: LOAD_CP_FW firmware buffer=%p size=%u\n",
+            fwVa, fwSize));
 
-        /* Define register access macros (use safe WDK macros, not volatile pointers) */
-        #define BAR5_WR(off, val) DreamV3WriteRegister(ext, (off), (val))
-        #define BAR5_RD(off) DreamV3ReadRegister(ext, (off))
+        /* Load firmware via the PSP secure mailbox (LOAD_IP_FW) instead of
+         * the host IC_BASE DMA + CP unhalt path.
+         *
+         * On BC-250 the host cannot un-halt a CP engine after loading microcode
+         * — doing so lets the GPU run the firmware and perform a rogue host DMA
+         * write that corrupts system memory (0x1A MEMORY_MANAGEMENT). The PSP
+         * driver hands the blob to the SOS, which loads it through the secure
+         * mailbox (GFX_CMD_ID_LOAD_IP_FW), exactly like Linux does for this ASIC.
+         * The host must NOT touch CP_ME_CNTL or IC_BASE. */
 
-        /* Register offsets (GC_BASE-shifted byte offsets) */
-        #define REG_ME_CNTL        0x4A74
-        #define REG_SCRATCH        0x32D4
-        #define REG_GRBM_INDEX     0x34D0
+        resp->Result = 0;
 
-        /* HYP ucode upload registers */
-        #define REG_ME_UCODE_ADDR  0x172B8
-        #define REG_ME_UCODE_DATA  0x172BC
-        #define REG_PFP_UCODE_ADDR 0x172B0
-        #define REG_PFP_UCODE_DATA 0x172B4
-        #define REG_CE_UCODE_ADDR  0x172C0
-        #define REG_CE_UCODE_DATA  0x172C4
-
-        /* IC_BASE registers (firmware DMA target) */
-        #define REG_ME_IC_CNTL     0x17378
-        #define REG_ME_IC_LO       0x17370
-        #define REG_ME_IC_HI       0x17374
-        #define REG_PFP_IC_CNTL    0x17368
-        #define REG_PFP_IC_LO      0x17360
-        #define REG_PFP_IC_HI      0x17364
-        #define REG_CE_IC_CNTL     0x17388
-        #define REG_CE_IC_LO       0x17380
-        #define REG_CE_IC_HI       0x17384
-
-/* MEC registers (compute engine firmware) */
-#define REG_MEC_IC_CNTL    0x17398
-#define REG_MEC_IC_LO      0x17390
-#define REG_MEC_IC_HI      0x17394
-#define REG_MEC_ME1_CNTL   0x7A00   /* MEC ME1 halt control */
-        #define MEC_ME1_HALT       (1 << 0) /* bit0=halt (potentially inverted; write 1=halt, 0=unhalt currently) */
-
-/* RLC registers — probed: 0x14664/0x14668 and 0x3A4C/0x3A50 are both DEAD (reads 0, writes hang).
- * RLC firmware loading is NOT SUPPORTED on BC-250 — registers don't exist in BAR5 space.
- * Linux BC-250 uses RLC autoload (PSP-based), which is also not available.
- */
-
-        __try {
-            /* Step 1: Halt — only halt target engine */
-            if (fwType == 4) {
-                /* MEC only: don't halt GFX engines */
-                BAR5_WR(REG_MEC_ME1_CNTL, MEC_ME1_HALT);
-            } else {
-                BAR5_WR(REG_ME_CNTL, (1 << 28) | (1 << 30) | (1 << 29));  /* ME_HALT | PFP_HALT | CE_HALT */
-                BAR5_WR(REG_MEC_ME1_CNTL, MEC_ME1_HALT);  /* Also halt MEC */
-            }
-            KeStallExecutionProcessor(10);
-
-            /* Step 2: Read back ME_CNTL to confirm halt */
-            UINT32 meCntlRead = BAR5_RD(REG_ME_CNTL);
-            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-                "AMDBC250-DREAM-V4.3: LOAD_CP_FW ME_CNTL after halt=0x%08X\n", meCntlRead));
-
-            /* Step 3: Set IC_BASE for target engine
-             * IC_BASE_CNTL: VMID=0, cache policy = uncached for DMA
-             * IC_BASE_LO/HI: physical address of firmware buffer
-             * GPU DMA engine will read firmware from this address
-             */
-            UINT32 icBaseLo = (UINT32)(fwPa.QuadPart & 0xFFFFFFFF);
-            UINT32 icBaseHi = (UINT32)(fwPa.QuadPart >> 32);
-
-            /* Set IC_BASE: write LO/HI first (address), then CNTL=0 to clear.
-             * Linux writes IC_BASE_CNTL=0 and triggers DMA via UCODE_ADDR write.
-             * IMPORTANT: write LO/HI BEFORE CNTL to avoid DMA starting with stale address. */
-            if (fwType == 1) {
-                /* ME firmware */
-                BAR5_WR(REG_ME_IC_LO, icBaseLo);
-                BAR5_WR(REG_ME_IC_HI, icBaseHi);
-                BAR5_WR(REG_ME_IC_CNTL, 0);  /* Clear, don't set bit 8 */
-                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-                    "AMDBC250-DREAM-V4.3: LOAD_CP_FW ME IC_BASE=0x%08X%08X\n", icBaseHi, icBaseLo));
-            } else if (fwType == 2) {
-                /* PFP firmware */
-                BAR5_WR(REG_PFP_IC_LO, icBaseLo);
-                BAR5_WR(REG_PFP_IC_HI, icBaseHi);
-                BAR5_WR(REG_PFP_IC_CNTL, 0);
-                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-                    "AMDBC250-DREAM-V4.3: LOAD_CP_FW PFP IC_BASE=0x%08X%08X\n", icBaseHi, icBaseLo));
-            } else if (fwType == 3) {
-                /* CE firmware */
-                BAR5_WR(REG_CE_IC_LO, icBaseLo);
-                BAR5_WR(REG_CE_IC_HI, icBaseHi);
-                BAR5_WR(REG_CE_IC_CNTL, 0);
-                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-                    "AMDBC250-DREAM-V4.3: LOAD_CP_FW CE IC_BASE=0x%08X%08X\n", icBaseHi, icBaseLo));
-            } else {
-                /* MEC firmware (type 4) */
-                BAR5_WR(REG_MEC_IC_LO, icBaseLo);
-                BAR5_WR(REG_MEC_IC_HI, icBaseHi);
-                BAR5_WR(REG_MEC_IC_CNTL, 0);
-                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-                    "AMDBC250-DREAM-V4.3: LOAD_CP_FW MEC IC_BASE=0x%08X%08X\n", icBaseHi, icBaseLo));
-            }
-
-            /* Step 4: Upload Jump Table (JT) via UCODE_DATA
-             * The JT is a table of DWORDs at the end of the firmware ucode.
-             * GPU reads JT from the IC_BASE address, but we also need to
-             * "prime" it by writing the JT entries via the UCODE_DATA path.
-             * JT is at: ucode_start + jtOffsetDw, size = jtSizeDw DWORDs.
-             */
-            UINT32 ucodeStartOff = ucodeOffset;  /* byte offset from blob start */
-            UINT32 jtByteOff = ucodeStartOff + (jtOffsetDw * 4);
-            UINT32 jtSizeBytes = jtSizeDw * 4;
-
-            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-                "AMDBC250-DREAM-V4.3: LOAD_CP_FW JT at blob offset %u, %u DWORDs (%u bytes)\n",
-                jtByteOff, jtSizeDw, jtSizeBytes));
-
-            if (jtSizeDw > 0 && (jtByteOff + jtSizeBytes) <= fwSize) {
-                const UINT32 *jtData = (const UINT32 *)(fwBlob + jtByteOff);
-
-                UINT32 ucodeAddrReg, ucodeDataReg;
-                if (fwType == 1 || fwType == 4) {
-                    /* ME and MEC both use the same UCODE registers */
-                    ucodeAddrReg = REG_ME_UCODE_ADDR;
-                    ucodeDataReg = REG_ME_UCODE_DATA;
-                } else if (fwType == 2) {
-                    ucodeAddrReg = REG_PFP_UCODE_ADDR;
-                    ucodeDataReg = REG_PFP_UCODE_DATA;
-                } else {
-                    ucodeAddrReg = REG_CE_UCODE_ADDR;
-                    ucodeDataReg = REG_CE_UCODE_DATA;
-                }
-
-                /* Reset ucode address to 0 before uploading JT */
-                BAR5_WR(ucodeAddrReg, 0);
-                KeStallExecutionProcessor(1);
-
-                /* Upload JT entries one DWORD at a time */
-                for (UINT32 i = 0; i < jtSizeDw; i++) {
-                    BAR5_WR(ucodeDataReg, jtData[i]);
-                    KeStallExecutionProcessor(1);
-                }
-
-                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-                    "AMDBC250-DREAM-V4.3: LOAD_CP_FW uploaded %u JT DWORDs\n", jtSizeDw));
-
-                /* Step 5: Write ucode version to UCODE_ADDR to commit */
-                BAR5_WR(ucodeAddrReg, ucodeVersion);
-                KeStallExecutionProcessor(10);
-
-                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-                    "AMDBC250-DREAM-V4.3: LOAD_CP_FW wrote version 0x%X to UCODE_ADDR\n", ucodeVersion));
-
-                /* Step 5b: Poll UCODE_ADDR until DMA completes (reads back as 0) */
-                UINT32 pollTimeoutUs = 500000;  /* 500ms max */
-                UINT32 pollResult = ucodeVersion;
-                for (UINT32 p = 0; p < pollTimeoutUs; p++) {
-                    pollResult = BAR5_RD(ucodeAddrReg);
-                    if (pollResult == 0) break;
-                    KeStallExecutionProcessor(1);
-                }
-                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-                    "AMDBC250-DREAM-V4.3: LOAD_CP_FW DMA poll complete after ~%u us, final UCODE_ADDR=0x%08X\n",
-                    pollTimeoutUs, pollResult));
-                if (pollResult != 0) {
-                    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
-                        "AMDBC250-DREAM-V4.3: LOAD_CP_FW DMA may not have completed!\n"));
-                }
-            } else {
-                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
-                    "AMDBC250-DREAM-V4.3: LOAD_CP_FW - no JT data (jtSizeDw=%u)\n", jtSizeDw));
-                /* Still write version even without JT */
-                UINT32 ucodeAddrReg;
-                if (fwType == 1 || fwType == 4) ucodeAddrReg = REG_ME_UCODE_ADDR;
-                else if (fwType == 2) ucodeAddrReg = REG_PFP_UCODE_ADDR;
-                else ucodeAddrReg = REG_CE_UCODE_ADDR;
-                BAR5_WR(ucodeAddrReg, ucodeVersion);
-                KeStallExecutionProcessor(10);
-
-                /* Poll for DMA completion */
-                UINT32 pollTimeoutUs = 500000;
-                UINT32 pollResult = ucodeVersion;
-                for (UINT32 p = 0; p < pollTimeoutUs; p++) {
-                    pollResult = BAR5_RD(ucodeAddrReg);
-                    if (pollResult == 0) break;
-                    KeStallExecutionProcessor(1);
-                }
-                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-                    "AMDBC250-DREAM-V4.3: LOAD_CP_FW (no JT) DMA poll result=0x%08X\n", pollResult));
-            }
-
-            /* Step 6: Unhalt the loaded engine */
-            if (fwType == 4) {
-                /* Unhalt MEC ME1 */
-                BAR5_WR(REG_MEC_ME1_CNTL, 0);
-                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-                    "AMDBC250-DREAM-V4.3: LOAD_CP_FW MEC unhalted\n"));
-            } else if (fwType == 1) {
-                /* Unhalt ME only (keep PFP+CE halted) */
-                BAR5_WR(REG_ME_CNTL, (1 << 30) | (1 << 29));  /* PFP_HALT | CE_HALT, ME clear */
-            } else if (fwType == 2) {
-                /* Unhalt PFP only */
-                BAR5_WR(REG_ME_CNTL, (1 << 28) | (1 << 29));  /* ME_HALT | CE_HALT, PFP clear */
-            } else {
-                /* Unhalt CE only */
-                BAR5_WR(REG_ME_CNTL, (1 << 28) | (1 << 30));  /* ME_HALT | PFP_HALT, CE clear */
-            }
-            KeStallExecutionProcessor(10);
-
-            UINT32 meCntlAfter = BAR5_RD(REG_ME_CNTL);
-            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-                "AMDBC250-DREAM-V4.3: LOAD_CP_FW ME_CNTL after unhalt=0x%08X\n", meCntlAfter));
-
-            /* Read SCRATCH as sanity check */
-            UINT32 scratch = BAR5_RD(REG_SCRATCH);
-            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-                "AMDBC250-DREAM-V4.3: LOAD_CP_FW SCRATCH=0x%08X\n", scratch));
-
-            resp->Result = 1;  /* success */
-
-            #undef BAR5_WR
-            #undef BAR5_RD
-            #undef REG_ME_CNTL
-            #undef REG_SCRATCH
-            #undef REG_GRBM_INDEX
-            #undef REG_ME_UCODE_ADDR
-            #undef REG_ME_UCODE_DATA
-            #undef REG_PFP_UCODE_ADDR
-            #undef REG_PFP_UCODE_DATA
-            #undef REG_CE_UCODE_ADDR
-            #undef REG_CE_UCODE_DATA
-            #undef REG_ME_IC_CNTL
-            #undef REG_ME_IC_LO
-            #undef REG_ME_IC_HI
-            #undef REG_PFP_IC_CNTL
-            #undef REG_PFP_IC_LO
-            #undef REG_PFP_IC_HI
-            #undef REG_CE_IC_CNTL
-            #undef REG_CE_IC_LO
-            #undef REG_CE_IC_HI
-            #undef REG_MEC_IC_CNTL
-            #undef REG_MEC_IC_LO
-            #undef REG_MEC_IC_HI
-            #undef REG_MEC_ME1_CNTL
-            #undef MEC_ME1_HALT
-
-        } __except (EXCEPTION_EXECUTE_HANDLER) {
-            UINT32 excCode = GetExceptionCode();
+        /* Ensure PSP proxy is open (initializes SOS context). */
+        if (!NT_SUCCESS(Amdbc250PspKiqInit())) {
             KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
-                "AMDBC250-DREAM-V4.3: LOAD_CP_FW EXCEPTION 0x%08X\n", excCode));
-            resp->Result = 0xDEAD00FF;
+                "AMDBC250-DREAM-V4.3: LOAD_CP_FW - PSP proxy init failed\n"));
+            resp->Result = 0xDEAD0020;
+            status = STATUS_SUCCESS;
+            bytesReturned = sizeof(*resp);
+            if (fwVa) MmFreeContiguousMemory(fwVa);
+            break;
+        }
+
+        if (!Amdbc250PspGetContext() || !Amdbc250PspGetContext()->SosAlive) {
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
+                "AMDBC250-DREAM-V4.3: LOAD_CP_FW - SOS not alive\n"));
+            resp->Result = 0xDEAD0021;
+            status = STATUS_SUCCESS;
+            bytesReturned = sizeof(*resp);
+            if (fwVa) MmFreeContiguousMemory(fwVa);
+            break;
+        }
+
+        /* Copy blob into the shared PSP firmware buffer and load via mailbox. */
+        NTSTATUS pspStatus = Amdbc250PspAllocateFirmwareBuffer(fwSize);
+        if (!NT_SUCCESS(pspStatus)) {
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
+                "AMDBC250-DREAM-V4.3: LOAD_CP_FW - alloc PSP buf failed (0x%08X)\n", pspStatus));
+            resp->Result = 0xDEAD0022;
+            status = STATUS_SUCCESS;
+            bytesReturned = sizeof(*resp);
+            if (fwVa) MmFreeContiguousMemory(fwVa);
+            break;
+        }
+        pspStatus = Amdbc250PspCopyFirmwareData((PUCHAR)fwVa, fwSize);
+        if (!NT_SUCCESS(pspStatus)) {
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
+                "AMDBC250-DREAM-V4.3: LOAD_CP_FW - copy to PSP buf failed (0x%08X)\n", pspStatus));
+            resp->Result = 0xDEAD0023;
+            status = STATUS_SUCCESS;
+            bytesReturned = sizeof(*resp);
+            if (fwVa) MmFreeContiguousMemory(fwVa);
+            break;
+        }
+
+        PHYSICAL_ADDRESS pspFwPa = Amdbc250PspFirmwarePa();
+        NTSTATUS loadStatus = Amdbc250PspKiqLoadFirmware(fwType, fwSize, pspFwPa);
+
+        if (NT_SUCCESS(loadStatus)) {
+            resp->Result = 1;  /* success */
+            resp->UcodeVersion = ucodeVersion;
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                "AMDBC250-DREAM-V4.3: LOAD_CP_FW type=%u loaded via PSP OK (ucode 0x%08X)\n",
+                fwType, ucodeVersion));
+        } else {
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
+                "AMDBC250-DREAM-V4.3: LOAD_CP_FW type=%u PSP load failed (0x%08X)\n",
+                fwType, loadStatus));
+            resp->Result = 0xDEAD0024;
         }
 
         /* Free the contiguous firmware buffer */
