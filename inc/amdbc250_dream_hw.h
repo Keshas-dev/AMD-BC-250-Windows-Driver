@@ -907,14 +907,6 @@ DreamV3LoadAllFirmware(
     _In_ PDREAM_V3_DEVICE_EXTENSION DevExt
     );
 
-/* Load a single firmware blob (called from LOAD_CP_FW IOCTL) */
-NTSTATUS
-DreamV3LoadSingleFirmware(
-    _In_ PDREAM_V3_DEVICE_EXTENSION DevExt,
-    _In_ UINT32 FwType,
-    _In_ const UINT8 *FwBlob,
-    _In_ UINT32 FwSize
-    );
 
 /* Halt/unhalt all CP engines */
 VOID
@@ -925,11 +917,6 @@ DreamV3HaltAllEngines(
 /* VRAM detection via MC_VM_FB_LOCATION / VBIOS / PCI BAR */
 NTSTATUS
 DreamV3DetectVram(
-    _In_ PDREAM_V3_DEVICE_EXTENSION DevExt
-    );
-
-VOID
-DreamV3UnhaltAllEngines(
     _In_ PDREAM_V3_DEVICE_EXTENSION DevExt
     );
 
