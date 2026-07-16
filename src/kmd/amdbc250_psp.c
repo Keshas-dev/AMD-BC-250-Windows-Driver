@@ -265,14 +265,19 @@ ULONG Amdbc250PspKiqReadReg(ULONG GpuRegOffset)
 }
 
 /*
- * Load GPU firmware via KIQ ring using PM4 LOAD_IP_FW command.
- * This bypasses the GPCOM ring path which is broken on BC-250 BIOS 5.00.
- * 
- * Uses PSP driver's KIQ_SUBMIT (0x818) with a command buffer that has
- * the LOAD_IP_FW data at specific offsets (matching PSP driver's format).
+ * Load GPU firmware via the PSP driver's LOAD_IP_FW mailbox path.
+ * Uses PSP_IOCTL_KIQ_LOAD_FW (0x822), whose input layout is:
+ *   inputBuffer[0] = fwType
+ *   inputBuffer[1] = fwSize
+ *   inputBuffer[2..] = firmware blob (fwSize bytes)
+ * The PSP driver copies the blob and submits it to the SOS secure mailbox
+ * (GFX_CMD_ID_LOAD_IP_FW = 0x06). This is the path that actually works on
+ * BC-250 (verified via psp-mailbox-rlc-test.exe).
  */
 NTSTATUS Amdbc250PspKiqLoadFirmware(ULONG FwType, ULONG FwSize, PHYSICAL_ADDRESS FwPa)
 {
+    UNREFERENCED_PARAMETER(FwPa);
+
     if (!g_KiqRingInitialized) {
         NTSTATUS status = Amdbc250PspKiqInit();
         if (!NT_SUCCESS(status)) {
@@ -284,30 +289,32 @@ NTSTATUS Amdbc250PspKiqLoadFirmware(ULONG FwType, ULONG FwSize, PHYSICAL_ADDRESS
         return STATUS_DEVICE_NOT_READY;
     }
 
-    /* Build command buffer matching PSP driver's expected format */
-    ULONG cmd[64] = {0};
-    
-    /* Header format expected by PSP firmware:
-     * cmd[0] = buffer_size (1024)
-     * cmd[1] = 1 (unknown flag)
-     * cmd[2] = GFX_CMD_ID_LOAD_IP_FW (0x06)
-     * cmd[7-10] = firmware PA, size, type
-     */
-    cmd[0] = PSP_CMD_BUF_SIZE;
-    cmd[1] = 1;
-    cmd[2] = GFX_CMD_ID_LOAD_IP_FW;
-    cmd[7] = (ULONG)(FwPa.QuadPart & 0xFFFFFFFF);
-    cmd[8] = (ULONG)(FwPa.QuadPart >> 32);
-    cmd[9] = FwSize;
-    cmd[10] = FwType;
+    /* The firmware blob must already be in the shared buffer
+     * (Amdbc250PspCopyFirmwareData). Build the 0x822 input layout. */
+    if (!g_FwBuffer || FwSize > g_FwBufferSize) {
+        KdPrint(("KIQ_LOAD_FW: firmware buffer not ready (buf=%p size=%u)\n",
+            g_FwBuffer, g_FwBufferSize));
+        return STATUS_INVALID_PARAMETER;
+    }
 
-    KdPrint(("KIQ_LOAD_FW: type=%u size=%u PA=0x%llX\n", FwType, FwSize, FwPa.QuadPart));
+    /* Allocate a contiguous input buffer: 2 ULONGs + fwSize bytes. */
+    ULONG inSize = sizeof(ULONG) * 2 + FwSize;
+    PULONG inBuf = (PULONG)ExAllocatePool2(POOL_FLAG_NON_PAGED, inSize, 'fw');
+    if (!inBuf) {
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
 
-    /* Submit via KIQ_SUBMIT - PSP driver will ring the KIQ doorbell */
+    inBuf[0] = FwType;
+    inBuf[1] = FwSize;
+    RtlCopyMemory((PUCHAR)inBuf + sizeof(ULONG) * 2, g_FwBuffer, FwSize);
+
+    KdPrint(("KIQ_LOAD_FW: type=%u size=%u via PSP_IOCTL_KIQ_LOAD_FW\n", FwType, FwSize));
+
     IO_STATUS_BLOCK iosb;
     NTSTATUS status = ZwDeviceIoControlFile(g_PspProxyHandle, NULL, NULL, NULL,
-        &iosb, PSP_IOCTL_KIQ_SUBMIT, cmd, sizeof(cmd), NULL, 0);
+        &iosb, PSP_IOCTL_KIQ_LOAD_FW, inBuf, inSize, NULL, 0);
 
+    ExFreePoolWithTag(inBuf, 'fw');
     return status;
 }
 
