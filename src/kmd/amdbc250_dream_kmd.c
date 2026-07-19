@@ -3730,6 +3730,50 @@ DreamV3DeviceControl(
                 DevExt->HardwareInitialized = FALSE;
             }
 
+            /* Auto-detect BAR5 from PCIe config if caller passed 0.
+             * On Win11 26100 the WDM fallback never gets PnP resources, so
+             * the user-mode tool may not know the BAR5 PA. Read it from the
+             * PCIe config space (BAR5 = BaseAddresses[5]) via HalGetBusData. */
+            if (InitHw->MmioPhysicalBase == 0) {
+                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                    "AMDBC250-DREAM-V4.3: INIT_HARDWARE MmioPhysicalBase==0, auto-detecting BAR5 via PCIe config\n"));
+                BOOLEAN foundPci = FALSE;
+                UINT32 fBus = 0, fDev = 0, fFunc = 0;
+                for (ULONG bus = 0; bus < 256 && !foundPci; bus++) {
+                    for (ULONG dev = 0; dev < 32 && !foundPci; dev++) {
+                        for (ULONG func = 0; func < 8 && !foundPci; func++) {
+                            ULONG slot = (dev << 0) | (func << 5);
+                            PCI_COMMON_CONFIG pc;
+                            RtlZeroMemory(&pc, sizeof(pc));
+                            ULONG br = HalGetBusDataByOffset(
+                                PCIConfiguration, bus, slot, &pc, 0,
+                                sizeof(PCI_COMMON_HDR_LENGTH));
+                            if (br < sizeof(PCI_COMMON_HDR_LENGTH))
+                                continue;
+                            if (pc.VendorID == 0x1002 && pc.DeviceID == 0x13FE) {
+                                foundPci = TRUE;
+                                fBus = bus; fDev = dev; fFunc = func;
+                                /* BAR5 is at offset 0x24 (BaseAddresses[5]) */
+                                ULONG bar5 = pc.u.type0.BaseAddresses[5];
+                                /* Mask flags (lower 4 bits) */
+                                InitHw->MmioPhysicalBase = (ULONGLONG)(bar5 & 0xFFFFFFF0);
+                                if (InitHw->MmioSize == 0)
+                                    InitHw->MmioSize = 0x80000; /* 512KB default */
+                                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                                    "AMDBC250-DREAM-V4.3: BAR5 auto-detected at B%u:D%u:F%u PA=0x%llX\n",
+                                    fBus, fDev, fFunc, InitHw->MmioPhysicalBase));
+                            }
+                        }
+                    }
+                }
+                if (!foundPci) {
+                    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
+                        "AMDBC250-DREAM-V4.3: INIT_HARDWARE BAR5 auto-detect FAILED (VEN_1002 DEV_13FE not found)\n"));
+                    status = STATUS_NO_SUCH_DEVICE;
+                    break;
+                }
+            }
+
             /* Validate input */
             if (InitHw->MmioPhysicalBase == 0 || InitHw->MmioSize == 0) {
                 KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,

@@ -496,13 +496,15 @@ On Win11 26100, `DxgkInitialize` is NOT exported. Driver enters WDM fallback mod
 User-mode test tools MUST call `IOCTL_AMDBC250_INIT_HARDWARE` FIRST:
 ```c
 AMDBC250_IOCTL_INIT_HARDWARE ih;
-ih.MmioPhysicalBase = 0xFE800000ULL;  // GPU BAR5
-ih.MmioSize = 0x80000;                 // 512KB
+ih.MmioPhysicalBase = 0xFE800000ULL;  // GPU BAR5 (or 0 for auto-detect)
+ih.MmioSize = 0x80000;                 // 512KB (or 0 for default)
 ih.Flags = AMDBC250_INIT_FLAG_NBIO_MAP; // SKIP full HW init!
 ```
 - `Flags=0` → calls `DreamV3HwInitialize()` → **crashes** (TDR/white screen)
 - `Flags=AMDBC250_INIT_FLAG_NBIO_MAP` → safely maps BAR5 + enables PCI mem space via IO ports
 - After success: register reads work, SMU via SMN (BAR5+0x38/0x3C) works
+- **MmioPhysicalBase=0 auto-detect** (2026-07-19): if caller passes 0, driver uses `HalGetBusDataByOffset` to scan PCIe config for VEN_1002/DEV_13FE, reads BAR5 (`BaseAddresses[5]` @ 0x24), masks lower 4 bits, defaults size to 512KB. Test: `test-tools\bar5-autodetect-test.c`.
+- **Gemini/AI false claim (2026-07-19)**: "driver never maps BAR5, all registers are memory garbage" is WRONG. INIT_HARDWARE already calls `MmMapIoSpace(0xFE800000)`. Proof: GRBM_GFX_INDEX (0x34D0) readback=0xE0000000 (real silicon), SMU mailbox returns v88.6.0 (real). BAR5 IS physically mapped on Win11 26100.
 
 ### Test Template
 `bar5-smn-test.c` must include INIT_HARDWARE before any read/write on Win11 26100. Without this, all reads return `0xFFFFFFFF`.
