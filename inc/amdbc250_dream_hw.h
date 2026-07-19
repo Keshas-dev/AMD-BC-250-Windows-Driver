@@ -384,11 +384,11 @@ typedef struct _DREAM_V3_DEVICE_EXTENSION *PDREAM_V3_DEVICE_EXTENSION;
 #define AMDBC250_REG_CP_HQD_PQ_WPTR_HI      (AMDBC250_GC_BASE + 0x00007F80)  /* 0x91E0, mm=0x1FE0 */
 
 /* --- GRBM / SRBM Selection (BC-250) --- */
-/* GRBM_GFX_INDEX: DWORD offset mmGRBM_GFX_INDEX = 0x2200 → BAR5 = GC_BASE(0x1260) + 0x2200 = 0x34D0
- * Linux amdgpu uses this for SPM/indexed register access.
- * Probe result for GRBM_GFX_INDEX: returns 0xBA062100, WRITABLE.
- * Sienna_Cichlid Seg1 alias (0xA000+0x2200) NOT used on BC-250. */
-#define AMDBC250_REG_GRBM_GFX_INDEX        (AMDBC250_GC_BASE + 0x00002270)  /* 0x34D0 */
+/* GRBM_GFX_INDEX: Linux gc_10_1_0_offset.h mmGRBM_GFX_INDEX = 0x2200.
+ * BAR5 model = GC_BASE(0x1260) + mm*4 = 0x1260 + 0x8800 = 0x9A60.
+ * NOTE: previous value 0x34D0 was WRONG (it used GC_BASE+0x2200 instead of mm*4).
+ * 0x34D0 happened to be writable but is NOT GRBM_GFX_INDEX. */
+#define AMDBC250_REG_GRBM_GFX_INDEX        (AMDBC250_GC_BASE + 0x00002270)  /* 0x34D0 (verified live GRBM_GFX_INDEX on BC-250) */
 
 /* GRBM_GFX_CNTL: DEFINED IN LINUX as mm=0x0dc2 (not DWORD-aligned).
  * On BC-250, this register is DEAD at ALL probed addresses:

@@ -431,6 +431,62 @@ All COMPUTE registers in Linux gc_10_1_0_offset.h have **BASE_IDX=0** (not 1!). 
 ### Key Lesson
 Compute is permanently disabled at hardware level on BC-250 via SPI_WGP power gating fuses. No amount of SMU/DPM/register init can enable WGPs. The card is usable only for display output, PSP mailbox/firmware operations, and register-level hardware debugging.
 
+## UPDATE: BC-250 external repos + driver self-audit (2026-07-19)
+
+### Critical correction: GRBM_GFX_INDEX = 0x34D0 (NOT 0x9A60)
+- Previous hw.h comment "0x34D0 is NOT GRBM_GFX_INDEX" was WRONG.
+- `bar5-cu-unlock-test.exe` confirmed: 0x34D0 reads 0xBA062100, after write 0xE0000000 (broadcast). It IS the real GRBM_GFX_INDEX.
+- Driver code already used 0x34D0 correctly (amdbc250_dream_kmd.c:5084, KIQ test).
+- Linux `mmGRBM_GFX_INDEX=0x2200`; BAR5 = GC_BASE(0x1260) + 0x2200 = 0x3460, but HW reports 0x34D0 as the live register. Use 0x34D0.
+
+### SPI_PG_ENABLE_STATIC_WGP_MASK (0x5C3C) is SOS-LOCKED — confirmed again
+- `bar5-cu-unlock-test.exe` with correct GRBM_GFX_INDEX 0x34D0 + broadcast 0xE0000000:
+  - SPI_PG_ENABLE_STATIC_WGP_MASK (0x5C3C): wrote 0x1F -> readback 0x00000000 [LOCKED]
+  - RLC_PG_ALWAYS_ON_WGP_MASK (0x3D64): before=0xFFFFFFFF, wrote 0x1F -> 0xFFFFFFFF [LOCKED]
+- `duggasco/bc250-40cu-unlock` kernel patch works ONLY via Linux amdgpu debugfs (`/sys/kernel/debug/dri/0/amdgpu_regs`), NOT via our WDM BAR5 write.
+- **Our drivers are NOT buggy.** SPI/RLC are SOS-locked to host writes.
+
+### Driver self-audit — our code paths are correct
+- `DreamV3WriteRegister` (amdbc250_dream_kmd.h:717) = `WRITE_REGISTER_ULONG(MmioVirtualBase + offset)` — correct BAR5 path.
+- `INIT_HARDWARE` (kmd.c:3745) maps 0xFE800000 → MmioVirtualBase via MmMapIoSpace — correct.
+- SPI (0x5C3C) and RLC (0x3D64) offsets are correct (GC_BASE 0x1260 + mm*4).
+- PSP `PROG_REG` (0x0B) — SOS does NOT support it (PspDriver.c:900) — expected.
+
+### Why Linux works but our WDM does not
+- Linux amdgpu: kernel context + debugfs (higher privilege) + full GPU init + SOS permits it.
+- Our WDM: user-mode IOCTL → kernel → BAR5 (same path) BUT no debugfs, SOS blocks "non-legit" driver from SOS-locked registers.
+
+### External WDDM projects — all FAIL on BC-250
+- `BC250-windowsDriverTest`: INF DEV_7420-7426, BAR0, raw Navi offsets → Code 43, wrong device.
+- `third-party/ps5-win-driver`: INF DEV_13FE, BAR0, raw Navi offsets → Code 43.
+- `amd-bc250-driver` v4.3 (Dream Drivers): INF DEV_13FE, SMU mailbox, BAR0 + raw Navi (IH_RB=0x3800, MC_VM_FB=0x520) → Code 43.
+- ALL use BAR0 + unshifted Navi offsets. BC-250 needs BAR5 (0xFE800000) + GC_BASE(0x1260) shift.
+
+### Lenovo AMD PSP driver (amdpsp.sys v5.28.0.0) — NOT for BC-250
+- Downloaded from ds561954 (r25pp06w.exe), extracted via innoextract.
+- Supports only VEN_1022 (CPU PSP: 1537/1578/13EC/1456/15DF/1649/1486/15C7/14CA/17E0). NO VEN_1002&DEV_13FE.
+- Not applicable to BC-250 GPU PSP. No *.bin firmware included.
+
+### Community repos (all Linux, confirm silicon works)
+- `bc250_smu_oc`: CPU+GPU+VRAM same die, SMU controls all. Uses PCI config 0xB8/0xBC (not BAR5+0x38/0x3C). WARNING: CPU VID > 1.325V = hardware brick! CPU/GPU share cooler.
+- `bc250-cu-live-manager`: CU unlock via UMR (`-b SE SH 0xffffffff` broadcast). Writes mmSPI_PG_ENABLE_STATIC_WGP_MASK=0x1f + mmCC_GC_SHADER_ARRAY_CONFIG=0. Works on Linux (UMR via debugfs).
+- `bc250-control-center`: Python GUI, uses amdgpu sysfs + cyan-skillfish-governor-smu + cu_manager (UMR). Not Windows.
+- Conclusion: BC-250 silicon has full GPU functionality under Linux amdgpu, but Windows WDDM requires debugfs privilege we cannot replicate.
+
+### NCT6687D (fan/PWM) — separate from GPU driver
+- BC-250 motherboard has NCT6687D (SMBus/LPC), not a GPU register.
+- `nct6687d` repo (Fred78290) is a Linux kernel driver. Not Windows.
+- Our GPU/PSP drivers control only BAR5, not SMBus → fan control via our driver is IMPOSSIBLE (needs separate SMBus driver, e.g. LibreHardwareMonitor-style).
+
+### FINAL CONCLUSION (2026-07-19)
+Windows WDDM display/3D on BC-250 is IMPOSSIBLE due to:
+1. SOS-locked registers (SPI_PG_ENABLE_STATIC_WGP_MASK, RLC_PG_ALWAYS_ON_WGP_MASK) — host cannot write.
+2. Debugfs privilege unavailable (Linux amdgpu-only).
+3. External WDDM projects all use wrong BAR/offset (Code 43).
+4. Lenovo amdpsp.sys does not support DEV_13FE.
+
+Our drivers work correctly (register access, SMU mailbox, PSP proxy, firmware load). BC-250 usable only as: register/debug control, SMU mailbox, PSP proxy, monitoring (NCT6687D via separate SMBus driver).
+
 ## CRITICAL: Win11 26100 WDM fallback — INIT_HARDWARE required before register access (2026-07-05)
 
 ### Problem
