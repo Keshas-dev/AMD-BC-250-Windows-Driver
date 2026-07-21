@@ -38,8 +38,8 @@ Environment:
 ===========================================================================*/
 
 /* GRBM_CAM mechanism registers */
-#define REG_GRBM_CAM_INDEX      0x3200   /* GC_BASE + 0x0C80*4 = 0x3200 */
-#define REG_GRBM_CAM_DATA       0x3204   /* GC_BASE + 0x0C81*4 = 0x3204 */
+#define REG_GRBM_CAM_INDEX      0x3200   /* 0x0C80*4 = 0x3200 (raw BAR5 offset, NOT GC_BASE-shifted) */
+#define REG_GRBM_CAM_DATA       0x3204   /* 0x0C81*4 = 0x3204 (raw BAR5 offset, NOT GC_BASE-shifted) */
 
 /* Golden register structure */
 typedef struct _GOLDEN_REG {
@@ -75,8 +75,10 @@ static const GOLDEN_REG GoldenSettingsCyanSkillfish[] = {
      * We only program the safe subset below.
      * ====================================================================== */
 
-    /* CC_GC_SHADER_ARRAY_CONFIG — shader array config (24 CU enable) */
-    { 0x3264, 0xFFFF0000, 0xFFE00000 },
+    /* CC_GC_SHADER_ARRAY_CONFIG — shader array config (24 CU enable)
+     * NOTE: 0x9C1C = GC_BASE(0x1260) + mmCC_GC_SHADER_ARRAY_CONFIG(0x226F)*4.
+     * DO NOT use 0x3264 (that's GRBM_STATUS2, a completely different register). */
+    { AMDBC250_REG_CC_GC_SHADER_ARRAY_CONFIG, 0xFFFF0000, 0xFFE00000 },
 };
 
 /* Number of golden registers */

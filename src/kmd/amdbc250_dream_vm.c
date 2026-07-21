@@ -122,11 +122,16 @@ DreamV3GartInitialize(_In_ PDREAM_V3_DEVICE_EXTENSION DevExt)
     DevExt->Memory.GartTable.EntrySize = AMDBC250_GART_ENTRY_SIZE;
     DevExt->Memory.GartTable.TotalSize = AMDBC250_GART_NUM_ENTRIES * AMDBC250_GART_ENTRY_SIZE;
 
-    /* Allocate GART page table (contiguous for hardware) */
+    /* Allocate GART page table (physically contiguous for GPU DMA) */
+    PHYSICAL_ADDRESS gartLow = {0};
+    PHYSICAL_ADDRESS gartHigh = {0};
+    PHYSICAL_ADDRESS gartBoundary = {0};
+    gartHigh.QuadPart = 0xFFFFFFFFULL;
     DevExt->Memory.GartTable.PageTable.VirtualAddress = 
-        ExAllocatePool2(POOL_FLAG_NON_PAGED, 
+        MmAllocateContiguousMemorySpecifyCache(
                         DevExt->Memory.GartTable.TotalSize,
-                        DREAM_V3_TAG_VM);
+                        gartLow, gartHigh, gartBoundary,
+                        MmNonCached);
     
     if (DevExt->Memory.GartTable.PageTable.VirtualAddress == NULL) {
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
@@ -136,6 +141,8 @@ DreamV3GartInitialize(_In_ PDREAM_V3_DEVICE_EXTENSION DevExt)
 
     RtlZeroMemory(DevExt->Memory.GartTable.PageTable.VirtualAddress,
                   DevExt->Memory.GartTable.TotalSize);
+    DevExt->Memory.GartTable.PageTable.PhysicalAddress =
+        MmGetPhysicalAddress(DevExt->Memory.GartTable.PageTable.VirtualAddress);
 
     /* Initialize bitmap for tracking allocated entries */
     RtlInitializeBitMap(&DevExt->Memory.GartTable.AllocationBitmap,
@@ -143,15 +150,19 @@ DreamV3GartInitialize(_In_ PDREAM_V3_DEVICE_EXTENSION DevExt)
                         AMDBC250_GART_NUM_ENTRIES);
     RtlClearAllBits(&DevExt->Memory.GartTable.AllocationBitmap);
 
-    /* Set default GART aperture in memory controller */
-    /* GART base: 0x0001_0000_0000 (64GB aperture starting at 1TB) */
+    /* Set GART aperture in memory controller.
+     * AGP_BASE/TOP/BOT use >> 27 shift (128MB granularity per Linux gmc_v10_0.c).
+     * Aperture must be large enough that >>27 produces distinct base/top values. */
     PHYSICAL_ADDRESS GartBase;
     GartBase.QuadPart = AMDBC250_GART_APERTURE_BASE;
+    ULONG64 GartApertureSize = (ULONG64)DevExt->Memory.GartTable.NumEntries * AMDBC250_VM_PAGE_SIZE;
+    if (GartApertureSize < (128ULL * 1024 * 1024))
+        GartApertureSize = 128ULL * 1024 * 1024; /* minimum for >>27 granularity */
     
     DreamV3WriteRegister(DevExt, AMDBC250_REG_MC_VM_AGP_BASE,
                          (ULONG)(GartBase.QuadPart >> 27));
     DreamV3WriteRegister(DevExt, AMDBC250_REG_MC_VM_AGP_TOP,
-                         (ULONG)((GartBase.QuadPart + DevExt->Memory.GartTable.TotalSize) >> 27));
+                         (ULONG)((GartBase.QuadPart + GartApertureSize) >> 27));
     DreamV3WriteRegister(DevExt, AMDBC250_REG_MC_VM_AGP_BOT,
                          (ULONG)(GartBase.QuadPart >> 27));
 
@@ -785,12 +796,11 @@ DreamV3VmInvalidateTLB(
         return STATUS_INVALID_PARAMETER;
     }
 
-    /* Write invalidation request. GFX10 uses a SINGLE ENG0 REQ/ACK pair;
-     * the VMID is encoded in the request word, NOT by per-VMID register
-     * addresses — drop the (VmId*0x10) stride that hit foreign regs. */
+    /* Write invalidation request. GFX10 encodes VMID as bit position in
+     * the request word: bit N = VMID N. Linux: WREG32_SOC15(GC, 0, mmVM_INVALIDATE_ENG0_REQ, 1 << vmid). */
     DreamV3WriteRegister(DevExt,
                          AMDBC250_REG_GCVM_INVALIDATE_ENG0_REQ,
-                         1);
+                         1 << VmId);
 
     /* Wait for acknowledgment */
     ULONG Timeout = 1000;

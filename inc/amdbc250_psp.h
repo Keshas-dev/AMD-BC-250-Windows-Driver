@@ -46,6 +46,14 @@ typedef struct _AMDBC250_PSP_CONTEXT {
     BOOLEAN SosAlive;
 } AMDBC250_PSP_CONTEXT, *PAMDBC250_PSP_CONTEXT;
 
+/* Direct PSP mailbox via GPU BAR5 (no separate PSP driver needed) */
+NTSTATUS Amdbc250PspDirectLoadIpFw(PVOID GpuBar5Va, ULONG FwType, ULONG FwSize,
+    PHYSICAL_ADDRESS FwPa, PULONG OutC2pmsg35, PULONG OutC2pmsg81);
+NTSTATUS Amdbc250PspDirectSmuMsg(PVOID GpuBar5Va, ULONG Message, ULONG Argument,
+    PULONG OutResponse, PULONG OutResponseStatus);
+ULONG Amdbc250PspSmnRead(PVOID GpuBar5Va, ULONG SmnAddress);
+VOID Amdbc250PspSmnWrite(PVOID GpuBar5Va, ULONG SmnAddress, ULONG Value);
+
 NTSTATUS Amdbc250PspInit(ULONG64 MmioPhysicalBase);
 VOID Amdbc250PspCleanup(VOID);
 NTSTATUS Amdbc250PspSendCommand(ULONG Command, PUCHAR Data, ULONG DataSize);

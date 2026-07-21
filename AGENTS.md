@@ -196,7 +196,6 @@ Is PSP SOS firmware loaded? AGENTS.md earlier noted `C2PMSG_81=0xF0000010` sugge
 
 ## Next Steps (Completed)
 
-## (ARCHIVED) Initial compute dead verdict — superseded by 2026-07-08 (see FINAL VERDICT below)
 
 ### ME Unhalt Test (me-unhalt-test.c via PSP driver)
 - PSP driver INIT_HW maps GPU BAR5 with clean MmMapIoSpace (no PCI config writes)
@@ -231,11 +230,6 @@ BC-250 mining ASIC has compute/GFX engines permanently disabled at hardware leve
 - PSP mailbox: firmware loading for ALL types (ME, PFP, CE, MEC, MEC2, RLC, SDMA)
 - Register read/write via both GPU and PSP drivers
 
-### Final Status
-- **3D graphics**: ❌ Impossible (no compute/GFX engine)
-- **Display-only**: ❓ Untested (WDDM path not functional on Win11 26100)
-- **PSP mailbox**: ✅ Fully functional
-- **Register access**: ✅ Both direct (when mapped) and proxy IOCTLs work
 
 ## PSP Driver: Firmware now auto-installed via INF (2026-07-04)
 
@@ -674,23 +668,6 @@ Steps 11 (Display/DCN), 12 (PSP/NBIO), 13 (RLC), 14 (VRAM detect) are **SAFE** a
 RLC resume (`DreamV3InitRlc`) is gated by `RlcResumeEnabled` (reads from non-existent
 `...\atikmdag\Parameters` subkey → unreachable) and is OFF by default anyway.
 
-### Final outcome
-- All dangerous defaults flipped to **0** in commit `7aa984f`. Driver now loads **stably with NO
-  registry keys set** — full init (`Flags=0`) returns SUCCESS, no 0x1A, no white screen.
-- `HwInitFirmware` stays `1`: firmware IS loaded (safe), only the engine unhalt is disabled.
-- The 5 kill-switches remain as opt-in registry overrides for future experimentation.
-
-### FINAL CONCLUSION: host compute init is physically impossible on BC-250
-1. **CP cannot be unhalted** from the host — doing so makes the GPU rogue-DMA host memory (0x1A).
-2. **Ring BASE registers (GFX 0xDA60, KIQ 0xE060) are host-read-only** (SOS/PSP-locked) → no ring
-   can be based on the host, so even with microcode the CP/MEC have no command buffer.
-3. **WGPs are fused off** (SPI_PG_ENABLE_STATIC_WGP_MASK 0x5C3C = 0, hardware read-only) — confirmed
-   independently by Linux (24 CUs but ROCm reports SDMA/KIQ/CP timeouts; Mesa uses RADV_DEBUG=nocompute).
-4. Compute firmware and engine control belong to the **PSP/SOS**, not the host driver.
-
-The GPU driver is therefore a **stable register/display/PSP-proxy control driver** only. Compute
-via the host path will never work; any compute must go through the PSP mailbox (see 2026-07-01
-breakthrough), which loads firmware but cannot wake the host-locked CP either.
 
 ### How to re-run the bisection (if needed)
 ```

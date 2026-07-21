@@ -419,6 +419,31 @@ typedef struct _AMDBC250_IOCTL_MMIO_TEST {
     UINT32 Padding;                 /* alignment */
 } AMDBC250_IOCTL_MMIO_TEST, *PAMDBC250_IOCTL_MMIO_TEST;
 
+/* --- PSP Mailbox: direct firmware loading via GPU BAR5 (no PSP driver needed) --- */
+/* NOTE: using raw CTL_CODE with high function codes to avoid collision with
+   CTL_CODE_AMDBC250(0x90+) which overlaps existing raw CTL_CODE entries. */
+#define IOCTL_AMDBC250_PSP_LOAD_IP_FW      CTL_CODE(FILE_DEVICE_AMDBC250, 0x920, METHOD_BUFFERED, FILE_ANY_ACCESS)
+
+typedef struct _AMDBC250_IOCTL_PSP_LOAD_IP_FW {
+    UINT32 FwType;              /* IN: GFX_FW_TYPE (1=ME, 2=PFP, 3=CE, 4=MEC, 8=RLC, 9=SDMA0) */
+    UINT32 FwSize;              /* IN: firmware blob size in bytes */
+    UINT32 Result;              /* OUT: 0=fail, 1=success */
+    UINT32 C2Pmsg35After;       /* OUT: C2PMSG_35 after command */
+    UINT32 C2Pmsg81After;       /* OUT: C2PMSG_81 after command (0xF0000010 = OK) */
+    /* Firmware data follows immediately after this struct */
+} AMDBC250_IOCTL_PSP_LOAD_IP_FW, *PAMDBC250_IOCTL_PSP_LOAD_IP_FW;
+
+/* --- PSP Mailbox: send SMU message via BAR5+0x38/0x3C (no PSP driver needed) --- */
+#define IOCTL_AMDBC250_PSP_SMU_MSG          CTL_CODE(FILE_DEVICE_AMDBC250, 0x924, METHOD_BUFFERED, FILE_ANY_ACCESS)
+
+typedef struct _AMDBC250_IOCTL_PSP_SMU_MSG {
+    UINT32 Message;             /* IN: SMU message ID (e.g. 0x02=GetSmuVersion) */
+    UINT32 Argument;            /* IN: argument */
+    UINT32 Response;            /* OUT: response from C2PMSG_82 */
+    UINT32 ResponseStatus;      /* OUT: C2PMSG_90 (1=OK, 0xFF=error) */
+    UINT32 Result;              /* OUT: 0=fail, 1=success */
+} AMDBC250_IOCTL_PSP_SMU_MSG, *PAMDBC250_IOCTL_PSP_SMU_MSG;
+
 /* --- Get BAR5 virtual address (for PSP driver mailbox access) --- */
 #define IOCTL_AMDBC250_BAR5_READ_PROXY      CTL_CODE_AMDBC250(0x83, METHOD_BUFFERED, FILE_ANY_ACCESS)
 

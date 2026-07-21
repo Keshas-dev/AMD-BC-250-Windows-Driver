@@ -41,10 +41,12 @@ Environment:
 #define HDP_REG_NONSURFACE_BASE            0x12C8  /* Non-surface base */
 #define HDP_REG_NONSURFACE_BASE_HI         0x12CC  /* Non-surface base high */
 
-/* HDP Memory Coherency — Linux uses these during GART enable */
-#define HDP_REG_FB_OFFSET                  0x0000  /* FB offset */
-#define HDP_REG_FB_BASE                    0x0004  /* FB base */
-#define HDP_REG_FB_TOP                     0x0008  /* FB top */
+/* HDP Memory Coherency — Linux uses these during GART enable.
+ * HDP_BASE = 0x0F20 (from cyan_skillfish_ip_offset.h).
+ * These are HDP-relative offsets, absolute BAR5 = HDP_BASE + offset. */
+#define HDP_REG_FB_OFFSET                  (0x0F20 + 0x0000)  /* FB offset */
+#define HDP_REG_FB_BASE                    (0x0F20 + 0x0004)  /* FB base */
+#define HDP_REG_FB_TOP                     (0x0F20 + 0x0008)  /* FB top */
 
 /* HDP register values */
 #define HDP_MEM_COHERENCY_FLUSH_CNTL__FLUSH_CACHE  (1 << 0)

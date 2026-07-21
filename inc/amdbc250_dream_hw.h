@@ -373,7 +373,12 @@ typedef struct _DREAM_V3_DEVICE_EXTENSION *PDREAM_V3_DEVICE_EXTENSION;
 #define AMDBC250_REG_CP_HQD_PQ_WPTR_POLL_ADDR_HI     (AMDBC250_GC_BASE + 0x00007EE8) /* 0x9148, mm=0x1FBA */
 #define AMDBC250_REG_CP_HQD_PQ_WPTR_POLL_CNTL       (AMDBC250_GC_BASE + 0x00007EEC) /* 0x914C, mm=0x1FBB */
 #define AMDBC250_REG_CP_HQD_PQ_DOORBELL_CONTROL      (AMDBC250_GC_BASE + 0x00007EF0) /* 0x9150, mm=0x1FBC */
-#define AMDBC250_REG_CP_HQD_PQ_CONTROL      (AMDBC250_GC_BASE + 0x00007EE8)  /* 0x9148, mm=0x1FBA (CORRECTED from 0x90F0!) */
+/* CP_HQD_PQ_CONTROL — SAME OFFSET as PQ_WPTR_POLL_ADDR_HI (0x9148, mm=0x1FBA).
+ * BUG: Two different registers share the same address in our header. The Linux
+ * gc_10_1_0_offset.h defines mmCP_HQD_PQ_CONTROL at a different offset (likely
+ * 0x1FCA range), but the correct value for BC-250 is UNVERIFIED.
+ * Probe test: 0x9148 is RO (SOS-locked, writes don't stick). Used by MQD/RING test handler. */
+#define AMDBC250_REG_CP_HQD_PQ_CONTROL     (AMDBC250_GC_BASE + 0x00007EE8)  /* 0x9148 (same as WPTR_POLL_ADDR_HI — BUG: verify correct offset!) */
 #define AMDBC250_REG_CP_HQD_DEQUEUE_REQUEST (AMDBC250_GC_BASE + 0x00007F5C)  /* 0x91BC, mm=0x1FEF */
 #define AMDBC250_REG_CP_HQD_EOP_BASE_ADDR   (AMDBC250_GC_BASE + 0x00007E8C)  /* 0x90EC, mm=0x1FA3 */
 #define AMDBC250_REG_CP_HQD_EOP_BASE_ADDR_HI (AMDBC250_GC_BASE + 0x00007E94) /* 0x90F4, mm=0x1FA5 */
@@ -384,17 +389,18 @@ typedef struct _DREAM_V3_DEVICE_EXTENSION *PDREAM_V3_DEVICE_EXTENSION;
 #define AMDBC250_REG_CP_HQD_PQ_WPTR_HI      (AMDBC250_GC_BASE + 0x00007F80)  /* 0x91E0, mm=0x1FE0 */
 
 /* --- GRBM / SRBM Selection (BC-250) --- */
-/* GRBM_GFX_INDEX: Linux gc_10_1_0_offset.h mmGRBM_GFX_INDEX = 0x2200.
- * BAR5 model = GC_BASE(0x1260) + mm*4 = 0x1260 + 0x8800 = 0x9A60.
- * NOTE: previous value 0x34D0 was WRONG (it used GC_BASE+0x2200 instead of mm*4).
- * 0x34D0 happened to be writable but is NOT GRBM_GFX_INDEX. */
-#define AMDBC250_REG_GRBM_GFX_INDEX        (AMDBC250_GC_BASE + 0x00002270)  /* 0x34D0 (verified live GRBM_GFX_INDEX on BC-250) */
+/* GRBM_GFX_INDEX: HW-verified live register at 0x34D0 (GC_BASE + 0x2270).
+ * NOTE: Linux gc_10_1_0_offset.h gives mm=0x2200 -> GC_BASE + 0x8800 = 0x9A60,
+ * but BC-250 hardware maps it to 0x34D0 (confirmed via bar5-cu-unlock-test.exe:
+ * readback=0xBA062100, broadcast write 0xE0000000 readback=0xE0000000).
+ * Use 0x34D0 — 0x9A60 reads 0xFFFFFFFF on this ASIC. */
+#define AMDBC250_REG_GRBM_GFX_INDEX        (AMDBC250_GC_BASE + 0x00002270)  /* 0x34D0 (verified live on BC-250) */
 
 /* GRBM_GFX_CNTL: DEFINED IN LINUX as mm=0x0dc2 (not DWORD-aligned).
  * On BC-250, this register is DEAD at ALL probed addresses:
  *   - 0x2022 (GC_BASE + 0x0DC2, byte-level offset from Linux)
  *   - 0x4968 (GC_BASE + 0x0DC2*4, DWORD-aligned from Linux)
- *   - 0x3968 (GC_BASE + 0xA000 + 0x0DC2*4, SEG1 alias)
+ *   - 0xE968 (GC_BASE + 0xA000 + 0x0DC2*4, SEG1 alias)
  * All read 0xFFFFFFFF. BC-250 does NOT have GRBM_GFX_CNTL. Use GRBM_GFX_INDEX (0x34D0). */
 
 /* GRBM_GFX_INDEX bit fields (Linux soc15 layout from soc15.h):

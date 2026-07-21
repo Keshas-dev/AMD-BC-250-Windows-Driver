@@ -3627,7 +3627,7 @@ DreamV3DeviceControl(
          * BC-250 40 CU Unlock (from duggasco/bc250-40cu-unlock)
          *
          * Two registers must be written:
-         * 1. CC_GC_SHADER_ARRAY_CONFIG (BC-250: 0x3264): CU enumeration mask
+         * 1. CC_GC_SHADER_ARRAY_CONFIG (BC-250: 0x9C1C): CU enumeration mask
          *    Stock: 0xFFF80000 (24 CUs) ? Unlocked: 0xFFE00000 (40 CUs)
          * 2. SPI_PG_ENABLE_STATIC_WGP_MASK (BC-250: 0x34FC): WGP dispatch gate
          *    Stock: 0x7 (WGP 0-2) ? Unlocked: 0x1F (WGP 0-4)
@@ -3883,6 +3883,7 @@ DreamV3DeviceControl(
                 KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                     "AMDBC250-DREAM-V4.3: SDMA ring init SKIPPED\n"));
 
+                bytesReturned = sizeof(AMDBC250_IOCTL_INIT_HARDWARE);
                 status = STATUS_SUCCESS;
                 break;
             }
@@ -3957,6 +3958,7 @@ DreamV3DeviceControl(
                 DevExt->GfxRing.PhysicalAddress.QuadPart,
                 (ULONG64)DevExt->GfxRing.SizeInBytes / 1024));
 
+            bytesReturned = sizeof(AMDBC250_IOCTL_INIT_HARDWARE);
             status = STATUS_SUCCESS;
         } else {
             status = STATUS_BUFFER_TOO_SMALL;
@@ -5098,6 +5100,139 @@ DreamV3DeviceControl(
         break;
     }
 
+    /* --- Direct PSP mailbox: load IP firmware via C2PMSG_35/36/37/81 (no PSP driver) --- */
+    case IOCTL_AMDBC250_PSP_LOAD_IP_FW: {
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+            "AMDBC250-DREAM-V4.3: PSP_LOAD_IP_FW entered, inputLen=%u outputLen=%u\n",
+            inputLen, outputLen));
+
+        if (!DevExt || !DevExt->MmioVirtualBase) {
+            status = STATUS_DEVICE_NOT_READY;
+            break;
+        }
+
+        if (inputLen < sizeof(AMDBC250_IOCTL_PSP_LOAD_IP_FW) ||
+            outputLen < sizeof(AMDBC250_IOCTL_PSP_LOAD_IP_FW)) {
+            status = STATUS_BUFFER_TOO_SMALL;
+            break;
+        }
+
+        PAMDBC250_IOCTL_PSP_LOAD_IP_FW req = (PAMDBC250_IOCTL_PSP_LOAD_IP_FW)inputBuffer;
+        PAMDBC250_IOCTL_PSP_LOAD_IP_FW resp = (PAMDBC250_IOCTL_PSP_LOAD_IP_FW)outputBuffer;
+
+        ULONG fwType = req->FwType;
+        ULONG fwSize = req->FwSize;
+
+        resp->Result = 0;
+        resp->C2Pmsg35After = 0;
+        resp->C2Pmsg81After = 0;
+
+        /* Validate firmware type. */
+        if (fwType < 1 || fwType > 10) {
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
+                "AMDBC250-DREAM-V4.3: PSP_LOAD_IP_FW - invalid type %u\n", fwType));
+            status = STATUS_SUCCESS;
+            bytesReturned = sizeof(*resp);
+            break;
+        }
+
+        if (fwSize < 64 || fwSize > 4 * 1024 * 1024) {
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
+                "AMDBC250-DREAM-V4.3: PSP_LOAD_IP_FW - invalid size %u\n", fwSize));
+            status = STATUS_SUCCESS;
+            bytesReturned = sizeof(*resp);
+            break;
+        }
+
+        /* Firmware data follows the header. */
+        const UINT8 *fwBlob = (const UINT8 *)(req + 1);
+        ULONG blobAvailable = inputLen - sizeof(AMDBC250_IOCTL_PSP_LOAD_IP_FW);
+        if (blobAvailable < fwSize) {
+            status = STATUS_SUCCESS;
+            bytesReturned = sizeof(*resp);
+            break;
+        }
+
+        /* Allocate contiguous physical memory for the firmware. */
+        PHYSICAL_ADDRESS low = {0}, high = {0}, boundary = {0};
+        high.QuadPart = 0xFFFFFFFFULL;
+        PVOID fwVa = MmAllocateContiguousMemorySpecifyCache(
+            fwSize, low, high, boundary, MmNonCached);
+        if (!fwVa) {
+            status = STATUS_SUCCESS;
+            bytesReturned = sizeof(*resp);
+            break;
+        }
+        RtlCopyMemory(fwVa, fwBlob, fwSize);
+        PHYSICAL_ADDRESS fwPa = MmGetPhysicalAddress(fwVa);
+
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+            "AMDBC250-DREAM-V4.3: PSP_LOAD_IP_FW type=%u size=%u PA=0x%llX\n",
+            fwType, fwSize, fwPa.QuadPart));
+
+        /* Call the direct mailbox function. */
+        NTSTATUS pspStatus = Amdbc250PspDirectLoadIpFw(
+            DevExt->MmioVirtualBase, fwType, fwSize, fwPa,
+            &resp->C2Pmsg35After, &resp->C2Pmsg81After);
+
+        if (NT_SUCCESS(pspStatus)) {
+            resp->Result = 1;
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                "AMDBC250-DREAM-V4.3: PSP_LOAD_IP_FW type=%u OK (C35=0x%08X C81=0x%08X)\n",
+                fwType, resp->C2Pmsg35After, resp->C2Pmsg81After));
+        } else {
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
+                "AMDBC250-DREAM-V4.3: PSP_LOAD_IP_FW type=%u FAILED (0x%08X)\n",
+                fwType, pspStatus));
+        }
+
+        MmFreeContiguousMemory(fwVa);
+
+        status = STATUS_SUCCESS;
+        bytesReturned = sizeof(*resp);
+        break;
+    }
+
+    /* --- Direct SMU message via SMN (BAR5+0x38/0x3C, no PSP driver) --- */
+    case IOCTL_AMDBC250_PSP_SMU_MSG: {
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+            "AMDBC250-DREAM-V4.3: PSP_SMU_MSG entered\n"));
+
+        if (!DevExt || !DevExt->MmioVirtualBase) {
+            status = STATUS_DEVICE_NOT_READY;
+            break;
+        }
+
+        if (inputLen < sizeof(AMDBC250_IOCTL_PSP_SMU_MSG) ||
+            outputLen < sizeof(AMDBC250_IOCTL_PSP_SMU_MSG)) {
+            status = STATUS_BUFFER_TOO_SMALL;
+            break;
+        }
+
+        PAMDBC250_IOCTL_PSP_SMU_MSG req = (PAMDBC250_IOCTL_PSP_SMU_MSG)inputBuffer;
+        PAMDBC250_IOCTL_PSP_SMU_MSG resp = (PAMDBC250_IOCTL_PSP_SMU_MSG)outputBuffer;
+
+        resp->Result = 0;
+        resp->Response = 0;
+        resp->ResponseStatus = 0;
+
+        NTSTATUS smuStatus = Amdbc250PspDirectSmuMsg(
+            DevExt->MmioVirtualBase, req->Message, req->Argument,
+            &resp->Response, &resp->ResponseStatus);
+
+        if (NT_SUCCESS(smuStatus) && resp->ResponseStatus == 1) {
+            resp->Result = 1;
+        }
+
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+            "AMDBC250-DREAM-V4.3: PSP_SMU_MSG msg=0x%X arg=0x%X resp=0x%X status=%u\n",
+            req->Message, req->Argument, resp->Response, resp->ResponseStatus));
+
+        status = STATUS_SUCCESS;
+        bytesReturned = sizeof(*resp);
+        break;
+    }
+
     /* --- GPU-local KIQ test: allocate ring + program HQD + submit PM4, all via BAR5 --- */
     case 0x80000BE4: /* IOCTL_AMDBC250_GPU_IB_TEST = CTL_CODE_AMDBC250(0x89) - force IB mode */
         if (outputLen >= sizeof(AMDBC250_IOCTL_GPU_KIQ_TEST) && DevExt && DevExt->MmioVirtualBase) {
@@ -5283,7 +5418,7 @@ DreamV3DeviceControl(
              * We create identity mapping (VA=PA) for the ring buffer page.
              */
             #define GCVM_CONTEXT0_CNTL_REG     0x0B460   /* OLD offset � verified WRITABLE */
-            #define MC_VM_FB_LOCATION_BASE      0x6EE0    /* GC_BASE+0x1720*4; RO, VRAM GPU-VA base (dmesg 0xF4000000) */
+            #define MC_VM_FB_LOCATION_BASE      AMDBC250_REG_MC_VM_FB_LOCATION_BASE  /* 0x9520 from hw.h */
             #define GCVM_CONTEXT0_PT_BASE_LO   0x6C8C    /* Linux offset � verified WRITABLE */
             #define GCVM_CONTEXT0_PT_BASE_HI   0x6C90    /* Linux offset � verified WRITABLE */
             #define GCVM_L2_CNTL_REG           0x0B360   /* OLD offset � verified WRITABLE */
@@ -5344,9 +5479,9 @@ DreamV3DeviceControl(
 
                     /* CRITICAL: shoot down GCVM TLB for VMID 0 so the new PTEs
                      * for the ring/scratch take effect before the CP fetches.
-                     * (DreamV3VmInvalidateTLB is static in vm.c; inline it here.) */
+                     * VMID is encoded as bit position: 1 << vmid. For VMID 0, bit 0. */
                     {
-                        BAR5_WRITE(AMDBC250_REG_GCVM_INVALIDATE_ENG0_REQ, 1);
+                        BAR5_WRITE(AMDBC250_REG_GCVM_INVALIDATE_ENG0_REQ, 1 << 0);
                         ULONG invT = 1000;
                         while (invT-- > 0) {
                             if (BAR5_READ(AMDBC250_REG_GCVM_INVALIDATE_ENG0_ACK) & 0x1)
@@ -5509,7 +5644,7 @@ DreamV3DeviceControl(
             kiqTest->KiQ_RP = BAR5_READ(KIQ_RPTR);           /* KIQ ring RPTR */
             kiqTest->GrbmStat = BAR5_READ(0x3260);           /* GRBM_STATUS: CP/ME busy? */
             kiqTest->RingGpuVa = ringGpuVa;               /* ring GPU VA in PQ_BASE */
-            kiqTest->FbLocationBase = BAR5_READ(0x6EE0); /* MC_VM_FB_LOCATION_BASE (RO): VRAM GPU-VA base */
+            kiqTest->FbLocationBase = BAR5_READ(MC_VM_FB_LOCATION_BASE); /* MC_VM_FB_LOCATION_BASE (RO): VRAM GPU-VA base */
             kiqTest->FbOffset = 0;                           /* MC_VM_FB_OFFSET (unread) */
             kiqTest->HqdPqWptrRb = BAR5_READ(HQD_PQ_WPTR_LO); /* CP WPTR view (RO reg) */
             kiqTest->DbLoRb = BAR5_READ(0x89F0);  /* CP_MEC_DOORBELL_RANGE_LOWER readback */
@@ -6012,8 +6147,8 @@ DreamV3DeviceControl(
             /* Step 6: Write PM4 packets to ring */
             __try {
                 volatile PULONG ring = (volatile PULONG)ringVa;
-                ring[0] = 0xC0370003;   /* IT_WRITE_DATA count=3 */
-                ring[1] = 0x10100000;   /* CONTROL: DST_SEL=register, WR_CONFIRM */
+                ring[0] = 0xC0033700;   /* IT_WRITE_DATA count=3 */
+                ring[1] = 0x00100000;   /* CONTROL: DST_SEL=register, WR_CONFIRM */
                 ring[2] = 0x000032D4;   /* SCRATCH register offset */
                 ring[3] = 0x00000000;   /* ADDRESS_HI */
                 ring[4] = 0xCAFEBABE;   /* value to write */
@@ -6296,15 +6431,15 @@ DreamV3DeviceControl(
 
             /* Step 7: Write PM4 WRITE_DATA to SCRATCH (0x32D4) = 0xCAFEBABE
              * PM4 IT_WRITE_DATA (0x37), count=3 (4 DWORDs total):
-             *   HEADER: opcode=0x37, count=3 -> 0xC0370003
-             *   CONTROL: DST_SEL=register(1<<28), WR_CONFIRM(1<<20) -> 0x10100000
+             *   HEADER: opcode=0x37, count=3 -> 0xC0033700
+             *   CONTROL: DST_SEL=register(0), WR_CONFIRM(1<<20) -> 0x00100000
              *   ADDRESS_LO = SCRATCH byte offset (0x32D4)
              *   ADDRESS_HI = 0
              *   DATA = 0xCAFEBABE */
             __try {
                 PULONG ring = (PULONG)ringVa;
-                ring[0] = 0xC0370003;  /* HEADER: IT_WRITE_DATA, count=3 */
-                ring[1] = 0x10100000;  /* CONTROL: DST_SEL=register, WR_CONFIRM */
+                ring[0] = 0xC0033700;  /* HEADER: IT_WRITE_DATA, count=3 */
+                ring[1] = 0x00100000;  /* CONTROL: WR_CONFIRM, DST_SEL=register */
                 ring[2] = 0x000032D4;  /* ADDRESS_LO = SCRATCH */
                 ring[3] = 0x00000000;  /* ADDRESS_HI */
                 ring[4] = 0xCAFEBABE;  /* value to write */

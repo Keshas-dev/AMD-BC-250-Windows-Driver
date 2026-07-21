@@ -221,6 +221,7 @@ DreamV3HwInitialize(
             }
             ZwClose(hKey);
         }
+        Status = STATUS_SUCCESS;
         if (FwEnable == 0) {
             KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
                        "AMDBC250-DREAM-V4.3: Firmware load SKIPPED (HwInitFirmware=0)\n"));

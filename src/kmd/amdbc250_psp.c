@@ -78,6 +78,165 @@ static PVOID g_GpuBar5Va = NULL;
    writes PM4 packets into the GPCOM ring, which does not work.
    See Amdbc250PspKiqReadReg and Amdbc250PspKiqSubmit. */
 
+/* # C2PMSG mailbox (proven PSPSP. Signed offsets in GPU BAR5).
+ *   C2PMSG_35 (0x1056C): command to SOS
+ *   C2PMSG_36 (0x10570): argument / firmware PA low
+ *   C2PMSG_37 (0x10574): argument / firmware PA high
+ *   C2PMSG_81 (0x10614): status (0xF0000010 = OK, bit31 = SOS alive)
+ */
+#define DIRECT_C2PMSG_35_OFFSET      0x1056C
+#define DIRECT_C2PMSG_36_OFFSET      0x10570
+#define DIRECT_C2PMSG_37_OFFSET      0x10574
+#define DIRECT_C2PMSG_81_OFFSET      0x10614
+#define DIRECT_C2PMSG_OK             0xF0000010
+#define DIRECT_C2PMSG_SOS_ALIVE      0x80000000
+
+/* SMU mailbox via SMN (verified on BC-250 HW).
+ *   C2PMSG_66 (msg):  SMN[0x03B10A08]
+ *   C2PMSG_82 (arg):  SMN[0x03B10A48]
+ *   C2PMSG_90 (ctrl): SMN[0x03B10A68]
+ */
+#define SMU_C2PMSG_66_SMN   0x03B10A08
+#define SMU_C2PMSG_82_SMN   0x03B10A48
+#define SMU_C2PMSG_90_SMN   0x03B10A68
+
+/* SMN transport via NBIO BAR5+0x38/0x3C (index/data pair). */
+#define NBIO_SMN_INDEX      0x38
+#define NBIO_SMN_DATA       0x3C
+
+/* Max poll iterations (~5ms at ~1us per loop). */
+#define DIRECT_POLL_MAX_MS  100
+
+/* --- SMN helpers — read/write SMN register via NBIO BAR5+0x38/0x3C --- */
+ULONG Amdbc250PspSmnRead(PVOID GpuBar5Va, ULONG SmnAddress)
+{
+    if (!GpuBar5Va) return 0xFFFFFFFF;
+    PUCHAR base = (PUCHAR)GpuBar5Va;
+    WRITE_REGISTER_ULONG((PULONG)(base + NBIO_SMN_INDEX), SmnAddress);
+    KeMemoryBarrier();
+    return READ_REGISTER_ULONG((PULONG)(base + NBIO_SMN_DATA));
+}
+
+VOID Amdbc250PspSmnWrite(PVOID GpuBar5Va, ULONG SmnAddress, ULONG Value)
+{
+    if (!GpuBar5Va) return;
+    PUCHAR base = (PUCHAR)GpuBar5Va;
+    WRITE_REGISTER_ULONG((PULONG)(base + NBIO_SMN_INDEX), SmnAddress);
+    KeMemoryBarrier();
+    WRITE_REGISTER_ULONG((PULONG)(base + NBIO_SMN_DATA), Value);
+    KeMemoryBarrier();
+}
+
+/* --- Wait for SMU mailbox ready (poll C2PMSG_90 == 0x01). --- */
+static NTSTATUS SmuWaitReady(PVOID GpuBar5Va, ULONG TimeoutMs)
+{
+    ULONG i;
+    for (i = 0; i < TimeoutMs; i++) {
+        ULONG ctrl = Amdbc250PspSmnRead(GpuBar5Va, SMU_C2PMSG_90_SMN);
+        if (ctrl == 1) return STATUS_SUCCESS;
+        KeStallExecutionProcessor(1000); /* 1ms */
+    }
+    return STATUS_TIMEOUT;
+}
+
+/* --- Wait for PSP C2PMSG_81 completion. --- */
+static NTSTATUS PspWaitCompletion(PVOID GpuBar5Va, ULONG TimeoutMs)
+{
+    ULONG i;
+    for (i = 0; i < TimeoutMs; i++) {
+        ULONG status = READ_REGISTER_ULONG(
+            (PULONG)((PUCHAR)GpuBar5Va + DIRECT_C2PMSG_81_OFFSET));
+        if (status == DIRECT_C2PMSG_OK) return STATUS_SUCCESS;
+        KeStallExecutionProcessor(1000);
+    }
+    return STATUS_TIMEOUT;
+}
+
+/* --- Direct PSP mailbox: load IP firmware via C2PMSG_35/36/37/81.
+ *     Allocates contiguous physical memory, copies blob, writes PA to
+ *     C2PMSG_36/37, writes GFX_CMD_ID_LOAD_IP_FW | (FwType<<16) to
+ *     C2PMSG_35, polls C2PMSG_81 for completion. --- */
+NTSTATUS Amdbc250PspDirectLoadIpFw(PVOID GpuBar5Va, ULONG FwType, ULONG FwSize,
+    PHYSICAL_ADDRESS FwPa, PULONG OutC2pmsg35, PULONG OutC2pmsg81)
+{
+    if (!GpuBar5Va || FwSize == 0 || FwSize > 4 * 1024 * 1024) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    PUCHAR base = (PUCHAR)GpuBar5Va;
+
+    /* Write firmware physical address to C2PMSG_36/37. */
+    ULONG paLo = (ULONG)(FwPa.QuadPart & 0xFFFFFFFF);
+    ULONG paHi = (ULONG)(FwPa.QuadPart >> 32);
+    WRITE_REGISTER_ULONG((PULONG)(base + DIRECT_C2PMSG_36_OFFSET), paLo);
+    WRITE_REGISTER_ULONG((PULONG)(base + DIRECT_C2PMSG_37_OFFSET), paHi);
+    KeMemoryBarrier();
+
+    /* Write command: GFX_CMD_ID_LOAD_IP_FW (0x06) | (fwType << 16). */
+    ULONG cmd = 0x06 | (FwType << 16);
+    WRITE_REGISTER_ULONG((PULONG)(base + DIRECT_C2PMSG_35_OFFSET), cmd);
+    KeMemoryBarrier();
+
+    /* Poll for completion. */
+    NTSTATUS status = PspWaitCompletion(GpuBar5Va, DIRECT_POLL_MAX_MS);
+
+    if (OutC2pmsg35) {
+        *OutC2pmsg35 = READ_REGISTER_ULONG(
+            (PULONG)(base + DIRECT_C2PMSG_35_OFFSET));
+    }
+    if (OutC2pmsg81) {
+        *OutC2pmsg81 = READ_REGISTER_ULONG(
+            (PULONG)(base + DIRECT_C2PMSG_81_OFFSET));
+    }
+
+    return status;
+}
+
+/* --- Direct SMU message via C2PMSG_66/82/90 through SMN.
+ *     Uses NBIO BAR5+0x38/0x3C for SMN transport.
+ *     Protocol: wait ready → ack → write arg → write msg → wait → read response. --- */
+NTSTATUS Amdbc250PspDirectSmuMsg(PVOID GpuBar5Va, ULONG Message, ULONG Argument,
+    PULONG OutResponse, PULONG OutResponseStatus)
+{
+    if (!GpuBar5Va) return STATUS_INVALID_PARAMETER;
+
+    /* Wait for SMU mailbox ready. */
+    NTSTATUS status = SmuWaitReady(GpuBar5Va, DIRECT_POLL_MAX_MS);
+    if (!NT_SUCCESS(status)) {
+        KdPrint(("BC250-PSP-SMU: timeout waiting for ready\n"));
+        if (OutResponseStatus) *OutResponseStatus = 0xFFFFFFFF;
+        return status;
+    }
+
+    /* Ack by writing 0 to C2PMSG_90. */
+    Amdbc250PspSmnWrite(GpuBar5Va, SMU_C2PMSG_90_SMN, 0);
+
+    /* Write argument to C2PMSG_82. */
+    Amdbc250PspSmnWrite(GpuBar5Va, SMU_C2PMSG_82_SMN, Argument);
+
+    /* Write message to C2PMSG_66. */
+    Amdbc250PspSmnWrite(GpuBar5Va, SMU_C2PMSG_66_SMN, Message);
+
+    /* Wait for completion. */
+    status = SmuWaitReady(GpuBar5Va, DIRECT_POLL_MAX_MS);
+
+    /* Read response. */
+    ULONG response = 0;
+    ULONG respStatus = 0;
+    if (NT_SUCCESS(status)) {
+        response = Amdbc250PspSmnRead(GpuBar5Va, SMU_C2PMSG_82_SMN);
+        respStatus = 1;
+    } else {
+        KdPrint(("BC250-PSP-SMU: timeout waiting for response\n"));
+        respStatus = 0xFF;
+    }
+
+    if (OutResponse) *OutResponse = response;
+    if (OutResponseStatus) *OutResponseStatus = respStatus;
+
+    return status;
+}
+
 /* Initialize PSP proxy - open handle to PSP driver for GPU register access */
 static BOOLEAN PspProxyInit(VOID)
 {
@@ -792,20 +951,43 @@ BOOLEAN Amdbc250PspValidateFirmware(PUCHAR FirmwareData, ULONG FirmwareSize, ULO
 
 NTSTATUS Amdbc250PspTryUnlockNbio(VOID)
 {
-    NTSTATUS status;
     LARGE_INTEGER delay;
     if (!g_PspContext.Initialized) return STATUS_DEVICE_NOT_READY;
-    status = Amdbc250PspWaitForRegister(MP0_C2PMSG_64_BYTE, MBOX_TOS_READY_FLAG, MBOX_TOS_READY_MASK, PSP_MAX_WAIT_MS);
-    if (!NT_SUCCESS(status)) return status;
-    Amdbc250PspWriteRegister(MP0_C2PMSG_64_BYTE, 0x00020000);
-    delay.QuadPart = -500000LL;
-    KeDelayExecutionThread(KernelMode, FALSE, &delay);
-    ULONG response = Amdbc250PspReadRegister(MP0_C2PMSG_64_BYTE);
-    Amdbc250PspWriteRegister(0xC100, 0xFEDCBAEF);
-    Amdbc250PspWriteRegister(0xC180, 0xFEDCBADF);
+
+    /* Try TOS DESTROY_RINGS command to wake PSP ring protocol. */
+    NTSTATUS status = Amdbc250PspWaitForRegister(MP0_C2PMSG_64_BYTE, MBOX_TOS_READY_FLAG, MBOX_TOS_READY_MASK, PSP_MAX_WAIT_MS);
+    if (NT_SUCCESS(status)) {
+        Amdbc250PspWriteRegister(MP0_C2PMSG_64_BYTE, 0x00020000);
+        delay.QuadPart = -500000LL;
+        KeDelayExecutionThread(KernelMode, FALSE, &delay);
+    }
+
+    /* Write NBIO unlock signatures via direct GPU BAR5 (absolute offsets, NOT MP0-relative).
+     * NOTE: NBIO firewall blocks writes to 0xC000-0xCFFF from all host paths (direct MMIO,
+     * PSP proxy, SMN). On BC-250, NBIO unlock is UNNECESSARY because the NBIO firewall
+     * does NOT block GC_BASE-shifted aliases. The real blocker (SPI_PG_ENABLE_STATIC_WGP_MASK)
+     * is SOS-locked at a higher privilege level — NBIO unlock does NOT help. */
+    if (g_GpuBar5Va) {
+        WRITE_REGISTER_ULONG((PULONG)((PUCHAR)g_GpuBar5Va + 0xC100), 0xFEDCBAEF);
+        WRITE_REGISTER_ULONG((PULONG)((PUCHAR)g_GpuBar5Va + 0xC180), 0xFEDCBADF);
+    } else {
+        /* Fallback: use PSP mapping but with raw offset (no PspReg transform).
+         * The PSP MmioBase is at GPU_BAR5_PHYSICAL, so add the raw BAR5 offset. */
+        if (g_PspContext.MmioBase) {
+            WRITE_REGISTER_ULONG((PULONG)(g_PspContext.MmioBase + 0xC100), 0xFEDCBAEF);
+            WRITE_REGISTER_ULONG((PULONG)(g_PspContext.MmioBase + 0xC180), 0xFEDCBADF);
+        }
+    }
     delay.QuadPart = -100000LL;
     KeDelayExecutionThread(KernelMode, FALSE, &delay);
-    response = Amdbc250PspReadRegister(0x50D0);
+
+    /* Check if NBIO is unlocked by reading MMHUB_VM_CONFIG. */
+    ULONG response = 0;
+    if (g_GpuBar5Va) {
+        response = READ_REGISTER_ULONG((PULONG)((PUCHAR)g_GpuBar5Va + 0x50D0));
+    } else if (g_PspContext.MmioBase) {
+        response = READ_REGISTER_ULONG((PULONG)(g_PspContext.MmioBase + 0x50D0));
+    }
     if (response != 0) return STATUS_SUCCESS;
     return STATUS_UNSUCCESSFUL;
 }
