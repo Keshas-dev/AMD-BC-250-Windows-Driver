@@ -682,5 +682,61 @@ Last *successful* cap = step before the crash.
 - `test-tools/seg1-dispatch-test.c` + `compile-seg1-dispatch.bat` — dispatches via SEG1 alias
   0x120E0 (live/writable PGM_RSRC, but execution still silent — confirms SEG1 is not the compute unlock).
 
+## 2026-07-21: Linux dmesg analysis from CachyOS
+
+### Key dmesg findings (cachyos-logai/dmesage.txt)
+- **Linux CAN create compute rings**: 8 compute rings (`comp_1.0.0`–`comp_1.3.1`), GFX ring, KIQ ring, SDMA0/1 rings — all created successfully
+- **SMU initialized**: `SMU is initialized successfully!` (v88.7.1 vs our v88.6.0 — slightly newer)
+- **PSP TMR**: 4MB reserved at 0xF40F800000 for PSP TMR
+- **VRAM**: 256M confirmed (`0x000000F400000000 – 0x000000F40FFFFFFF`)
+- **24 CUs active**: `SE 2, SH per SE 2, CU per SH 10, active_cu_number 24` — only 24/40 CUs available, WGPs fused
+- **SDMA0 fence timeout**: `Fence fallback timer expired on ring sdma0` — minor init delay
+- **DCN warnings**: HPD dummy irq errors on all sources (expected for headless mining card)
+- **NCT6686D**: Linux nct6683 driver found it at `0x2e:0xa20` (EC firmware v1.0 build 07/28/21) — confirmed separate SMBus device
+- **PCI config 0xB8 protected**: `Unexpected write to kernel-exclusive config offset b8` — Linux kernel blocks user-space writes to this SMN path
+- **VBIOS**: Fetched from ACPI VFCT, ATOM BIOS `113-AMDRBN-003`
+- **Custom kernel param**: `bc250_cc_write_mode` — unknown parameter ignored (user tried CU unlock param)
+
+### Firmware versions from debugfs (amdgpu_firmware_info)
+| FW | Version | Notes |
+|----|---------|-------|
+| ME | 0x63 (v99) | Same as our firmware |
+| PFP | 0x94 (v148) | Same |
+| CE | 0x25 (v37) | Same |
+| RLC | 0x0D (v13) | Same |
+| MEC | 0x90 (v144) | Same |
+| SMC | 0x00580701 (88.7.1) | **Different from our 88.6.0!** |
+| SDMA0/1 | 0x34 (v52) | Same |
+
+### Linux vs Windows comparison update
+- **psp_v11_0_8**: The BC-250 specific PSP source file is in a **separate file** (psp_v11_0_8.h/c), NOT in amdgpu_psp.c itself. The cachyos-logai only has the main amdgpu_psp.c (calls `psp_v11_0_8_set_psp_funcs()` at line 241 for CYAN_SKILLFISH2 variant, with `autoload_supported=false` and `boot_time_tmr=false`).
+- The `psp_v11_0_8_set_psp_funcs` function is defined in `psp_v11_0_8.c` which was **not present** in the cachyos-logai (only had the main PSP driver files).
+- **SMU version difference**: Linux has SMU 88.7.1 while our dumped SMU is 88.6.0. This could be a firmware mismatch — Linux likely has a newer Smu.bin.
+
+### Sources of interest
+- Full Linux PSP driver: https://github.com/torvalds/linux/blob/master/drivers/gpu/drm/amd/amdgpu/amdgpu_psp.c
+- Original BC-250 PSP patch series: https://lists.x.org/archives/amd-gfx/2021-July/066821.html
+- Linux psp_v11_0_8.h: https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/drivers/gpu/drm/amd/amdgpu/psp_v11_0_8.h
+- Linux psp_v11_0_8.c: https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/tree/drivers/gpu/drm/amd/amdgpu/psp_v11_0_8.c
+
+### PSP v11.0.8 Source Code Analysis (fetched 2026-07-21)
+
+`psp_v11_0_8.c` is **extremely minimal** — only defines 5 functions:
+- `ring_create`, `ring_stop`, `ring_destroy`, `ring_get_wptr`, `ring_set_wptr`
+- **NO** `init_microcode`, `bootloader_load_*`, `load_ip_fw` — firmware loading is NOT in this file
+
+**Ring create protocol** (non-SRIOV):
+1. Wait for `C2PMSG_64` bit 31 = 1 (TOS READY flag) ← **this is the blocker**
+2. Write ring addr LOW to `C2PMSG_69`, HIGH to `C2PMSG_70`, SIZE to `C2PMSG_71`
+3. Write ring type to `C2PMSG_64` (command), wait for response bit 31
+4. Ring WPTR uses `C2PMSG_67`
+
+**Root cause of ring failure**: The first step (`MBOX_TOS_READY_FLAG` on C2PMSG_64 bit 31) never succeeds because BC-250's SOS firmware doesn't include Trusted OS (TOS) component. Linux works because:
+- `autoload_supported=false` — VBIOS/bootloader pre-loads firmware
+- `boot_time_tmr=false` — TMR is set up by BIOS at boot time
+- The full amdgpu PSP init sequence (bootloader → sysdrv → sos → TOS) is performed once at boot
+
+**On Windows**: Our PSP driver tries ring protocol after SOS is alive (C2PMSG_81=0xF0000010) but without TOS initialized, C2PMSG_64 bit 31 is never set → ring_create always fails. This confirms the earlier finding that our SOS firmware is minimal (no TOS ring protocol support).
+
 
 

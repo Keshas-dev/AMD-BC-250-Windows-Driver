@@ -1,3 +1,5 @@
+> **Due to lack of free time, this project is postponed indefinitely.**
+
 # AMD BC-250 Windows Driver Project
 
 ## Who We Are
@@ -237,6 +239,7 @@ build.bat
 ```cmd
 output\bar5-smn-test.exe         # SMU mailbox via SMN (freq, VID, features)
 output\smu-monitor.exe           # Live SMU telemetry (CSV logging)
+output\smu-dcn-monitor.exe       # Combined SMU + DCN status (freq, voltage, temp, pipe)
 output\governor-sequence.exe     # SMU frequency control test
 output\gfxoff-kill-v2.exe        # GFXOFF+CG+PG disable + compute trigger
 output\dcn-init-test.exe         # DCN display engine probe
