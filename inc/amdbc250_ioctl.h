@@ -629,6 +629,52 @@ typedef struct _AMDBC250_IOCTL_EXECUTE_RING_PM4 {
     UINT32 TmgMaskReadback;     /* COMPUTE_STATIC_THREAD_MGMT_SE0 readback */
 } AMDBC250_IOCTL_EXECUTE_RING_PM4, *PAMDBC250_IOCTL_EXECUTE_RING_PM4;
 
+/* --- 40 CU Unlock --- */
+#define IOCTL_AMDBC250_UNLOCK_40CU          CTL_CODE_AMDBC250(0x60, METHOD_BUFFERED, FILE_ANY_ACCESS)
+
+typedef struct _AMDBC250_IOCTL_UNLOCK_40CU {
+    UINT32 Enable;                 /* IN: 1=enable, 0=disable */
+    UINT32 Result;                 /* OUT: 0=fail, 1=success */
+    UINT32 SpiWgpMaskBefore;       /* OUT: SPI_PG_ENABLE_STATIC_WGP_MASK before */
+    UINT32 SpiWgpMaskAfter;        /* OUT: SPI_PG_ENABLE_STATIC_WGP_MASK after */
+    UINT32 CcArrayConfigBefore;    /* OUT: CC_GC_SHADER_ARRAY_CONFIG before */
+    UINT32 CcArrayConfigAfter;     /* OUT: CC_GC_SHADER_ARRAY_CONFIG after */
+    UINT32 ActiveWgpBefore;        /* OUT: QueryActiveWgp before */
+    UINT32 ActiveWgpAfter;         /* OUT: QueryActiveWgp after */
+} AMDBC250_IOCTL_UNLOCK_40CU, *PAMDBC250_IOCTL_UNLOCK_40CU;
+
+/* --- Get CU Status --- */
+#define IOCTL_AMDBC250_GET_CU_STATUS        CTL_CODE_AMDBC250(0x61, METHOD_BUFFERED, FILE_ANY_ACCESS)
+
+typedef struct _AMDBC250_IOCTL_GET_CU_STATUS {
+    UINT32 ActiveWgp;              /* OUT: active WGP count */
+    UINT32 TotalCUs;               /* OUT: total CU count */
+    UINT32 EnabledCUs;             /* OUT: enabled CU count */
+    UINT32 SpiWgpMask;             /* OUT: SPI_PG_ENABLE_STATIC_WGP_MASK */
+    UINT32 CcArrayConfig;          /* OUT: CC_GC_SHADER_ARRAY_CONFIG */
+    UINT32 GrbmStatus;             /* OUT: GRBM_STATUS */
+} AMDBC250_IOCTL_GET_CU_STATUS, *PAMDBC250_IOCTL_GET_CU_STATUS;
+
+/* --- GCVM Page Table Setup --- */
+#define IOCTL_AMDBC250_GCVM_PT_SETUP        CTL_CODE_AMDBC250(0x62, METHOD_BUFFERED, FILE_ANY_ACCESS)
+
+typedef struct _AMDBC250_IOCTL_GCVM_PT_SETUP {
+    UINT32 PageTableCount;         /* IN: number of page table pages */
+    UINT32 Flags;                  /* IN: setup flags */
+    UINT32 Result;                 /* OUT: 0=fail, 1=success */
+    UINT64 GpuVirtualAddress;      /* OUT: GPU VA of page table */
+    UINT64 PhysicalAddress;        /* OUT: physical address */
+} AMDBC250_IOCTL_GCVM_PT_SETUP, *PAMDBC250_IOCTL_GCVM_PT_SETUP;
+
+/* --- SDMA Self Test --- */
+#define IOCTL_AMDBC250_SDMA_SELFTEST        CTL_CODE_AMDBC250(0x63, METHOD_BUFFERED, FILE_ANY_ACCESS)
+
+typedef struct _AMDBC250_IOCTL_SDMA_SELFTEST {
+    UINT32 Result;                 /* OUT: 0=fail, 0x600DCAFE=pass */
+    UINT32 Pattern;                /* IN: fill pattern (default 0x600DC0DE) */
+    UINT32 Size;                   /* IN: test size in bytes (max 4096) */
+} AMDBC250_IOCTL_SDMA_SELFTEST, *PAMDBC250_IOCTL_SDMA_SELFTEST;
+
 #pragma pack(pop)
 
 #endif /* _AMDBC250_IOCTL_H_ */
