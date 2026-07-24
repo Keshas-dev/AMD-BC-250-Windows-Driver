@@ -3,10 +3,10 @@ setlocal
 set SRCDIR=%~dp0
 set ODIR=%~dp0..\output
 if not exist "%ODIR%" mkdir "%ODIR%"
-set VCVARS=E:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvarsall.bat
-set SDK=E:\Program Files (x86)\Windows Kits\10
+set VCVARS=F:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat
+set SDK=F:\Program Files (x86)\Windows Kits\10
 set SDKVER=10.0.26100.0
-call "%VCVARS%" x64
+call "%VCVARS%"
 cl /nologo /O2 /utf-8 /MD /W3 /wd4100 /wd4101 /wd4189 /wd4996 ^
   /I"%SRCDIR%..\inc" ^
   /I"%SDK%\Include\%SDKVER%\um" ^
