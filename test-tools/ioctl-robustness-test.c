@@ -4,8 +4,10 @@
  * IOCTL robustness / fuzz-lite test for AMDBC250 driver.
  *
  * WARNING: this test intentionally sends invalid parameters and may trigger
- * bugchecks if the driver does not validate inputs. Run only on test hardware
- * with test-signing enabled and be prepared to hard-reset.
+ * error returns if the driver does not validate inputs. Dangerous operations
+ * (GRBM_GFX_INDEX broadcast, sensitive register writes, garbage PM4) have
+ * been removed to prevent GPU hangs. Run only on test hardware with
+ * test-signing enabled.
  */
 
 #include <windows.h>
@@ -140,21 +142,6 @@ int main(void)
         wa.Value = 0xFFFFFFFF;
         run_case("WRITE_REG: offset=0xFFFFFFFF",
                  IOCTL_AMDBC250_WRITE_REG, &wa, sizeof(wa), &wa, sizeof(wa));
-
-        wa.RegisterOffset = 0x34D0; /* GRBM_GFX_INDEX — sensitive */
-        wa.Value = 0xE0000000;
-        run_case("WRITE_REG: GRBM_GFX_INDEX broadcast",
-                 IOCTL_AMDBC250_WRITE_REG, &wa, sizeof(wa), &wa, sizeof(wa));
-
-        wa.RegisterOffset = 0x9C1C; /* CC_ARRAY_CONFIG */
-        wa.Value = 0xFFFFFFFF;
-        run_case("WRITE_REG: CC_ARRAY_CONFIG 0xFFFFFFFF",
-                 IOCTL_AMDBC250_WRITE_REG, &wa, sizeof(wa), &wa, sizeof(wa));
-
-        /* restore safe broadcast value */
-        wa.Value = 0xE0000000;
-        run_case("WRITE_REG: GRBM_GFX_INDEX restore",
-                 IOCTL_AMDBC250_WRITE_REG, &wa, sizeof(wa), &wa, sizeof(wa));
     }
 
     /* ------------------------------------------------------------------ */
@@ -266,22 +253,7 @@ int main(void)
     }
 
     /* ------------------------------------------------------------------ */
-    /* EXECUTE_RING_PM4                                                   */
-    /* ------------------------------------------------------------------ */
-    printf("\n--- EXECUTE_RING_PM4 ---\n");
-    {
-        AMDBC250_IOCTL_EXECUTE_RING_PM4 ep = {0};
-        run_case("EXECUTE_RING_PM4: zeroed",
-                 IOCTL_AMDBC250_EXECUTE_RING_PM4, &ep, sizeof(ep), &ep, sizeof(ep));
-
-        ep.CommandCount = 64;
-        memset(ep.Commands, 0xFF, sizeof(ep.Commands));
-        run_case("EXECUTE_RING_PM4: 64 garbage DWORDs",
-                 IOCTL_AMDBC250_EXECUTE_RING_PM4, &ep, sizeof(ep), &ep, sizeof(ep));
-    }
-
-    /* ------------------------------------------------------------------ */
-    /* KIQ_NOP_TEST / KIQ_BIOS_RING_SUBMIT                                */
+    /* KIQ_NOP_TEST / KIQ_BIOS_RING_SUBMIT                           */
     /* ------------------------------------------------------------------ */
     printf("\n--- KIQ_NOP_TEST ---\n");
     {
