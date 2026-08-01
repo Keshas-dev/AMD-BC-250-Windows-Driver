@@ -237,6 +237,135 @@ NTSTATUS Amdbc250PspDirectSmuMsg(PVOID GpuBar5Va, ULONG Message, ULONG Argument,
     return status;
 }
 
+/* ============================================================================
+ * SMU Queue 3 mailbox (SMN-based) — used for core-unlock (msg 0x98) and the
+ * safe test message (msg 0x01). Queue 3 is the telemetry/perf-profile queue:
+ *   CMD = SMN[0x03B10A20], RSP = SMN[0x03B10A80], ARG = SMN[0x03B10A88].
+ * DONE states: 0x01=OK, 0xFF=fail, 0xFE=unknown, 0xFD=rejected, 0xFC=busy.
+ * ============================================================================
+ */
+#define SMU_Q3_CMD_SMN   0x03B10A20
+#define SMU_Q3_RSP_SMN   0x03B10A80
+#define SMU_Q3_ARG_SMN   0x03B10A88
+
+/* Core presence mask register (SMN). 0x77 = 6 cores, 0xFF = 8 cores. */
+#define SMN_CORE_MASK_REG   0x0115A870
+
+/* Wait for Q3 RSP to reach a DONE state. Returns the state (1=OK), or 0 on
+ * timeout. Never blocks more than ~2.5s. */
+static ULONG
+SmuQ3WaitDone(PVOID GpuBar5Va, ULONG TimeoutMs)
+{
+    ULONG i;
+    for (i = 0; i < TimeoutMs; i++) {
+        ULONG st = Amdbc250PspSmnRead(GpuBar5Va, SMU_Q3_RSP_SMN);
+        if (st == 0x01 || st == 0xFF || st == 0xFE || st == 0xFD || st == 0xFC) {
+            return st;
+        }
+        KeStallExecutionProcessor(1000); /* 1ms */
+    }
+    return 0;
+}
+
+/* --- SMU Q3 mailbox round-trip. Safe: only ever touches the three fixed Q3
+ *     registers. MsgStatus: 1=OK, 0xFF=fail, 0xFE=unknown, 0xFD=rejected,
+ *     0xFC=busy, 0=timeout. Returns STATUS_SUCCESS only on 0x01. --- */
+NTSTATUS
+Amdbc250PspSmuQ3Msg(PVOID GpuBar5Va, ULONG Message, ULONG Argument,
+                    PULONG OutResponse, PULONG OutResponseStatus)
+{
+    if (!GpuBar5Va) return STATUS_INVALID_PARAMETER;
+
+    /* Wait for mailbox idle, ack by writing 0. */
+    ULONG st = SmuQ3WaitDone(GpuBar5Va, DIRECT_POLL_MAX_MS);
+    if (st == 0) {
+        if (OutResponseStatus) *OutResponseStatus = 0;
+        return STATUS_TIMEOUT;
+    }
+    Amdbc250PspSmnWrite(GpuBar5Va, SMU_Q3_RSP_SMN, 0);
+
+    /* Write argument, then command. */
+    Amdbc250PspSmnWrite(GpuBar5Va, SMU_Q3_ARG_SMN, Argument);
+    Amdbc250PspSmnWrite(GpuBar5Va, SMU_Q3_CMD_SMN, Message);
+
+    /* Wait for completion. */
+    st = SmuQ3WaitDone(GpuBar5Va, DIRECT_POLL_MAX_MS);
+    ULONG resp = Amdbc250PspSmnRead(GpuBar5Va, SMU_Q3_ARG_SMN);
+
+    if (OutResponse) *OutResponse = resp;
+    if (OutResponseStatus) *OutResponseStatus = st;
+
+    return (st == 0x01) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
+}
+
+/* --- Safe CPU core unlock.
+ *     SMU Q3 msg 0x98 is an UNGATED SMU-privileged SMN write: it writes the
+ *     fixed value 0x00FF to the SMN address passed as the message argument.
+ *     There is NO bounds check on the SMU side, so we enforce a strict
+ *     whitelist here: only SMN_CORE_MASK_REG may be targeted, and only when
+ *     the current mask reads 0x77 (6 cores). If it already reads 0xFF, report
+ *     "already unlocked". Any other value aborts without writing.
+ *
+ *     Result: 1=unlocked now, 2=already 0xFF, 0=failed/refused.
+ *     OutCoreMaskBefore/After: mask read before/after the write. --- */
+NTSTATUS
+Amdbc250PspCoreUnlock(PVOID GpuBar5Va, PULONG OutCoreMaskBefore,
+                      PULONG OutCoreMaskAfter, PULONG OutResult)
+{
+    if (!GpuBar5Va) return STATUS_INVALID_PARAMETER;
+    if (OutCoreMaskBefore) *OutCoreMaskBefore = 0;
+    if (OutCoreMaskAfter)  *OutCoreMaskAfter  = 0;
+    if (OutResult)         *OutResult         = 0;
+
+    /* 1. Sanity: SMU alive via Q3 test message (0x01 returns arg+1). */
+    ULONG testResp = 0, testSt = 0;
+    NTSTATUS status = Amdbc250PspSmuQ3Msg(GpuBar5Va, 0x01, 123, &testResp, &testSt);
+    if (!NT_SUCCESS(status) || testResp != 124) {
+        KdPrint(("BC250-PSP-SMU: Q3 core-unlock SMU not alive (st=0x%X resp=0x%X)\n",
+                 testSt, testResp));
+        return STATUS_DEVICE_NOT_READY;
+    }
+
+    /* 2. Read current core presence mask. */
+    ULONG maskBefore = Amdbc250PspSmnRead(GpuBar5Va, SMN_CORE_MASK_REG);
+    if (OutCoreMaskBefore) *OutCoreMaskBefore = maskBefore;
+
+    /* 3. Already fully unlocked? */
+    if ((maskBefore & 0xFF) == 0xFF) {
+        if (OutResult) *OutResult = 2;
+        return STATUS_SUCCESS;
+    }
+
+    /* 4. Refuse to touch unless the mask is exactly the known 6-core state. */
+    if ((maskBefore & 0xFF) != 0x77) {
+        KdPrint(("BC250-PSP-SMU: core-unlock ABORT, unexpected mask 0x%02X\n",
+                 maskBefore & 0xFF));
+        return STATUS_UNSUCCESSFUL;
+    }
+
+    /* 5. Send Q3 msg 0x98 to the whitelisted register. */
+    status = Amdbc250PspSmuQ3Msg(GpuBar5Va, 0x98, SMN_CORE_MASK_REG,
+                                 NULL, NULL);
+    if (!NT_SUCCESS(status)) {
+        KdPrint(("BC250-PSP-SMU: core-unlock msg 0x98 failed 0x%08X\n", status));
+        return status;
+    }
+
+    /* 6. Verify it stuck. */
+    KeStallExecutionProcessor(20000); /* 20ms */
+    ULONG maskAfter = Amdbc250PspSmnRead(GpuBar5Va, SMN_CORE_MASK_REG);
+    if (OutCoreMaskAfter) *OutCoreMaskAfter = maskAfter;
+
+    if ((maskAfter & 0xFF) == 0xFF) {
+        if (OutResult) *OutResult = 1;
+        return STATUS_SUCCESS;
+    }
+
+    KdPrint(("BC250-PSP-SMU: core-unlock did NOT stick (0x%02X -> 0x%02X)\n",
+             maskBefore & 0xFF, maskAfter & 0xFF));
+    return STATUS_UNSUCCESSFUL;
+}
+
 /* Initialize PSP proxy - open handle to PSP driver for GPU register access */
 static BOOLEAN PspProxyInit(VOID)
 {

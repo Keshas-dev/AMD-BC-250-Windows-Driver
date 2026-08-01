@@ -51,6 +51,10 @@ NTSTATUS Amdbc250PspDirectLoadIpFw(PVOID GpuBar5Va, ULONG FwType, ULONG FwSize,
     PHYSICAL_ADDRESS FwPa, PULONG OutC2pmsg35, PULONG OutC2pmsg81);
 NTSTATUS Amdbc250PspDirectSmuMsg(PVOID GpuBar5Va, ULONG Message, ULONG Argument,
     PULONG OutResponse, PULONG OutResponseStatus);
+NTSTATUS Amdbc250PspSmuQ3Msg(PVOID GpuBar5Va, ULONG Message, ULONG Argument,
+    PULONG OutResponse, PULONG OutResponseStatus);
+NTSTATUS Amdbc250PspCoreUnlock(PVOID GpuBar5Va, PULONG OutCoreMaskBefore,
+    PULONG OutCoreMaskAfter, PULONG OutResult);
 ULONG Amdbc250PspSmnRead(PVOID GpuBar5Va, ULONG SmnAddress);
 VOID Amdbc250PspSmnWrite(PVOID GpuBar5Va, ULONG SmnAddress, ULONG Value);
 

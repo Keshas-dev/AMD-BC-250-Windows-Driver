@@ -239,6 +239,7 @@ build.bat
 ```cmd
 output\bar5-smn-test.exe         # SMU mailbox via SMN (freq, VID, features)
 output\smu-monitor.exe           # Live SMU telemetry (CSV logging)
+output\smu-telemetry-cli.exe     # Live SMU telemetry via real IOCTL 0x77 (--once, --csv)
 output\smu-dcn-monitor.exe       # Combined SMU + DCN status (freq, voltage, temp, pipe)
 output\governor-sequence.exe     # SMU frequency control test
 output\gfxoff-kill-v2.exe        # GFXOFF+CG+PG disable + compute trigger
@@ -246,7 +247,49 @@ output\dcn-init-test.exe         # DCN display engine probe
 output\psp-status-test.exe       # PSP driver status + BAR5 mapping
 output\gcvm-pt-test.exe          # GCVM page table setup + KIQ test
 output\smu-scan-all.exe          # SMU register space scanner
+output\core-unlock-ioctl.exe     # CPU core unlock via safe IOCTL 0x78 (needs reboot)
 test-tools\sw-pm4-test.exe       # Software PM4 executor test (confirmed working)
+```
+
+---
+
+## Registry Settings
+
+All values live under `HKLM\SYSTEM\CurrentControlSet\Services\atikmdag` (DWORD).
+Defaults are chosen **fail-closed** (dangerous behavior OFF unless explicitly enabled).
+
+| Value | Default | Purpose |
+|-------|---------|---------|
+| `DriverEntryRan` | (auto) | 1 after DriverEntry. Confirms the new binary loaded. |
+| `Step_HwInit` | (auto) | Highest hardware-init step reached (survives reboot). |
+| `HwInitMaxStep` | 0 (all) | Cap hardware init at step N (0 = run all). Used to binary-search init crashes. |
+| `HwInitFirmware` | 1 | 0 = skip CP firmware load (isolate 0x1A BSOD). |
+| `HwUnhaltCp` | 0 | 0 = keep CP halted after firmware load (rogue host DMA → 0x1A). |
+| `HwInitGfxRing` | 0 | 0 = skip GFX ring init (BASE regs host read-only / SOS-locked). |
+| `HwInitSdmaRing` | 0 | 0 = skip SDMA ring init (suspected 0x1A source). |
+| `HwInitGart` | 0 | 0 = skip GART (MC_VM_AGP_* are SOS-owned; writing → 0x1A). |
+| `HwInitVm` | 0 | 0 = skip GPUVM system-aperture init (SOS-owned MC class). |
+| `HwInitMemCtrl` | 0 | 0 = skip GB_ADDR_CONFIG (0x61D8, freeze zone) + MC_VM_FB_LOCATION writes. |
+| `DisplayWritesEnabled` | 0 | 0 = DISABLE live DCN HUBPREQ/OTG writes (they target a real 2560x1440 scanout and black-screen the GPU). Set 1 only after a full DCN init exists. |
+
+### Notes
+- **`HwInitMemCtrl=0` is critical.** GB_ADDR_CONFIG now resolves to `0x61D8`
+  (in the 0x3400–0x8100 FREEZE ZONE) and `MC_VM_FB_LOCATION` (0x9520/0x9524)
+  is in the SOS-owned MC block — both were suspected 0x1A crash sources in
+  full-init (Flags=0). The NBIO_MAP path (`AMDBC250_INIT_FLAG_NBIO_MAP`) never
+  runs them.
+- **`DisplayWritesEnabled=0` is critical.** After the DCN base correction to
+  `0xD300`, the DDI/IOCTL HUBPREQ writes (0xEB28+) hit a LIVE framebuffer.
+  Enabling them without a real DCN pipeline black-screens and hangs the GPU.
+- Full-init (`Flags=0` via `full-init-test.exe`) is **not safe** until
+  `HwInitMemCtrl` is verified. Use `Flags=AMDBC250_INIT_FLAG_NBIO_MAP` for all
+  register/SMU work.
+
+### Example
+```cmd
+reg add "HKLM\SYSTEM\CurrentControlSet\Services\atikmdag" /v HwInitMaxStep /t REG_DWORD /d 0 /f
+reg add "HKLM\SYSTEM\CurrentControlSet\Services\atikmdag" /v HwInitMemCtrl /t REG_DWORD /d 0 /f
+reg add "HKLM\SYSTEM\CurrentControlSet\Services\atikmdag" /v DisplayWritesEnabled /t REG_DWORD /d 0 /f
 ```
 
 ---

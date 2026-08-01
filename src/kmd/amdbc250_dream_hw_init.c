@@ -1024,6 +1024,11 @@ DreamV3InitCommandProcessor(_In_ PDREAM_V3_DEVICE_EXTENSION DevExt)
 static NTSTATUS
 DreamV3InitMemoryController(_In_ PDREAM_V3_DEVICE_EXTENSION DevExt)
 {
+    UNICODE_STRING Path;
+    OBJECT_ATTRIBUTES Oa;
+    HANDLE hKey = NULL;
+    ULONG MemCtrlEnable = 0;
+
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                "AMDBC250-DREAM-V4.3: InitMemoryController (GDDR6)\n"));
 
@@ -1032,23 +1037,63 @@ DreamV3InitMemoryController(_In_ PDREAM_V3_DEVICE_EXTENSION DevExt)
      * BC-250 has 16GB GDDR6 shared between CPU and GPU.
      */
 
+    /* Kill-switch (HwInitMemCtrl=0, default): the MC/GART-related writes in
+     * this function target SOS-owned registers. GB_ADDR_CONFIG (0x61D8) is in
+     * the 0x3400-0x8100 FREEZE ZONE and MC_VM_FB_LOCATION (0x9520/0x9524) is
+     * in the SOS-owned MC block (GART 0x9528+ writes trigger 0x1A). Skip them
+     * entirely unless explicitly enabled. */
+    RtlInitUnicodeString(&Path,
+        L"\\Registry\\Machine\\SYSTEM\\CurrentControlSet\\Services\\atikmdag");
+    InitializeObjectAttributes(&Oa, &Path, OBJ_CASE_INSENSITIVE, NULL, NULL);
+    if (NT_SUCCESS(ZwOpenKey(&hKey, KEY_READ, &Oa))) {
+        UNICODE_STRING vn;
+        RtlInitUnicodeString(&vn, L"HwInitMemCtrl");
+        UCHAR buf[sizeof(KEY_VALUE_PARTIAL_INFORMATION) + sizeof(ULONG)] = {0};
+        ULONG ret = 0;
+        if (NT_SUCCESS(ZwQueryValueKey(hKey, &vn, KeyValuePartialInformation,
+                                       buf, sizeof(buf), &ret))) {
+            PKEY_VALUE_PARTIAL_INFORMATION pi = (PKEY_VALUE_PARTIAL_INFORMATION)buf;
+            if (pi->DataLength == sizeof(ULONG)) MemCtrlEnable = *(PULONG)pi->Data;
+        }
+        ZwClose(hKey);
+    }
+
     /* Configure GB_ADDR_CONFIG for BC-250 (Cyan Skillfish)
      * Linux CYAN_SKILLFISH_GB_ADDR_CONFIG_GOLDEN = 0x00100044 (gfx_v10_0.c)
      * Bits [3:0] = NUM_PIPES: 4 (0x4)
      * Bits [7:4] = PIPE_INTERLEAVE: 256B (0x4)
      * Bits [19:16] = NUM_PKRS: 1 (0x1)
      * Address: mmGB_ADDR_CONFIG = 0x13DE (BASE_IDX=0) -> BAR5 0x61D8.
-     */
-    DreamV3WriteRegister(DevExt, AMDBC250_REG_GB_ADDR_CONFIG,
-                         0x00100044);  /* CYAN_SKILLFISH_GB_ADDR_CONFIG_GOLDEN */
+     *
+     * DANGER (2026-08-01): 0x61D8 sits inside the 0x3400-0x8100 FREEZE ZONE.
+     * Writing it during full init (Flags=0) is a suspected 0x1A crash source.
+     * Full-init-test (Flags=0) must NOT run until this is verified safe. */
+    if (MemCtrlEnable != 0) {
+        DreamV3WriteRegister(DevExt, AMDBC250_REG_GB_ADDR_CONFIG,
+                             0x00100044);  /* CYAN_SKILLFISH_GB_ADDR_CONFIG_GOLDEN */
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                   "AMDBC250-DREAM-V4.3: GB_ADDR_CONFIG programmed (HwInitMemCtrl=1)\n"));
+    } else {
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+                   "AMDBC250-DREAM-V4.3: GB_ADDR_CONFIG write SKIPPED (HwInitMemCtrl=0, freeze zone)\n"));
+    }
 
-    /* Configure framebuffer location */
+    /* Configure framebuffer location — MC_VM registers are SOS-owned on BC-250
+     * (GART 0x9528+ / system aperture writes trigger 0x1A). Gated by the same
+     * HwInitMemCtrl kill-switch; only happens if FbSize was actually set. */
     if (DevExt->FbSize > 0) {
         ULONG FbTop = (ULONG)((DevExt->FbPhysicalBase.QuadPart + DevExt->FbSize) >> 24) - 1;
         ULONG FbBase = (ULONG)(DevExt->FbPhysicalBase.QuadPart >> 24);
-        
-        DreamV3WriteRegister(DevExt, AMDBC250_REG_MC_VM_FB_LOCATION_TOP, FbTop);
-        DreamV3WriteRegister(DevExt, AMDBC250_REG_MC_VM_FB_LOCATION_BASE, FbBase);
+
+        if (MemCtrlEnable != 0) {
+            DreamV3WriteRegister(DevExt, AMDBC250_REG_MC_VM_FB_LOCATION_TOP, FbTop);
+            DreamV3WriteRegister(DevExt, AMDBC250_REG_MC_VM_FB_LOCATION_BASE, FbBase);
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                       "AMDBC250-DREAM-V4.3: FB location programmed (HwInitMemCtrl=1)\n"));
+        } else {
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+                       "AMDBC250-DREAM-V4.3: MC_VM FB location write SKIPPED (HwInitMemCtrl=0)\n"));
+        }
     }
 
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,

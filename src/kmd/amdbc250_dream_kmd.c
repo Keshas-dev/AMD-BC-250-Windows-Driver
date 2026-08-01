@@ -3585,6 +3585,105 @@ DreamV3DeviceControl(
         break;
     }
 
+    /* --- Real SMU Telemetry (queried live from the SMU mailbox) --- */
+    case IOCTL_AMDBC250_GET_SMU_TELEMETRY: {
+        if (outputLen < sizeof(AMDBC250_IOCTL_SMU_TELEMETRY)) {
+            status = STATUS_BUFFER_TOO_SMALL;
+            break;
+        }
+
+        PAMDBC250_IOCTL_SMU_TELEMETRY t = (PAMDBC250_IOCTL_SMU_TELEMETRY)outputBuffer;
+        RtlZeroMemory(t, sizeof(*t));
+
+        if (!DevExt || !DevExt->MmioVirtualBase) {
+            t->Result = 0;
+            t->MsgStatus = 0;
+            status = STATUS_DEVICE_NOT_READY;
+            break;
+        }
+
+        PUCHAR mmio = (PUCHAR)DevExt->MmioVirtualBase;
+
+        /* Helper macros — one SMU mailbox round-trip each, tracking the worst
+         * response status so a single dead message doesn't mask the rest. */
+#define SMU_TEL_QUERY(_msg, _arg, _out)                                        \
+        do {                                                                   \
+            ULONG resp = 0, rstat = 0;                                         \
+            NTSTATUS st = Amdbc250PspDirectSmuMsg(mmio, (_msg), (_arg),        \
+                                                  &resp, &rstat);              \
+            (_out) = resp;                                                     \
+            if (NT_SUCCESS(st) && rstat == 1) t->MsgStatus = 1;                \
+            else t->MsgStatus = (t->MsgStatus == 1) ? 1 : 0xFF;                \
+        } while (0)
+
+        /* Firmware identification */
+        SMU_TEL_QUERY(0x02, 0, t->SmuVersion);          /* GetSmuVersion */
+        SMU_TEL_QUERY(0x03, 0, t->DriverIfVersion);     /* GetDriverIfVersion */
+        /* GFX clocks + voltage + compute state */
+        SMU_TEL_QUERY(0x37, 0, t->GfxFreqMhz);          /* GetGfxFrequency (MHz direct) */
+        SMU_TEL_QUERY(0x0F, 0, t->QueryGfxclkMhz);      /* QueryGfxclk */
+        SMU_TEL_QUERY(0x38, 0, t->GfxVid);              /* GetGfxVid */
+        SMU_TEL_QUERY(0x1E, 0, t->ActiveWgps);          /* QueryActiveWgp */
+        SMU_TEL_QUERY(0x3D, 0, t->EnabledSmuFeatures);  /* GetEnabledSmuFeatures */
+
+        /* VID -> mV: vid = round((1.55 - mv/1000) / 0.00625), invert it.
+         * mV = round((-vid*0.00625 + 1.55) * 1000). */
+        if (t->GfxVid <= 255) {
+            double mv = (-((double)t->GfxVid) * 0.00625 + 1.55) * 1000.0;
+            t->GfxMillivolts = (UINT32)(mv + 0.5);
+        } else {
+            t->GfxMillivolts = 0;
+        }
+
+        /* Raw SMN sensor probes (only valid if not 0xFFFFFFFF). */
+        t->SmnEdgeTemp     = Amdbc250PspSmnRead(mmio, 0x03B10000);
+        t->SmnJunctionTemp = Amdbc250PspSmnRead(mmio, 0x03B10020);
+        t->SmnMemTemp      = Amdbc250PspSmnRead(mmio, 0x03B10028);
+        t->SmnFanRpm       = Amdbc250PspSmnRead(mmio, 0x03B10064);
+        t->SmnFanPwm       = Amdbc250PspSmnRead(mmio, 0x03B10068);
+
+        t->Result = 1;
+        bytesReturned = sizeof(*t);
+        break;
+    }
+
+    /* --- Safe CPU core unlock (SMU Q3 msg 0x98, whitelisted register) --- */
+    case IOCTL_AMDBC250_CORE_UNLOCK: {
+        if (outputLen < sizeof(AMDBC250_IOCTL_CORE_UNLOCK)) {
+            status = STATUS_BUFFER_TOO_SMALL;
+            break;
+        }
+
+        PAMDBC250_IOCTL_CORE_UNLOCK cu = (PAMDBC250_IOCTL_CORE_UNLOCK)outputBuffer;
+        RtlZeroMemory(cu, sizeof(*cu));
+
+        if (!DevExt || !DevExt->MmioVirtualBase) {
+            cu->SmuStatus = 0;
+            status = STATUS_DEVICE_NOT_READY;
+            break;
+        }
+
+        PUCHAR mmio = (PUCHAR)DevExt->MmioVirtualBase;
+        NTSTATUS cuStatus = Amdbc250PspCoreUnlock(
+            mmio, &cu->CoreMaskBefore, &cu->CoreMaskAfter, &cu->Result);
+
+        if (NT_SUCCESS(cuStatus)) {
+            cu->SmuStatus = 1;
+        } else if (cuStatus == STATUS_DEVICE_NOT_READY) {
+            cu->SmuStatus = 0xFF;  /* SMU not alive */
+        } else {
+            cu->SmuStatus = 0xFE;  /* refused / did not stick */
+        }
+
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+            "AMDBC250-DREAM-V4.3: CORE_UNLOCK before=0x%X after=0x%X result=%u status=0x%X st=0x%08X\n",
+            cu->CoreMaskBefore, cu->CoreMaskAfter, cu->Result, cu->SmuStatus, cuStatus));
+
+        status = STATUS_SUCCESS;
+        bytesReturned = sizeof(*cu);
+        break;
+    }
+
     /* --- Allocate DMA Buffer (for command submission) --- */
     case 0x80000930: { /* IOCTL_AMDBC250_ALLOC_DMA_BUFFER */
         if (inputLen >= sizeof(ULONG) && outputLen >= sizeof(ULONG64) * 2) {

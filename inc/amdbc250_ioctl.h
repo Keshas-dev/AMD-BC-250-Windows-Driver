@@ -116,6 +116,12 @@ Environment:
 /* Report BAR addresses parsed from StartDevice resource list */
 #define IOCTL_AMDBC250_GET_RESOURCE_BARS    CTL_CODE_AMDBC250(0x7E, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
+/* Query live SMU telemetry (freq/vid/features/WGPs/temps) via the SMU mailbox */
+#define IOCTL_AMDBC250_GET_SMU_TELEMETRY    CTL_CODE_AMDBC250(0x77, METHOD_BUFFERED, FILE_ANY_ACCESS)
+
+/* Safe CPU core unlock via SMU Q3 msg 0x98 (whitelisted register only) */
+#define IOCTL_AMDBC250_CORE_UNLOCK          CTL_CODE_AMDBC250(0x78, METHOD_BUFFERED, FILE_ANY_ACCESS)
+
 typedef struct _AMDBC250_IOCTL_RESOURCE_BARS {
     UINT32 DeviceStarted;         /* 1=StartDevice was called */
     UINT32 MmioMapped;            /* 1=MMIO mapped */
@@ -171,6 +177,44 @@ typedef struct _AMDBC250_IOCTL_TEMP_INFO {
     UINT32 FanSpeedPercent;     /* Fan speed 0-100% */
     BOOLEAN ThrottleActive;     /* Thermal throttle */
 } AMDBC250_IOCTL_TEMP_INFO, *PAMDBC250_IOCTL_TEMP_INFO;
+
+/* --- Real SMU Telemetry (queried live from the SMU mailbox, not stubs) ---
+ * Queried via Amdbc250PspDirectSmuMsg (SMN path) on the current mapped BAR5.
+ * Raw SMN sensor probes are read from the SMU SMN space (0x03B1xxxx). */
+typedef struct _AMDBC250_IOCTL_SMU_TELEMETRY {
+    /* SMU firmware identification (msg 0x02/0x03) */
+    UINT32 SmuVersion;          /* e.g. 0x00580600 = 88.6.0 */
+    UINT32 DriverIfVersion;     /* msg 0x03, usually 8 */
+    /* GFX clocks (msg 0x37 = GetGfxFrequency MHz, 0x0F = QueryGfxclk) */
+    UINT32 GfxFreqMhz;          /* msg 0x37 direct MHz */
+    UINT32 QueryGfxclkMhz;      /* msg 0x0F */
+    /* Voltage (msg 0x38 = GetGfxVid) */
+    UINT32 GfxVid;              /* raw VID */
+    UINT32 GfxMillivolts;       /* converted mV (vid formula) */
+    /* Compute state */
+    UINT32 ActiveWgps;          /* msg 0x1E (0 = GFXOFF/deep sleep) */
+    UINT32 EnabledSmuFeatures;  /* msg 0x3D bitmask */
+    /* Raw SMN sensor probes (0x03B1xxxx, valid != 0xFFFFFFFF) */
+    UINT32 SmnEdgeTemp;         /* 0x03B10000 */
+    UINT32 SmnJunctionTemp;     /* 0x03B10020 */
+    UINT32 SmnMemTemp;          /* 0x03B10028 */
+    UINT32 SmnFanRpm;           /* 0x03B10064 */
+    UINT32 SmnFanPwm;           /* 0x03B10068 */
+    /* Per-message response status: 1 = OK, 0xFF = SMU timeout */
+    UINT32 MsgStatus;
+    /* Result: 1 = SMU alive + telemetry collected, 0 = SMU not responding */
+    UINT32 Result;
+} AMDBC250_IOCTL_SMU_TELEMETRY, *PAMDBC250_IOCTL_SMU_TELEMETRY;
+
+/* --- CPU Core Unlock (SMU Q3 msg 0x98 -> whitelisted SMN 0x0115A870) --- */
+typedef struct _AMDBC250_IOCTL_CORE_UNLOCK {
+    UINT32 CoreMaskBefore;      /* SMN[0x0115A870] before (0x77 = 6 cores) */
+    UINT32 CoreMaskAfter;       /* after the write (0xFF = 8 cores) */
+    /* Result: 1 = unlocked now, 2 = already 0xFF, 0 = failed/refused */
+    UINT32 Result;
+    /* Status: 1 = SMU mailbox OK, 0xFF = SMU fail/timeout */
+    UINT32 SmuStatus;
+} AMDBC250_IOCTL_CORE_UNLOCK, *PAMDBC250_IOCTL_CORE_UNLOCK;
 
 /* --- Allocate Video Memory --- */
 typedef struct _AMDBC250_IOCTL_ALLOC_VIDMEM {
