@@ -318,7 +318,7 @@ reg add "HKLM\SYSTEM\CurrentControlSet\Services\atikmdag" /v DisplayWritesEnable
 ├── docs/                           # Technical documentation
 ├── build.bat                       # Build + sign driver
 ├── prebuild-check.ps1               # Pre-build validation
-├── reinstall-both-drivers.bat       # Reinstall GPU + PSP drivers
+├── reinstall-both-drivers.bat       # Reinstall GPU driver (PSP no longer reinstalled)
 └── .gitignore
 ```
 

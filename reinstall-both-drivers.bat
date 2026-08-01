@@ -3,11 +3,12 @@ setlocal enabledelayedexpansion
 
 :: ============================================================================
 :: reinstall-both-drivers.bat
-:: Reinstall both GPU and PSP drivers for AMD BC-250.
+:: Reinstall the AMD BC-250 GPU driver only (the PSP driver is no longer
+:: installed / reinstalled - it is not part of this workflow anymore).
 :: Run this file as Administrator (Phase 1). It will:
-::   1. Uninstall old GPU + PSP drivers
+::   1. Uninstall old GPU driver
 ::   2. Reboot
-::   3. Auto-run Phase 2 after reboot: install new drivers + reboot again
+::   3. Auto-run Phase 2 after reboot: install new driver + reboot again
 ::
 :: IMPORTANT: Save all work before running. The script reboots twice.
 :: ============================================================================
@@ -18,15 +19,12 @@ title BC-250 Driver Reinstall
 set "PHASE_FILE=%TEMP%\bc250_reinstall_phase2.flag"
 set "LOG_FILE=%TEMP%\bc250_reinstall.log"
 set "GPU_INF=C:\AMD-BC-250\AMD-BC-250-Windows-Driver-main\output\amdbc250_dream.inf"
-set "PSP_INF=C:\AMD-BC-250\AMD-BC-250-PSP-Windows-Driver\output\PspDriver.inf"
 set "GPU_OEM=oem7.inf"
-set "PSP_OEM=oem14.inf"
 
 echo ============================================ >> "%LOG_FILE%" 2>&1
 echo %date% %time% Starting reinstall script >> "%LOG_FILE%" 2>&1
 echo Phase file: %PHASE_FILE% >> "%LOG_FILE%" 2>&1
 echo GPU INF: %GPU_INF% >> "%LOG_FILE%" 2>&1
-echo PSP INF: %PSP_INF% >> "%LOG_FILE%" 2>&1
 
 :: Check admin rights
 net session >nul 2>&1
@@ -54,11 +52,10 @@ echo  PHASE 1: Uninstalling old drivers
 echo ============================================
 echo.
 
-echo Stopping GPU and PSP driver services...
+echo Stopping GPU driver service...
 sc stop atikmdag >nul 2>&1
-sc stop PspDriver >nul 2>&1
 
-:: Try to delete the driver packages. The exact OEM names may differ.
+:: Try to delete the driver package. The exact OEM name may differ.
 echo Removing GPU driver package...
 pnputil /delete-driver %GPU_OEM% /uninstall /force >> "%LOG_FILE%" 2>&1
 if %errorlevel% equ 0 (
@@ -67,15 +64,6 @@ if %errorlevel% equ 0 (
     echo   GPU driver remove returned %errorlevel% (may not be installed)
 )
 echo GPU delete errorlevel=%errorlevel% >> "%LOG_FILE%" 2>&1
-
-echo Removing PSP driver package...
-pnputil /delete-driver %PSP_OEM% /uninstall /force >> "%LOG_FILE%" 2>&1
-if %errorlevel% equ 0 (
-    echo   PSP driver removed OK
-) else (
-    echo   PSP driver remove returned %errorlevel% (may not be installed)
-)
-echo PSP delete errorlevel=%errorlevel% >> "%LOG_FILE%" 2>&1
 
 echo.
 echo ============================================
@@ -132,16 +120,6 @@ if %errorlevel% neq 0 (
     goto Phase2Cleanup
 )
 echo GPU install OK errorlevel=%errorlevel% >> "%LOG_FILE%" 2>&1
-
-echo Installing PSP driver from %PSP_INF%...
-echo pnputil /add-driver "%PSP_INF%" /install /force >> "%LOG_FILE%" 2>&1
-pnputil /add-driver "%PSP_INF%" /install /force >> "%LOG_FILE%" 2>&1
-if %errorlevel% neq 0 (
-    echo ERROR: PSP driver install failed. See %LOG_FILE%
-    echo PSP install FAILED errorlevel=%errorlevel% >> "%LOG_FILE%" 2>&1
-    goto Phase2Cleanup
-)
-echo PSP install OK errorlevel=%errorlevel% >> "%LOG_FILE%" 2>&1
 
 echo.
 echo ============================================
