@@ -2,7 +2,7 @@
 setlocal enabledelayedexpansion
 
 :: ============================================================================
-:: reinstall-both-drivers.bat
+:: reinstall-gpu-driver.bat
 :: Reinstall the AMD BC-250 GPU driver only (the PSP driver is no longer
 :: installed / reinstalled - it is not part of this workflow anymore).
 :: Run this file as Administrator (Phase 1). It will:
