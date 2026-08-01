@@ -207,7 +207,11 @@ typedef struct _DREAM_V3_DEVICE_EXTENSION *PDREAM_V3_DEVICE_EXTENSION;
  *       NBIO firewall BLOCKS writes to 0xC000-0xCFFF from ALL paths.
  *       On BC-250, the GC_BASE-shifted alias for CP_ME_CNTL is at 0x4A74
  *       (mmCP_ME_CNTL = 0x0E05, byte offset = 0x3814, GC_BASE + 0x3814 = 0x4A74).
- *       Writes to 0xC060 are silently ignored. */
+ *       Writes to 0xC060 are silently ignored.
+ * NOTE (2026-07-31): Linux gc_10_1_0_offset.h says mmCP_ME_CNTL = 0x0f56
+ *       (GC_BASE + 0x3D58 = 0x4FB8, BASE_IDX=0). 0x4A74 was KEPT because it is
+ *       empirically proven live on BC-250 (ME unhalt test: 0xFFFBD9FB->0x00000000,
+ *       halt bit 28 confirmed). mmCP_MEC_CNTL = 0x0e2d -> 0x4B14 matches both. */
 #define AMDBC250_REG_CP_ME_CNTL         (AMDBC250_GC_BASE + 0x00003814)  /* 0x4A74, GC_BASE-shifted */
 #define AMDBC250_REG_CP_ME_STATUS       0x0000C064  /* CP ME status (NBIO)             */
 #define AMDBC250_REG_CP_PFP_UCODE_ADDR  0x0000C0A0  /* PFP firmware addr (NBIO)        */
@@ -403,19 +407,29 @@ typedef struct _DREAM_V3_DEVICE_EXTENSION *PDREAM_V3_DEVICE_EXTENSION;
  *   - 0xE968 (GC_BASE + 0xA000 + 0x0DC2*4, SEG1 alias)
  * All read 0xFFFFFFFF. BC-250 does NOT have GRBM_GFX_CNTL. Use GRBM_GFX_INDEX (0x34D0). */
 
-/* GRBM_GFX_INDEX bit fields (Linux soc15 layout from soc15.h):
- *   bit 31:   SE_BROADCAST
- *   bit 30:   QUEUE_BROADCAST
- *   bit 29:   PIPE_BROADCAST
- *   bits 28-24: SE_INDEX + reserved
- *   bit 26:   INSTANCE_BROADCAST
- *   bits 25-24: INSTANCE_INDEX
- *   bits 23-20: reserved
- *   bits 19-16: MEID (ME index, 4 bits)
- *   bits 15-12: SAID (Shader Array ID)
- *   bits 11-8:  PIPEID (pipe index, 4 bits)
- *   bits 7-4:   reserved
- *   bits 3-0:   QUEUEID (queue index, 4 bits)
+/* GRBM_GFX_INDEX bit fields — TWO layouts exist, which one BC-250 uses is
+ * still EMPIRICALLY UNRESOLVED (2026-08-01). Both read back whatever is
+ * written (the register is a writable index echo):
+ *
+ * A) Linux gfx9/gfx10 (gfx_v9_0_select_se_sh(), soc15.h) — CORRECT per kernel:
+ *      bits 7:0  = INSTANCE_INDEX
+ *      bits 15:8 = SH_INDEX
+ *      bits 23:16 = SE_INDEX
+ *      bit 24 = INSTANCE_BROADCAST_WRITES, bit 26 = SH_BROADCAST_WRITES,
+ *      bit 28 = SE_BROADCAST_WRITES
+ *      broadcast (all SE/SH) value = 0x15000000
+ *
+ * B) Older soc15 encoding (documented below, used by hw.h macros):
+ *      MEID bits 19-16, PIPEID 11-8, QUEUEID 3-0, SEID/INSTANCE 25-24
+ *      broadcast value = 0xE0000000 (Linux DEFAULT_GRBM_GFX_INDEX)
+ *
+ * Empirical facts (2026-08-01 smn-gc-alias-scan v2):
+ *  - 0x00010000 (KIQ_VAL below, "ME=1") makes KIQ registers respond — matches
+ *    B (MEID=1). In layout A that value is SE_INDEX=1, which would be wrong
+ *    for KIQ — so BC-250 likely uses layout B for ME select.
+ *  - SPI_PG reads 0 on ALL per-bank selects (A layout SH/SE bits) AND on
+ *    broadcast — the per-bank question is moot because the register is
+ *    SOS-locked regardless. Do NOT change these macros based on layout A.
  */
 #define AMDBC250_GRBM_GFX_INDEX_MEID_SHIFT        16
 #define AMDBC250_GRBM_GFX_INDEX_PIPEID_SHIFT       8
@@ -495,7 +509,7 @@ typedef struct _DREAM_V3_DEVICE_EXTENSION *PDREAM_V3_DEVICE_EXTENSION;
 #define GRBM_STATUS__RLC_BUSY               (1 << 27)
 
 /* --- CC (Compute Cores) Registers --- */
-#define AMDBC250_REG_CC_GC_SHADER_ARRAY_CONFIG  (AMDBC250_GC_BASE + 0x000089BC)  /* 0x9C1C (corrected: mmCC_GC_SHADER_ARRAY_CONFIG=0x226F) */
+#define AMDBC250_REG_CC_GC_SHADER_ARRAY_CONFIG  (AMDBC250_GC_BASE + 0x000089BC)  /* 0x9C1C (empirically verified; Linux gc_10_1_0_offset.h: mm=0x100f -> 0x529C, but BC-250 maps to 0x9C1C) */
 #define AMDBC250_REG_CC_GC_SHADER_RATE_CONFIG   (AMDBC250_GC_BASE + 0x00002010)  /* 0x3270 */
 
 /* --- SPI (Shader Processor Input) Registers --- */
@@ -548,6 +562,11 @@ typedef struct _DREAM_V3_DEVICE_EXTENSION *PDREAM_V3_DEVICE_EXTENSION;
 /* Formula: BAR5_offset = GC_BASE(0x1260) + Linux_DWORD_offset * 4 */
 /* CRITICAL: These are GFX Hub registers, NOT MMHUB registers! */
 /* The MMHUB VM block at 0x1B400-0x1B600 is DEAD on BC-250. */
+/* NOTE 2026-07-31: Linux gc_10_1_0_offset.h gives L2_CNTL=0x69E0,
+ * CONTEXT0_CNTL=0x6AE0, INVALIDATE_ENG0_REQ=0x6B6C/ACK=0x6BB4.
+ * BUT the 0x0B360/0x0B460 offsets below are EMPIRICALLY VERIFIED ALIVE
+ * and writable on BC-250 (probe = 0x013C67B8 / 0x010CA88D, BREAKTHROUGH.md).
+ * Keep the empirically-working offsets; Linux mismatch is documented only. */
 #define AMDBC250_REG_GCVM_L2_CNTL                       0x00000B360
 #define AMDBC250_REG_GCVM_L2_CNTL2                      0x00000B364
 #define AMDBC250_REG_GCVM_L2_CNTL3                      0x00000B368
@@ -597,35 +616,62 @@ typedef struct _DREAM_V3_DEVICE_EXTENSION *PDREAM_V3_DEVICE_EXTENSION;
 #define AMDBC250_REG_HDP_NONSURFACE_SIZE            0x000012C4
 #define AMDBC250_REG_HDP_NONSURFACE_BASE            0x000012C8
 
-/* --- Display Controller (DCN 2.1 for GFX10 / Navi) --- */
-#define AMDBC250_REG_HUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS  0x00005080
-#define AMDBC250_REG_HUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS_HIGH 0x00005084
-#define AMDBC250_REG_HUBPREQ0_DCSURF_FLIP_CONTROL     0x00005088
-#define AMDBC250_REG_HUBPREQ0_DCSURF_SURFACE_PITCH     0x0000508C
-#define AMDBC250_REG_HUBPREQ0_DCSURF_SURFACE_DIMENSIONS  0x00005090
-#define AMDBC250_REG_HUBP0_DCSURF_SURFACE_CONFIG        0x00005094
-#define AMDBC250_REG_HUBPREQ0_DCSURF_TILING_CONFIG    0x00005098
-#define AMDBC250_REG_HUBPREQ0_DCSURF_PRI_VIEWPORT_START  0x0000509C
-#define AMDBC250_REG_HUBPREQ0_DCSURF_PRI_VIEWPORT_DIMENSION 0x000050A0
+/* --- Display Controller (DCN 2.0.1 for BC-250 / GFX10.1) ---
+ *
+ * CORRECTED offsets (verified 2026-08-01 via dcn-targeted-probe):
+ * DCN base (ip_discovery DMU/0 base 0x34C0 in DWORD units, x4) = 0xD300.
+ * Each DCN register: BAR5 = AMDBC250_DCN_BASE + mm * 4, where mm is the
+ * register index from dcn_2_0_1_offset.h (same layout as dcn_2_0_0).
+ * Verified live: OTG0_OTG_CONTROL 0x14004 = 0x80011311 (ENABLED), timing
+ * 2560x1440@60 (H_TOTAL=2719, V_TOTAL=1480), frame counter 0x14030 ticks.
+ * HUBP surface at 0xEB28 reads VRAM 0x0000000450000000.
+ * The old 0x6000/0x5080/0x7000 block was WRONG (static, no frame counts).
+ */
+#define AMDBC250_DCN_BASE                      0x0000D300
 
-/* --- OTG (Output Timing Generator) ??? DCN 2.1 --- */
-#define AMDBC250_REG_OTG0_OTG_CONTROL                 0x00006000  /* OTG ctrl */
-#define AMDBC250_REG_OTG0_OTG_INTERLACE_CONTROL       0x00006004
-#define AMDBC250_REG_OTG0_OTG_CRTC_V_TOTAL            0x00006010  /* V total  */
-#define AMDBC250_REG_OTG0_OTG_CRTC_H_TOTAL            0x00006014  /* H total  */
-#define AMDBC250_REG_OTG0_OTG_CRTC_V_BLANK_START_END  0x00006018  /* V blank  */
-#define AMDBC250_REG_OTG0_OTG_CRTC_H_BLANK_START_END  0x0000601C  /* H blank  */
-#define AMDBC250_REG_OTG0_OTG_CRTC_V_SYNC_START_END   0x00006020  /* V sync   */
-#define AMDBC250_REG_OTG0_OTG_CRTC_H_SYNC_START_END   0x00006024  /* H sync   */
-#define AMDBC250_REG_OTG0_OTG_CRTC_STATUS             0x00006028  /* Status   */
+/* HUBP (Display Plane / hub) - mm from dcn_2_0_1_offset.h */
+#define AMDBC250_REG_HUBP0_DCSURF_SURFACE_CONFIG         (AMDBC250_DCN_BASE + 0x05E5 * 4)  /* 0xEA94 */
+#define AMDBC250_REG_HUBP0_DCSURF_ADDR_CONFIG            (AMDBC250_DCN_BASE + 0x05E6 * 4)  /* 0xEA98 */
+#define AMDBC250_REG_HUBP0_DCSURF_TILING_CONFIG          (AMDBC250_DCN_BASE + 0x05E7 * 4)  /* 0xEA9C */
+#define AMDBC250_REG_HUBP0_DCSURF_PRI_VIEWPORT_START     (AMDBC250_DCN_BASE + 0x05E9 * 4)  /* 0xEAA4 */
+#define AMDBC250_REG_HUBP0_DCSURF_PRI_VIEWPORT_DIMENSION (AMDBC250_DCN_BASE + 0x05EA * 4)  /* 0xEAA8 */
+#define AMDBC250_REG_HUBP0_DCHUBP_CNTL                   (AMDBC250_DCN_BASE + 0x05F3 * 4)  /* 0xEACC */
 
-/* --- DMCUB (Display Microcontroller Unit) ??? GFX10 uses DMCUB --- */
-#define AMDBC250_REG_DMCUB_SCRATCH0               0x00007000
-#define AMDBC250_REG_DMCUB_SCRATCH1               0x00007004
-#define AMDBC250_REG_DMCUB_INBOX0_RPTR            0x00007010
-#define AMDBC250_REG_DMCUB_INBOX0_WPTR            0x00007014
-#define AMDBC250_REG_DMCUB_INBOX0_BASE_ADDR       0x00007018
-#define AMDBC250_REG_DMCUB_INBOX0_SIZE            0x0000701C
+/* HUBPREQ (hub request / surface addressing) - mm from dcn_2_0_1_offset.h */
+#define AMDBC250_REG_HUBPREQ0_DCSURF_SURFACE_PITCH         (AMDBC250_DCN_BASE + 0x0607 * 4)  /* 0xEB1C */
+#define AMDBC250_REG_HUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS      (AMDBC250_DCN_BASE + 0x060A * 4)  /* 0xEB28, verified VRAM 0x450000000 */
+#define AMDBC250_REG_HUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS_HIGH (AMDBC250_DCN_BASE + 0x060B * 4)  /* 0xEB2C */
+#define AMDBC250_REG_HUBPREQ0_DCSURF_SURFACE_CONTROL       (AMDBC250_DCN_BASE + 0x061A * 4)  /* 0xEB68 */
+#define AMDBC250_REG_HUBPREQ0_DCSURF_FLIP_CONTROL          (AMDBC250_DCN_BASE + 0x061B * 4)  /* 0xEB6C */
+#define AMDBC250_REG_HUBPREQ0_DCSURF_SURFACE_INUSE         (AMDBC250_DCN_BASE + 0x0621 * 4)  /* 0xEB84 */
+#define AMDBC250_REG_HUBPREQ0_DCSURF_SURFACE_INUSE_HIGH    (AMDBC250_DCN_BASE + 0x0622 * 4)  /* 0xEB88 */
+
+/* --- OTG (Output Timing Generator) ---
+ * mm from dcn_2_0_1_offset.h. OTG instance stride = 0x80 dwords (0x200 bytes);
+ * OTGx register = OTG0_reg + x * 0x200. */
+#define AMDBC250_REG_OTG0_OTG_H_TOTAL                (AMDBC250_DCN_BASE + 0x1B2A * 4)  /* 0x13FA8 */
+#define AMDBC250_REG_OTG0_OTG_H_BLANK_START_END      (AMDBC250_DCN_BASE + 0x1B2B * 4)  /* 0x13FAC */
+#define AMDBC250_REG_OTG0_OTG_H_SYNC_A               (AMDBC250_DCN_BASE + 0x1B2C * 4)  /* 0x13FB0 */
+#define AMDBC250_REG_OTG0_OTG_V_TOTAL                (AMDBC250_DCN_BASE + 0x1B2F * 4)  /* 0x13FBC */
+#define AMDBC250_REG_OTG0_OTG_V_BLANK_START_END      (AMDBC250_DCN_BASE + 0x1B36 * 4)  /* 0x13FD8 */
+#define AMDBC250_REG_OTG0_OTG_V_SYNC_A               (AMDBC250_DCN_BASE + 0x1B37 * 4)  /* 0x13FDC */
+#define AMDBC250_REG_OTG0_OTG_CONTROL                (AMDBC250_DCN_BASE + 0x1B41 * 4)  /* 0x14004, verified 0x80011311 ENABLED */
+#define AMDBC250_REG_OTG0_OTG_STATUS                 (AMDBC250_DCN_BASE + 0x1B49 * 4)  /* 0x14024 */
+#define AMDBC250_REG_OTG0_OTG_STATUS_POSITION        (AMDBC250_DCN_BASE + 0x1B4A * 4)  /* 0x14028 */
+#define AMDBC250_REG_OTG0_OTG_STATUS_FRAME_COUNT     (AMDBC250_DCN_BASE + 0x1B4C * 4)  /* 0x14030, verified LIVE */
+#define AMDBC250_REG_OTG0_OTG_MASTER_UPDATE_LOCK     (AMDBC250_DCN_BASE + 0x1B8B * 4)  /* 0x1412C */
+
+/* --- DMCUB (Display Microcontroller Unit) ---
+ * mm from dcn_2_0_0_offset.h (identical layout in 2.0.1). */
+#define AMDBC250_REG_DMCUB_REGION0_OFFSET            (AMDBC250_DCN_BASE + 0x3238 * 4)  /* 0x19BE0 */
+#define AMDBC250_REG_DMCUB_REGION0_OFFSET_HIGH       (AMDBC250_DCN_BASE + 0x3239 * 4)  /* 0x19BE4 */
+#define AMDBC250_REG_DMCUB_REGION1_OFFSET            (AMDBC250_DCN_BASE + 0x323A * 4)  /* 0x19BE8 */
+#define AMDBC250_REG_DMCUB_REGION1_OFFSET_HIGH       (AMDBC250_DCN_BASE + 0x323B * 4)  /* 0x19BEC */
+#define AMDBC250_REG_DMCUB_INBOX0_SIZE               (AMDBC250_DCN_BASE + 0x327B * 4)  /* 0x19CEC */
+#define AMDBC250_REG_DMCUB_INBOX0_WPTR               (AMDBC250_DCN_BASE + 0x327C * 4)  /* 0x19CF0 */
+#define AMDBC250_REG_DMCUB_INBOX0_RPTR               (AMDBC250_DCN_BASE + 0x327D * 4)  /* 0x19CF4 */
+#define AMDBC250_REG_DMCUB_SCRATCH0                  (AMDBC250_DCN_BASE + 0x328D * 4)  /* 0x19D34 */
+#define AMDBC250_REG_DMCUB_SCRATCH1                  (AMDBC250_DCN_BASE + 0x328E * 4)  /* 0x19D38 */
 
 /* --- SMU (System Management Unit) ??? GFX10 power management ---
  *
@@ -654,8 +700,11 @@ typedef struct _DREAM_V3_DEVICE_EXTENSION *PDREAM_V3_DEVICE_EXTENSION;
 #define AMDBC250_REG_THM_THERMAL_INT_ENA          0x00008050  /* THM interrupt enable (separate from CTRL, Linux offset 0x14*4) */
 
 /* --- GB (Graphics Backend) Address Config ??? GFX10 --- */
-#define AMDBC250_REG_GB_ADDR_CONFIG               0x00009800  /* Addr config   */
-#define AMDBC250_REG_GB_ADDR_CONFIG_READ          0x00009804  /* Addr config r */
+/* CORRECTED 2026-07-31: Linux mmGB_ADDR_CONFIG = 0x13DE (BASE_IDX=0)
+ * -> BAR5 = GC_BASE(0x1260) + 0x13DE*4 = 0x61D8.
+ * (Old value 0x9800 was wrong / unverified.) */
+#define AMDBC250_REG_GB_ADDR_CONFIG               0x000061D8  /* Addr config   */
+#define AMDBC250_REG_GB_ADDR_CONFIG_READ          0x000061DC  /* Addr config r */
 
 /*===========================================================================
   Register Bit Fields ??? GFX10 (RDNA2 / Cyan Skillfish)

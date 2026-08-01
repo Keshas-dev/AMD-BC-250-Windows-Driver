@@ -1017,17 +1017,21 @@ typedef struct {
     ULONG64 TotalAllocatedBytes;
 } GPU_ALLOCATION_MANAGER, *PGPU_ALLOCATION_MANAGER;
 
-/* ===== DCN 2.1 Display Engine Registers ===== */
+/* ===== DCN 2.0.1 Display Engine Registers =====
+ * CORRECTED (2026-08-01): real DCN base = 0xD300 (ip_discovery DMU/0
+ * base 0x34C0 in DWORD units, x4). Register = 0xD300 + mm*4 from
+ * dcn_2_0_1_offset.h. These HUBPREQ macros are the stub DDI display
+ * path (not used on Win11 26100 WDM fallback). */
 
 /* HUBP (HUB Pipe) base addresses */
-#define HUBPREQ0_BASE                   0x1C00
-#define HUBPREQ_SURFACE_ADDRESS         (HUBPREQ0_BASE + 0x04)      // [31:0]
-#define HUBPREQ_SURFACE_ADDRESS_HIGH    (HUBPREQ0_BASE + 0x08)      // [39:32]
-#define HUBPREQ_SURFACE_PITCH           (HUBPREQ0_BASE + 0x0C)
-#define HUBPREQ_SURFACE_HEIGHT          (HUBPREQ0_BASE + 0x10)
-#define HUBPREQ_SURFACE_FORMAT          (HUBPREQ0_BASE + 0x14)
-#define HUBPREQ_ENABLE                  (HUBPREQ0_BASE + 0x18)
-#define HUBPREQ_FLIP_CONTROL            (HUBPREQ0_BASE + 0x1C)
+#define HUBPREQ0_BASE                   0xEB28  /* HUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS (0xD300 + 0x060A*4) */
+#define HUBPREQ_SURFACE_ADDRESS         (HUBPREQ0_BASE + 0x00)      // [31:0]
+#define HUBPREQ_SURFACE_ADDRESS_HIGH    (HUBPREQ0_BASE + 0x04)      // [39:32]
+#define HUBPREQ_SURFACE_PITCH           (0xD300 + 0x0607 * 4)       // 0xEB1C
+#define HUBPREQ_SURFACE_HEIGHT          (0xD300 + 0x05EA * 4)       // 0xEAA8 (HUBP viewport dim)
+#define HUBPREQ_SURFACE_FORMAT          (0xD300 + 0x061A * 4)       // 0xEB68 (surface control)
+#define HUBPREQ_ENABLE                  (0xD300 + 0x05F3 * 4)       // 0xEACC (HUBP0_DCHUBP_CNTL)
+#define HUBPREQ_FLIP_CONTROL            (0xD300 + 0x061B * 4)       // 0xEB6C
 
 /* Pixel format constants */
 #define HUBPREQ_FORMAT_ARGB8888         0x00000004

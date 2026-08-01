@@ -738,5 +738,176 @@ Last *successful* cap = step before the crash.
 
 **On Windows**: Our PSP driver tries ring protocol after SOS is alive (C2PMSG_81=0xF0000010) but without TOS initialized, C2PMSG_64 bit 31 is never set → ring_create always fails. This confirms the earlier finding that our SOS firmware is minimal (no TOS ring protocol support).
 
+## BREAKTHROUGH 2026-07-31: CPU core unlock via SMU + "fused-off" conclusion REVERSED
+
+### CPU Core Unlock WORKS (proved on our hardware)
+- `test-tools/smn-core-unlock-test.c` (compiled to `output\smn-core-unlock-test.exe`) — port of
+  `rw-r-r-0644/bc250-core-unlock` (Linux) to our Windows driver.
+- **Result**: SMN[0x0115A870] core presence mask changed `0x77` (6 cores) → `0xFF` (8 cores / 16 threads)
+  via SMU Queue 3 msg `0x98`. Takes effect on next reboot (AGESA enumerates 8 cores, PSP releases all).
+- Volatile: cold power cycle reverts it, must re-run after every cold boot.
+
+### The SMU ungated write primitive (KEY MECHANISM)
+- **SMU Queue 3 msg `0x98`** = ungated SMU-privileged SMN write: writes the **fixed value `0x00FF`** to
+  ANY SMN address passed as its argument. Only validation is addr != 0.
+- **Host PCI SMN window writes (0xB8/0xBC, or BAR5+0x38/0x3C) do NOT stick** to locked SMN registers,
+  but **SMU writes DO stick** — SMU is a more privileged SMN requester.
+- Q3 mailbox: cmd=0x03B10A20 rsp=0x03B10A80 arg=0x03B10A88 (DONE={0x01,0xFF,0xFE,0xFD,0xFC}).
+- WARNING: 0x98 has no bounds check — wrong address may hang or damage the board. Only write
+  known-good addresses (check mask reads 0x77 first, like the core unlock does).
+
+### CRITICAL: "compute permanently fused off" conclusion is likely WRONG
+- BC-250 is a **full PS5 Oberon die** (8× Zen2 + RDNA2 + 40 CUs), NOT a mining-only ASIC with
+  fused-off shader array. Disabled features are MASKED (SOS/SMU-locked), not fused.
+- Linux community (duggasco/bc250-40cu-unlock, elektricm docs) writes the SAME registers we found
+  "read-only" — and they work on Linux:
+  - `CC_GC_SHADER_ARRAY_CONFIG` (BAR5 0x9C1C): stock `0xfff80000` (24 CU) → unlocked `0xffe00000` (40 CU)
+  - `SPI_PG_ENABLE_STATIC_WGP_MASK` (BAR5 0x5C3C): stock `0x07` (WGP 0-2) → unlocked `0x1F` (WGP 0-4)
+  - `RLC_PG_ALWAYS_ON_WGP_MASK` (BAR5 0x3D64): set to `0x1F` to keep all WGPs powered
+  - ALL THREE writes are required together; CC alone only changes reporting, SPI alone only 24 CU compute.
+- **Linux stock SPI_PG = 0x07, but our driver read 0x00000000** — the SPI_PG register is a
+  **per-bank GRBM-indexed register** (SE0/SH0, SE0/SH1, SE1/SH0, SE1/SH1). We likely read it with
+  the wrong GRBM_GFX_INDEX selection, so we saw 0 instead of 0x07.
+- Linux `RequestActiveWgp` SMU msg does NOT exist on cyan_skillfish; SPI register is directly writable.
+- On Linux, the unlock works via patched amdgpu module (`bc250_cc_write_mode=3`) at
+  `gfx_v10_0_get_cu_info()` time (kernel context, per-bank GRBM select), and via UMR post-boot.
+
+### Our next experiments (all in progress)
+1. `test-tools/smn-gc-alias-scan.c` (compiled `output\smn-gc-alias-scan.exe`, NOT yet run):
+   - Step 1: per-bank GRBM readback of SPI_PG/RLC_PG/CC (should see 0x07 / 0x1F, not 0!)
+   - Step 2: scan SMN 0x00000000-0x04000000 for GPU_ID(0x9FFF9700)/CC values → find GC SMN aliases
+   - Step 3: if alias found, try SMU msg 0x98 write (0x00FF) and verify BAR5 readback changes
+2. If SPI_PG/CC are per-bank GRBM-indexed, write 0x1F/0xffe00000 via correct GRBM select
+   + verify WRITE_CONFIRM, then check QueryActiveWgp (SMU 0x1E) and GRBM_STATUS.
+3. If no SMN alias exists for GC regs, the per-bank GRBM write is the only path — but our
+   earlier broadcast-write tests showed host writes don't stick. Need to distinguish
+   "SOS-locked" (maybe per-bank select fixes it) from genuinely fused.
+
+### Test results that CHANGED our interpretation (2026-07-25, pre-unlock)
+`run-all-kiq-tests.exe` (EXECUTE_RING_PM4 IOCTL 0x80000BE8):
+- CP_HQD_ACTIVE=1 (writable!), WPTR 0→0x10 (writable!), RPTR stays 0 (engine not consuming)
+- SMU features 0xDD602C7D→0xDD602C71 (WakeGfx cleared GFXOFF bit), freq→1500 MHz
+- COMPUTE_PGM_LO(0x8110)=0x6E512C00 writable; THREAD_MGMT_SE0(0x8138)=0xFFFFFFFF writable
+- MQD PGM_LO readback 0x65FEE36E ≠ expected 0x6E512400 → MQD load may not have fully populated
+- GRBM_STATUS 0→0, Scratch unchanged → no execution, consistent with WGPs not enabled
+- GPU_KIQ_TEST (0x80000BD0) fails at ring alloc (Result=0xDEAD0001) — GCVM/VRAM path broken
+
+### References
+- Core unlock repo: https://github.com/rw-r-r-0644/bc250-core-unlock (MIT)
+- 40CU unlock technical report: https://github.com/duggasco/bc250-40cu-unlock/blob/main/docs/technical-report.md
+- BC250 docs: https://elektricm.github.io/amd-bc250-docs/system/40cu-unlock/
+- CU live manager (UMR): https://github.com/WinnieLV/bc250-cu-live-manager
+
+## CONFIRMED: IP discovery table — all our register bases are CORRECT (2026-07-31)
+
+### How to dump (CachyOS, no root needed)
+```bash
+for f in /sys/bus/pci/devices/*/ip_discovery/die/0/*/*/base_addr; do
+  echo "== ${f%/base_addr}"; cat "$f"
+done
+```
+Path comes from Linux `amdgpu_discovery_reg_base_init()` (amdgpu_discovery.c:1366): it reads the
+discovery TMR binary from VRAM (`pos = vram_size - DISCOVERY_TMR_OFFSET`, TMR_SIZE=10KB,
+TMR_OFFSET=64KB, i.e. VRAM byte 0x0FFF0000 for 256MB) and fills `adev->reg_offset[HWIP][inst] =
+ip->base_address`. **cyan_skillfish2 (0x13FE) uses THIS path, NOT hardcoded
+`cyan_skillfish_reg_base_init`** (OpenBSD commit 402f067: `case CHIP_CYAN_SKILLFISH: if
+(apu_flags & CYAN_SKILLFISH2) amdgpu_discovery_reg_base_init()`).
+
+### Dump result (BDF 0000:01:00.0) — bases in DWORD units, multiply by 4 for BAR5 bytes
+| IP | base_addr (dwords) | Notes |
+|----|--------------------|-------|
+| **GC/0** | 0x1260, 0xA000, 0x02402C00 | **GC_BASE=0x1260 CONFIRMED**; 0xA000=SEG1 alias; 0x02402C00=high SOC base |
+| **SDMA0/1** | 0x1260, 0xA000, 0x02402C00 | same as GC — SDMA regs live at GC offsets! |
+| NBIO (NBIF/0) | 0x0, 0x14, 0xD20, 0x10400, 0x0241B000, 0x04040000 | base 0x0000 confirmed |
+| HDP/0 | 0xF20, 0x0240A400 | confirmed |
+| MMHUB/0 | 0x1A000, 0x02408800 | confirmed |
+| DF/0 | 0x7000, 0x0240B800 | confirmed |
+| OSSSYS/0 | 0x10A0, 0x0240A000 | confirmed |
+| MP0/MP1/0 | 0x16000, 0xDC0000, 0xE00000, 0xE40000, 0x0243FC00 | 0x16000 confirmed |
+| THM/0 | 0x16600, 0x02400C00 | confirmed |
+| SMUIO/0 | 0x16800, 0x16A00, 0x440000, 0x02401000 | confirmed |
+| CLKA/0-2 | 0x16C00/0x16E00/0x17000, +0x02401800/1C/20 | confirmed |
+| CLKB/0 | 0x17E00, 0x0240BC00 | confirmed |
+| FUSE/0 | 0x17400, 0x02401400 | confirmed |
+| UMC/0,1 | 0x14000, 0x54000, +0x02425800/5C | confirmed |
+| ATHUB/0 | 0xC00, 0x02408C00 | confirmed |
+| UVD/0 | 0x7800, 0x7E00, 0x02403000 | VCN=0x7800 |
+| ACP/0 | 0x48000, 0x02403800 | — |
+| DAZ/0 | 0x4C000, 0x02404800 | — |
+| DMU/0 | 0x12, 0xC0, 0x34C0, 0x9000, 0x02403C00 | DCE block (display) |
+| DBGU_NBIO | 0x1C0 | — |
+| DBGU_IO | 0x1E0 | — |
+| DFX | 0x580 | — |
+| DFX_DAP | 0x5A0, 0xB80000, 0x0240C400 | — |
+| IOHC | 0x10000, 0x02406000, 0x4EC0000 | — |
+| L2IMU | 0x7DC0, 0x900000, 0x02407000, 0x4FC0000, 0x55C0000 | — |
+| SYSTEMHUB | 0xEA0, 0x500000, 0x02420000 | — |
+| PCIE | 0x2411800, 0x4440000 | — |
+| PCS | 0x2414000, 0x4680000 | — |
+| USB | 0x242A800/0x242AC00, +0x5B00000/0x5B80000 | — |
+
+### Conclusions
+1. **Our entire register map (hw.h) is correct** — GC_BASE=0x1260, HDP=0xF20, MP0=0x16000, etc.
+2. **SDMA registers are at GC offsets** — explains why SDMA ring init at 0xE018 worked.
+3. The 0x3460 vs 0x34D0 GRBM_GFX_INDEX "discrepancy" was a WRONG mm* assumption, not a wrong base — 0x34D0 remains the live register.
+4. **The driver's problem is NOT the register map** — it's the init SEQUENCE (SMU/PSP/GFX init order) and/or host-write locking. Compare Linux gfx_v10_0.c/SMU/PSP init sequences with ours.
+5. Most IPs carry a second base in 0x0240xxxx (high SOC register window) — currently unused by us, low priority.
+
+## smn-gc-alias-scan v2 results — per-bank SPI_PG hypothesis REJECTED (2026-08-01)
+
+Ran `output\smn-gc-alias-scan.exe` (v2, no args) — ran clean, no hang. Log: `output\smn-gc-alias-scan.log`.
+
+### Step 1: per-bank GRBM readback (GRBM_GFX_INDEX 0x34D0)
+GPU_ID(0x0000)=0x9FFF9714 GRBM_STATUS=0x00000000 GRBM_GFX_INDEX live=0xBA062100
+
+| Bank | SPI_PG(0x5C3C) | RLC_PG(0x3D64) | CC_ARRAY(0x9C1C) |
+|------|----------------|----------------|------------------|
+| SE0/SH0 (0x00000000) | 0x00000000 | 0xFFFFFFFF | 0x00000000 |
+| SE0/SH1 (0x00000100) | 0x00000000 | 0xFFFFFFFF | 0x00000000 |
+| SE1/SH0 (0x00010000) | 0x00000000 | 0xFFFFFFFF | 0x00000000 |
+| SE1/SH1 (0x00010100) | 0x00000000 | 0xFFFFFFFF | 0x00000000 |
+| BCAST (0x15000000) | 0x00000000 | 0xFFFFFFFF | 0x00000000 |
+
+### Step 1b: per-bank write test (duggasco unlock values)
+- **SPI_PG 0x1F → reads 0x00000000 on ALL banks** — writes do NOT stick. Per-bank select does NOT unlock it.
+- RLC_PG 0x1F → reads 0xFFFFFFFF (read-only, unchanged).
+- **CC_ARRAY 0xFFE00000 → reads 0x1F000000** — only bits 24-28 persist, top 3 bits (29-31) masked. PARTIALLY writable.
+
+### Interpretation (IMPORTANT — changes our model)
+1. **The "wrong GRBM bank select" hypothesis is now REJECTED.** Even with correct per-bank GRBM_GFX_INDEX selects (SH=1<<8, SE=1<<16 as v2 uses, plus broadcast 0x15000000), SPI_PG reads 0 and writes don't stick. Earlier we read 0 with the wrong INSTANCE-index selects (v1 used 0x01/0x10/0x11); now with correct SH/SE selects it's STILL 0. Host BAR5 writes to SPI_PG are genuinely SOS-locked — the register reports 0 because WGPs are gated.
+2. **GRBM_GFX_INDEX bit layout discrepancy (tool vs hw.h):** v2 tool uses SH=1<<8, SE=1<<16 (matches gfx10 soc15 GRBM_GFX_INDEX); hw.h documents INSTANCE_INDEX at bits 25-24. Empirically broadcast 0xE0000000 (hw.h value) reads back live. NOT yet resolved which layout actually selects banks on BC-250 — v2's per-bank selects read back identically (GFX_IDX_after echoes the written value), so the writes landed but no bank returned a different SPI_PG.
+3. CC_ARRAY partial-writability (0x1F000000, bits 24-28) matches earlier "PARTIALLY WRITABLE 0xFFE00000→0x1F000000" finding — consistent across tests.
+4. GRBM_STATUS=0 and SCRATCH=0x4D585042 unchanged after writes — no shader execution.
+
+### Next steps (from AGENTS.md "next experiments", still pending)
+- `-scan` (restricted SMN ranges 0x011xxxxx / 0x03B1xxxx) to hunt GC SMN aliases — NOT yet run this session.
+- `-write <addr>` SMU msg 0x98 — DISABLED by default, requires explicit arg; only known-good addresses.
+- Distinguish "SOS-locked" from "genuinely fused" is NOT resolved by this run — but the data now leans SOS/host-write-lock, not bank-select error.
+
+## smn-gc-alias-scan v2 with -scan — NO GC SMN aliases found (2026-08-01, same day)
+
+Ran `output\smn-gc-alias-scan.exe -scan` — ran clean, no hang. Log overwritten: `output\smn-gc-alias-scan.log`.
+
+### Step 2 result: restricted SMN scan found NOTHING
+- Range 0x01100000-0x01200000 (step 0x100): **0 GPU_ID matches, 0 CC matches**
+- Range 0x03B10000-0x03B11000 (step 0x100): **0 GPU_ID matches, 0 CC matches**
+- No SMN aliases for GC registers in the safe/proven ranges. GC regs (GPU_ID=0x9FFF9714, CC 0xFFF80000/0xFFE00000, SPI 0x07) are NOT mirrored into SMN 0x011xxxxx or 0x03B1xxxx.
+- Step 1/1b repeated identically: SPI_PG=0 all banks, RLC_PG=0xFFFFFFFF, CC=0x1F000000.
+
+### CC_ARRAY persistence CONFIRMED
+- This run's Step 1 read CC_ARRAY(0x9C1C)=**0x1F000000 BEFORE any writes** — the previous session's 0xFFE00000 write (masked to 0x1F000000) PERSISTED across process exit and driver re-init. CC bits 24-28 are genuinely host-writable and sticky.
+
+### GRBM_GFX_INDEX layout RESOLVED (from Linux source)
+- Linux gfx9/gfx10 `gfx_v9_0_select_se_sh()` (and gfx10 equivalent) uses:
+  - INSTANCE_INDEX bits 7:0, SH_INDEX bits 15:8, SE_INDEX bits 23:16
+  - INSTANCE_BROADCAST_WRITES bit 24, SH_BROADCAST_WRITES bit 26, SE_BROADCAST_WRITES bit 28
+  - broadcast (all SE/SH) value = 0x15000000 = INST_BCAST_WR(24) | SH_BCAST_WR(26) | SE_BCAST_WR(28)
+- **v2 tool's bank selects are CORRECT** (matches Linux). hw.h's documented layout (INSTANCE_INDEX bits 25-24, SE_BROADCAST bit 31, value 0xE0000000) is WRONG / matches a different (older soc15) encoding.
+- Even so, SPI_PG reads 0 on ALL banks — so with correct selects it's still SOS-locked. The GRBM layout is NOT the unlock.
+
+### Updated conclusion
+- GC registers are NOT SMN-aliased in any proven-safe range, so SMU msg 0x98 cannot reach them via known addresses.
+- The 40CU unlock on this unit requires either (a) an unknown SMN alias for SPI_PG outside safe ranges, or (b) Linux-kernel-context writes (debugfs/UMR) which we cannot replicate in WDM — both currently unreachable.
+- Remaining viable actions: CC_ARRAY bits 24-28 toggle (COSMETIC only, does not enable WGPs); `-write` SMU 0x98 only for already-proven addresses (core unlock 0x0115A870).
 
 

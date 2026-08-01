@@ -36,6 +36,16 @@ if exist "E:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Auxiliar
     echo Found Visual Studio 2022 Professional on E: drive
     goto :SetupEnv
 )
+if exist "F:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat" (
+    set "VSWHERE=F:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
+    echo Found Visual Studio 2022 Community on F: drive
+    goto :SetupEnv
+)
+if exist "F:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Auxiliary\Build\vcvars64.bat" (
+    set "VSWHERE=F:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Auxiliary\Build\vcvars64.bat"
+    echo Found Visual Studio 2022 Professional on F: drive
+    goto :SetupEnv
+)
 echo ERROR: Visual Studio 2022 not found
 exit /b 1
 
@@ -55,6 +65,8 @@ if exist "D:\Program Files (x86)\Windows Kits\10\Include" (
     set "WDK_ROOT=E:\Program Files (x86)\Windows Kits\10"
 ) else if exist "C:\Program Files (x86)\Windows Kits\10\Include" (
     set "WDK_ROOT=C:\Program Files (x86)\Windows Kits\10"
+) else if exist "F:\Program Files (x86)\Windows Kits\10\Include" (
+    set "WDK_ROOT=F:\Program Files (x86)\Windows Kits\10"
 ) else (
     echo ERROR: Windows Kit not found
     exit /b 1

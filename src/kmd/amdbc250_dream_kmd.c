@@ -96,6 +96,44 @@ NTSTATUS APIENTRY DreamV3DdiStopCapture(PVOID, PVOID);
 NTSTATUS APIENTRY DreamV3DdiCreateOverlay(PVOID, PVOID, PVOID);
 
 /*===========================================================================
+  DreamV3DisplayWritesEnabled — guard for live DCN (HUBPREQ/OTG) writes.
+
+  BC-250's OTG0 scans out a real 2560x1440@60 framebuffer from the GOP/UEFI
+  BIOS. Writing HUBPREQ surface address / FLIP_CONTROL into that LIVE scanout
+  (addresses now correct at 0xEB28+/0x14004) black-screens and hangs the GPU
+  unless a full DCN display pipeline is initialized first.
+
+  Old hw.h pointed these at dead offsets (0x5080/0x6000) so the writes were
+  harmless no-ops. After the DCN base correction they became LIVE writes and
+  crashed the machine. Default = 0 (writes DISABLED). Enable ONLY after a real
+  DCN init: reg add ...\Services\atikmdag /v DisplayWritesEnabled /t REG_DWORD /d 1
+===========================================================================*/
+static BOOLEAN
+DreamV3DisplayWritesEnabled(VOID)
+{
+    UNICODE_STRING Path;
+    RtlInitUnicodeString(&Path,
+        L"\\Registry\\Machine\\SYSTEM\\CurrentControlSet\\Services\\atikmdag");
+    OBJECT_ATTRIBUTES Oa;
+    InitializeObjectAttributes(&Oa, &Path, OBJ_CASE_INSENSITIVE, NULL, NULL);
+    HANDLE hKey = NULL;
+    ULONG val = 0;
+    if (NT_SUCCESS(ZwOpenKey(&hKey, KEY_READ, &Oa))) {
+        UNICODE_STRING vn;
+        RtlInitUnicodeString(&vn, L"DisplayWritesEnabled");
+        UCHAR buf[sizeof(KEY_VALUE_PARTIAL_INFORMATION) + sizeof(ULONG)] = {0};
+        ULONG ret = 0;
+        if (NT_SUCCESS(ZwQueryValueKey(hKey, &vn, KeyValuePartialInformation,
+                                        buf, sizeof(buf), &ret))) {
+            PKEY_VALUE_PARTIAL_INFORMATION pi = (PKEY_VALUE_PARTIAL_INFORMATION)buf;
+            if (pi->DataLength == sizeof(ULONG)) val = *(PULONG)pi->Data;
+        }
+        ZwClose(hKey);
+    }
+    return (val != 0);
+}
+
+/*===========================================================================
   DreamV3DxgkInitialize � Calls real DxgkInitialize from dxgkrnl.sys
   Resolves at RUNTIME from dxgkrnl.sys export table (link-time import
   from dxgkrnl.lib causes Code 39 on Win11 26100).
@@ -579,6 +617,10 @@ DreamV3DdiAddDevice(
     KeInitializeEvent(&DevExt->DeviceRemoved, NotificationEvent, FALSE);
 
     DevExt->PhysicalDeviceObject = PhysicalDeviceObject;
+
+    /* GRBM_GFX_INDEX lives at 0x34D0 on BC-250 (empirically verified).
+     * Used by all per-SE/SH register selects. */
+    DevExt->GrbmGfxIndexOffset = AMDBC250_REG_GRBM_GFX_INDEX;
 
     /* Initialize hardware quirks from Linux driver knowledge */
     /* BC-250 is UMA: 16GB shared, VRAM split configurable in BIOS */
@@ -1583,6 +1625,27 @@ DreamV3WriteEopFence(
  * This is a FALLBACK path when hardware KIQ ring processing is unavailable
  * (KIQ_SIZE=0 blocks all CP ring processing on BC-250).
  */
+/* Bound-check a register write range against the mapped BAR5 size.
+ * Returns FALSE if any byte in [Offset, Offset + DwordCount*4) falls
+ * outside the mapped MMIO window (writing there would fault/BSOD).
+ */
+static BOOLEAN
+DreamV3SwRegRangeValid(
+    _In_ PDREAM_V3_DEVICE_EXTENSION DevExt,
+    _In_ ULONG Offset,
+    _In_ ULONG DwordCount
+    )
+{
+    ULONG64 end;
+
+    if (DevExt->MmioVirtualBase == NULL)
+        return FALSE;
+    if (DevExt->MmioSize < 4)
+        return FALSE;
+    end = (ULONG64)Offset + (ULONG64)DwordCount * 4;
+    return end <= DevExt->MmioSize;
+}
+
 static NTSTATUS
 DreamV3SwPm4Process(
     _In_ PDREAM_V3_DEVICE_EXTENSION DevExt,
@@ -1609,6 +1672,10 @@ DreamV3SwPm4Process(
             ULONG count = ((header >> 16) & 0x7FF) + 1;
             ULONG baseReg = (header & 0xFFFF) << 2;
             i++;
+            /* Guard: all registers must fit inside the mapped BAR5 window. */
+            if (!DreamV3SwRegRangeValid(DevExt, baseReg, count)) {
+                return STATUS_INVALID_PARAMETER;
+            }
             for (ULONG j = 0; j < count && i < CommandCount; j++, i++) {
                 DreamV3WriteRegister(DevExt, baseReg + j * 4, Commands[i]);
             }
@@ -1650,6 +1717,12 @@ DreamV3SwPm4Process(
                 ULONG dataDwCount = count - 3;
 
                 if (isReg || (addrLo < 0x200000)) {
+                    /* addrLo is a register/MMIO offset (or below the 2MB
+                     * "system memory" boundary). Verify the whole run fits
+                     * inside the mapped BAR5 before writing anything. */
+                    if (!DreamV3SwRegRangeValid(DevExt, addrLo, dataDwCount)) {
+                        return STATUS_INVALID_PARAMETER;
+                    }
                     for (ULONG d = 0; d < dataDwCount; d++) {
                         DreamV3WriteRegister(DevExt, addrLo + (wrOne ? 0 : d * 4), Commands[i + 3 + d]);
                     }
@@ -1677,6 +1750,9 @@ DreamV3SwPm4Process(
                     ULONG hwOff = Commands[i];
                     ULONG numRegs = count - 1;
                     ULONG baseReg = AMDBC250_GC_BASE + (hwOff << 2);
+                    if (!DreamV3SwRegRangeValid(DevExt, baseReg, numRegs)) {
+                        return STATUS_INVALID_PARAMETER;
+                    }
                     for (ULONG r = 0; r < numRegs; r++) {
                         DreamV3WriteRegister(DevExt, baseReg + r * 4, Commands[i + 1 + r]);
                     }
@@ -1692,6 +1768,9 @@ DreamV3SwPm4Process(
                     ULONG hwOff = Commands[i];
                     ULONG numRegs = count - 1;
                     ULONG baseReg = AMDBC250_GC_BASE + (hwOff << 2);
+                    if (!DreamV3SwRegRangeValid(DevExt, baseReg, numRegs)) {
+                        return STATUS_INVALID_PARAMETER;
+                    }
                     for (ULONG r = 0; r < numRegs; r++) {
                         DreamV3WriteRegister(DevExt, baseReg + r * 4, Commands[i + 1 + r]);
                     }
@@ -1708,6 +1787,9 @@ DreamV3SwPm4Process(
                     ULONG hwOff = Commands[i];
                     ULONG numRegs = count - 1;
                     ULONG baseReg = AMDBC250_GC_BASE + (hwOff << 2);
+                    if (!DreamV3SwRegRangeValid(DevExt, baseReg, numRegs)) {
+                        return STATUS_INVALID_PARAMETER;
+                    }
                     for (ULONG r = 0; r < numRegs; r++) {
                         DreamV3WriteRegister(DevExt, baseReg + r * 4, Commands[i + 1 + r]);
                     }
@@ -1967,25 +2049,33 @@ DreamV3DdiPresent(
     }
 
     if (pSrcAlloc != NULL && pSrcAlloc->PhysicalAddress.QuadPart != 0) {
-        /* Program HUBPREQ primary surface address */
-        DreamV3WriteRegister(DevExt,
-            AMDBC250_REG_HUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS,
-            (ULONG)(pSrcAlloc->PhysicalAddress.QuadPart & 0xFFFFFFFF));
-        DreamV3WriteRegister(DevExt,
-            AMDBC250_REG_HUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS_HIGH,
-            (ULONG)(pSrcAlloc->PhysicalAddress.QuadPart >> 32));
+        if (!DreamV3DisplayWritesEnabled()) {
+            /* DCN HUBPREQ writes are DISABLED by default — they target a LIVE
+             * 2560x1440 scanout (0xEB28+) and black-screen/hang the GPU unless
+             * a full DCN pipeline is initialized. See DreamV3DisplayWritesEnabled. */
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+                "AMDBC250-DREAM-V4.3: Present HUBPREQ writes SKIPPED (DisplayWritesEnabled=0)\n"));
+        } else {
+            /* Program HUBPREQ primary surface address */
+            DreamV3WriteRegister(DevExt,
+                AMDBC250_REG_HUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS,
+                (ULONG)(pSrcAlloc->PhysicalAddress.QuadPart & 0xFFFFFFFF));
+            DreamV3WriteRegister(DevExt,
+                AMDBC250_REG_HUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS_HIGH,
+                (ULONG)(pSrcAlloc->PhysicalAddress.QuadPart >> 32));
 
-        /* Set surface pitch (default 800*4 = 3200 for 800x600, or use current mode) */
-        DreamV3WriteRegister(DevExt,
-            AMDBC250_REG_HUBPREQ0_DCSURF_SURFACE_PITCH,
-            DevExt->CurrentMode.Width * (DevExt->CurrentMode.BitsPerPixel / 8));
+            /* Set surface pitch (default 800*4 = 3200 for 800x600, or use current mode) */
+            DreamV3WriteRegister(DevExt,
+                AMDBC250_REG_HUBPREQ0_DCSURF_SURFACE_PITCH,
+                DevExt->CurrentMode.Width * (DevExt->CurrentMode.BitsPerPixel / 8));
 
-        /* Trigger flip */
-        DreamV3WriteRegister(DevExt,
-            AMDBC250_REG_HUBPREQ0_DCSURF_FLIP_CONTROL, 0x1);
+            /* Trigger flip */
+            DreamV3WriteRegister(DevExt,
+                AMDBC250_REG_HUBPREQ0_DCSURF_FLIP_CONTROL, 0x1);
 
-        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-            "AMDBC250-DREAM-V4.3: Present PA=0x%llX\n", pSrcAlloc->PhysicalAddress.QuadPart));
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                "AMDBC250-DREAM-V4.3: Present PA=0x%llX\n", pSrcAlloc->PhysicalAddress.QuadPart));
+        }
     }
 
     return STATUS_SUCCESS;
@@ -2198,6 +2288,14 @@ DreamV3DdiSetVidPnSourceAddress(
     }
 
     /* Program HUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS (DCN 2.1) */
+    if (!DreamV3DisplayWritesEnabled()) {
+        /* Live-scanout HUBPREQ writes are DISABLED by default — see
+         * DreamV3DisplayWritesEnabled (writing 0xEB28+ hangs the GPU). */
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+            "AMDBC250-DREAM-V4.3: SetVidPnSourceAddress HUBPREQ write SKIPPED (DisplayWritesEnabled=0)\n"));
+        return STATUS_SUCCESS;
+    }
+
     SurfaceOffset = (ULONG)(SurfAddress.QuadPart & 0xFFFFFFFF);
     DreamV3WriteRegister(DevExt, AMDBC250_REG_HUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS, SurfaceOffset);
     
@@ -2229,10 +2327,11 @@ DreamV3DdiSetVidPnSourceVisibility(
                pSetVidPnSourceVisibility->Visible));
 
     /* Show/hide display output */
-    /* OTG0 registers (0x6000+) are in the freeze zone — skip */
+    /* OTG0 registers live at 0xD300 + mm*4 (e.g. 0x14004), NOT 0x6000.
+     * DDI display path is stubbed on Win11 26100 (WDM fallback). */
     if (DevExt->MmioVirtualBase != NULL) {
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_TRACE_LEVEL,
-                   "AMDBC250-DREAM-V4.3: SetVidPnSourceVisibility — OTG skip (freeze zone)\n"));
+                   "AMDBC250-DREAM-V4.3: SetVidPnSourceVisibility — OTG stub (DDI display disabled)\n"));
     }
 
     return STATUS_SUCCESS;
@@ -2298,7 +2397,7 @@ DreamV3DdiGetScanLine(
     }
 
     /* Read current scanline from OTG status */
-    /* OTG0 registers (0x6000+) are in the freeze zone — skip */
+    /* Real OTG0_OTG_STATUS_POSITION = 0xD300 + 0x1B4A*4 = 0x14028 (verified live OTG). */
     pGetScanLine->ScanLine = 0;
     
     return STATUS_SUCCESS;
@@ -3409,12 +3508,19 @@ DreamV3DeviceControl(
             ULONG64 physAddr = ((ULONG64)InData[1] << 32) | InData[0];
 
             if (physAddr != 0) {
-                DreamV3WriteRegister(DevExt,
-                    AMDBC250_REG_HUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS,
-                    (ULONG)(physAddr & 0xFFFFFFFF));
-                DreamV3WriteRegister(DevExt,
-                    AMDBC250_REG_HUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS_HIGH,
-                    (ULONG)(physAddr >> 32));
+                if (!DreamV3DisplayWritesEnabled()) {
+                    /* Live-scanout HUBPREQ writes are DISABLED by default — see
+                     * DreamV3DisplayWritesEnabled. Writing 0xEB28+ hangs the GPU. */
+                    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+                        "AMDBC250-DREAM-V4.3: FlipDisplay HUBPREQ write SKIPPED (DisplayWritesEnabled=0)\n"));
+                } else {
+                    DreamV3WriteRegister(DevExt,
+                        AMDBC250_REG_HUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS,
+                        (ULONG)(physAddr & 0xFFFFFFFF));
+                    DreamV3WriteRegister(DevExt,
+                        AMDBC250_REG_HUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS_HIGH,
+                        (ULONG)(physAddr >> 32));
+                }
             }
 
             KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_TRACE_LEVEL,
@@ -3628,36 +3734,87 @@ DreamV3DeviceControl(
          *
          * Two registers must be written:
          * 1. CC_GC_SHADER_ARRAY_CONFIG (BC-250: 0x9C1C): CU enumeration mask
-         *    Stock: 0xFFF80000 (24 CUs) ? Unlocked: 0xFFE00000 (40 CUs)
-         * 2. SPI_PG_ENABLE_STATIC_WGP_MASK (BC-250: 0x34FC): WGP dispatch gate
-         *    Stock: 0x7 (WGP 0-2) ? Unlocked: 0x1F (WGP 0-4)
+         *    Stock: 0xFFF80000 (24 CUs) -> Unlocked: 0xFFE00000 (40 CUs)
+         * 2. SPI_PG_ENABLE_STATIC_WGP_MASK (BC-250: 0x5C3C): WGP dispatch gate
+         *    Linux stock: 0x07 (WGP 0-2) -> Unlocked: 0x1F (WGP 0-4)
          *
          * Both registers must be written together.
          * CC alone changes what driver reports but SPI still dispatches to 24 CUs.
          * SPI alone enables hardware dispatch but driver only generates for 24 CUs.
+         *
+         * NOTE 2026-07-31: SPI_PG_ENABLE_STATIC_WGP_MASK is a PER-BANK register
+         * (one instance per SE/SH). The GRBM_GFX_INDEX per-bank select must be
+         * written first (SE0/SH0, SE0/SH1, SE1/SH0, SE1/SH1) — otherwise host
+         * reads/writes land on the wrong instance and appear read-only (0x0).
+         * Linux writes these via GRBM select inside gfx_v10_0_get_cu_info().
+         * Per-bank selects (GRBM_GFX_INDEX values, no broadcast flags):
+         *   SE0/SH0 = 0x00000000
+         *   SE0/SH1 = 0x01000000  (instance index 1 at bit 24)
+         *   SE1/SH0 = 0x10000000  (SE index 1 at bit 28)
+         *   SE1/SH1 = 0x11000000  (SE=1, SH=1)
          */
+        if (!DevExt->HardwareInitialized || DevExt->MmioVirtualBase == NULL) {
+            status = STATUS_DEVICE_NOT_READY;
+            break;
+        }
+
         if (inputLen >= sizeof(ULONG)) {
             PULONG InData = (PULONG)inputBuffer;
             ULONG enable = InData[0]; /* 0=disable (stock 24CU), 1=enable (40CU) */
 
-            if (enable) {
-                /* Write CC_GC_SHADER_ARRAY_CONFIG (BC-250: 0x3264): confirmed read-only */
-                DreamV3WriteRegister(DevExt, AMDBC250_REG_CC_GC_SHADER_ARRAY_CONFIG, 0xFFE00000);
-                /* Write SPI_PG_ENABLE_STATIC_WGP_MASK (BC-250: 0x34FC):
-                 * BC-250 WGP bits are 8-13 (verified via write-back test).
-                 * Stock: bit13=WGP5 (0x2000). Enable all: bits 8-13 (0x3F00). */
-                DreamV3WriteRegister(DevExt, AMDBC250_REG_SPI_PG_ENABLE_STATIC_WGP_MASK, 0x00003F00);
+            /* Per-bank GRBM_GFX_INDEX values (SE/SH combinations, layout B).
+             * NOTE 2026-08-01: host BAR5 writes to SPI_PG are SOS-locked on
+             * BC-250 — verified they do NOT stick on ANY bank (smn-gc-alias-scan
+             * v2). This handler still performs the writes and then reads back to
+             * report the TRUE result instead of claiming success. */
+            static const ULONG BankSelects[4] = {
+                0x00000000,  /* SE0/SH0 */
+                0x01000000,  /* SE0/SH1 */
+                0x10000000,  /* SE1/SH0 */
+                0x11000000   /* SE1/SH1 */
+            };
 
+            /* Readback verification: count banks where the write stuck. */
+            ULONG banksVerified = 0;
+            for (ULONG b = 0; b < 4; b++) {
+                DreamV3WriteRegister(DevExt, DevExt->GrbmGfxIndexOffset, BankSelects[b]);
+                if (enable) {
+                    DreamV3WriteRegister(DevExt, AMDBC250_REG_CC_GC_SHADER_ARRAY_CONFIG, 0xFFE00000);
+                    DreamV3WriteRegister(DevExt, AMDBC250_REG_SPI_PG_ENABLE_STATIC_WGP_MASK, 0x0000001F);
+                } else {
+                    DreamV3WriteRegister(DevExt, AMDBC250_REG_CC_GC_SHADER_ARRAY_CONFIG, 0xFFF80000);
+                    DreamV3WriteRegister(DevExt, AMDBC250_REG_SPI_PG_ENABLE_STATIC_WGP_MASK, 0x00000007);
+                }
+                /* Read back and verify the SPI gate state on this bank.
+                 * CC_GC_SHADER_ARRAY_CONFIG CU mask is bits [31:19]; compare
+                 * that field (0xFFF80000=0x1FFF stock 24CU vs 0xFFE00000=0x1FFE
+                 * unlocked 40CU), NOT the whole DWORD — a plain 0xFFE00000 mask
+                 * is identical for both states. */
+                ULONG spiBack = DreamV3ReadRegister(DevExt, AMDBC250_REG_SPI_PG_ENABLE_STATIC_WGP_MASK);
+                ULONG ccBack = DreamV3ReadRegister(DevExt, AMDBC250_REG_CC_GC_SHADER_ARRAY_CONFIG);
+                ULONG wantSpi = enable ? 0x1F : 0x07;
+                ULONG wantCcField = enable ? ((0xFFE00000UL >> 19) & 0x1FFF) : ((0xFFF80000UL >> 19) & 0x1FFF);
+                if ((spiBack & 0x1F) == wantSpi &&
+                    ((ccBack >> 19) & 0x1FFF) == wantCcField) {
+                    banksVerified++;
+                } else {
+                    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+                        "AMDBC250-DREAM-V4.3: WGP unlock bank %lu did NOT stick: SPI=0x%08X CC=0x%08X\n",
+                        b, spiBack, ccBack));
+                }
+            }
+            /* Restore broadcast select */
+            DreamV3WriteRegister(DevExt, DevExt->GrbmGfxIndexOffset,
+                AMDBC250_GRBM_GFX_INDEX_BROADCAST_VAL);
+
+            if (enable) {
                 KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
                     "AMDBC250-DREAM-V4.3: *** WGP UNLOCK ENABLED *** "
-                    "SPI=0x2000->0x3F00 (WGP0-5)\n"));
+                    "CC=0xFFE00000 SPI=0x1F (WGP0-4) — %lu/4 banks verified\n", banksVerified));
             } else {
-                /* Restore stock (WGP5 only) */
-                DreamV3WriteRegister(DevExt, AMDBC250_REG_CC_GC_SHADER_ARRAY_CONFIG, 0xFFF80000);
-                DreamV3WriteRegister(DevExt, AMDBC250_REG_SPI_PG_ENABLE_STATIC_WGP_MASK, 0x00002000);
-
                 KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-                    "AMDBC250-DREAM-V4.3: WGP unlock DISABLED (WGP5 only, stock)\n"));
+                    "AMDBC250-DREAM-V4.3: WGP unlock DISABLED (WGP0-2, stock) — %lu/4 banks verified\n",
+                    banksVerified));
             }
             status = STATUS_SUCCESS;
         } else {
@@ -3668,9 +3825,18 @@ DreamV3DeviceControl(
 
     /* --- Get CU Status --- */
     case 0x80000984: { /* IOCTL_AMDBC250_GET_CU_STATUS */
+        if (!DevExt->HardwareInitialized || DevExt->MmioVirtualBase == NULL) {
+            status = STATUS_DEVICE_NOT_READY;
+            break;
+        }
+
         if (outputLen >= sizeof(ULONG) * 4) {
             PULONG OutData = (PULONG)outputBuffer;
 
+            /* SPI_PG_ENABLE_STATIC_WGP_MASK is per-bank; select broadcast
+             * first so the reported value is deterministic across banks. */
+            DreamV3WriteRegister(DevExt, DevExt->GrbmGfxIndexOffset,
+                AMDBC250_GRBM_GFX_INDEX_BROADCAST_VAL);
             /* Read current register values (BC-250 corrected offsets) */
             ULONG ccConfig = DreamV3ReadRegister(DevExt, AMDBC250_REG_CC_GC_SHADER_ARRAY_CONFIG);
             ULONG spiMask = DreamV3ReadRegister(DevExt, AMDBC250_REG_SPI_PG_ENABLE_STATIC_WGP_MASK);
@@ -3684,8 +3850,10 @@ DreamV3DeviceControl(
             }
             cuCount *= 2; /* Each bit = 2 CUs (1 WGP = 2 CUs) */
 
+            /* SPI_PG is a WGP-enable mask in the LOW bits: stock 0x07 = WGP0-2,
+             * unlocked 0x1F = WGP0-4 (see UNLOCK_40CU). Count bits 0-4. */
             ULONG wgpCount = 0;
-            for (ULONG i = 8; i < 14; i++) {
+            for (ULONG i = 0; i < 5; i++) {
                 if (spiMask & (1 << i)) wgpCount++;
             }
 
@@ -3709,6 +3877,10 @@ DreamV3DeviceControl(
         /* Accept either old (16B) or new (32B) struct size */
         if (inputLen >= 16 && inputLen <= sizeof(AMDBC250_IOCTL_INIT_HARDWARE)) {
             PAMDBC250_IOCTL_INIT_HARDWARE InitHw = (PAMDBC250_IOCTL_INIT_HARDWARE)inputBuffer;
+
+            /* Serialize re-init: guard the whole map/init sequence against
+             * concurrent INIT_HARDWARE calls (double MmMapIoSpace = leak/crash). */
+            ExAcquireFastMutex(&DevExt->DeviceMutex);
 
             KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                 "AMDBC250-DREAM-V4.3: INIT_HARDWARE requested: MMIO PA=0x%llX, Size=0x%X\n",
@@ -3770,6 +3942,7 @@ DreamV3DeviceControl(
                     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
                         "AMDBC250-DREAM-V4.3: INIT_HARDWARE BAR5 auto-detect FAILED (VEN_1002 DEV_13FE not found)\n"));
                     status = STATUS_NO_SUCH_DEVICE;
+                    ExReleaseFastMutex(&DevExt->DeviceMutex);
                     break;
                 }
             }
@@ -3779,6 +3952,7 @@ DreamV3DeviceControl(
                 KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
                     "AMDBC250-DREAM-V4.3: INIT_HARDWARE invalid params\n"));
                 status = STATUS_INVALID_PARAMETER;
+                ExReleaseFastMutex(&DevExt->DeviceMutex);
                 break;
             }
 
@@ -3797,6 +3971,7 @@ DreamV3DeviceControl(
                     "AMDBC250-DREAM-V4.3: MmMapIoSpace FAILED for MMIO PA=0x%llX\n",
                     InitHw->MmioPhysicalBase));
                 status = STATUS_INSUFFICIENT_RESOURCES;
+                ExReleaseFastMutex(&DevExt->DeviceMutex);
                 break;
             }
 
@@ -3885,6 +4060,7 @@ DreamV3DeviceControl(
 
                 bytesReturned = sizeof(AMDBC250_IOCTL_INIT_HARDWARE);
                 status = STATUS_SUCCESS;
+                ExReleaseFastMutex(&DevExt->DeviceMutex);
                 break;
             }
 
@@ -3960,6 +4136,7 @@ DreamV3DeviceControl(
 
             bytesReturned = sizeof(AMDBC250_IOCTL_INIT_HARDWARE);
             status = STATUS_SUCCESS;
+            ExReleaseFastMutex(&DevExt->DeviceMutex);
         } else {
             status = STATUS_BUFFER_TOO_SMALL;
         }
@@ -6087,7 +6264,8 @@ DreamV3DeviceControl(
             #define KIQ_BASE_HI_OFF     0xE064
             #define KIQ_RPTR_OFF        0xE06C
             #define KIQ_WPTR_OFF        0xE078
-            #define KIQ_GCVM_CTX0_CNTL  0x0B460
+            /* 0x0B460 = empirically-verified alive GCVM_CONTEXT0_CNTL (see hw.h) */
+            #define KIQ_GCVM_CTX0_CNTL  AMDBC250_REG_GCVM_CONTEXT0_CNTL
 
             /* Step 0: Save BIOS state (use DreamV3ReadRegister — no volatile pointer!) */
             kt->ScratchBefore           = DreamV3ReadRegister(DevExt, KIQ_SCRATCH_OFF);

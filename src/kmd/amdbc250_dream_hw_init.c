@@ -143,9 +143,9 @@ DreamV3HwInitialize(
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                "AMDBC250-DREAM-V4.3: [STEP 1/12] Memory controller OK\n"));
 
-    /* Step 2: Program golden registers (hardware workarounds) — 47+ from Linux */
+    /* Step 2: Program golden registers (hardware workarounds) — 34 from Linux */
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-               "AMDBC250-DREAM-V4.3: [STEP 2/12] Golden registers (47+)\n"));
+               "AMDBC250-DREAM-V4.3: [STEP 2/12] Golden registers (34)\n"));
     if (MaxStep != 0 && 2 > MaxStep) { KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL, "AMDBC250-DREAM-V4.3: HwInit STOP at cap %u\n", MaxStep)); return STATUS_SUCCESS; }
     DreamV3MarkHwInitStep(2);
     Status = DreamV3ProgramGoldenSettings(DevExt);
@@ -980,18 +980,19 @@ DreamV3HwInitDisplay(_In_ PDREAM_V3_DEVICE_EXTENSION DevExt)
     UNREFERENCED_PARAMETER(DevExt);
 
     /* ======================================================================
-     * OTG registers (0x6000+) are in the 0x3400-0x8100 FREEZE ZONE.
-     * Direct MMIO writes cause hardware hang on BC-250.
+     * Display init is currently SKIPPED. Windows uses Microsoft Basic
+     * Display over the UEFI GOP framebuffer for output on Win11 26100
+     * (DxgkInitialize is not exported -> WDM fallback, no DDI display).
      *
-     * Display engine programming must go through the display controller
-     * driver (dcn20) or PSP proxy. For now, we skip display init entirely.
-     *
-     * The GPU will still render to framebuffer; display output is handled
-     * by BIOS/firmware display controller until proper DCN init is added.
+     * CORRECTED (2026-08-01): real DCN base is 0xD300 (not 0x6000).
+     * Verified live OTG0: OTG_CONTROL 0x14004 = 0x80011311 ENABLED,
+     * timing 2560x1440@60 (H_TOTAL=2719, V_TOTAL=1480), frame counter
+     * 0x14030 ticks. OTG/HUBP/DMCUB addresses = 0xD300 + mm*4 (hw.h).
+     * DCN registers are NOT in the old 0x3400-0x8100 freeze zone.
      * ====================================================================== */
 
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-        "AMDBC250-DREAM-V4.3: InitDisplay SKIPPED (OTG registers in freeze zone 0x6000+)\n"));
+        "AMDBC250-DREAM-V4.3: InitDisplay SKIPPED (Basic Display / GOP framebuffer path)\n"));
 
     return STATUS_SUCCESS;
 }
@@ -1032,13 +1033,14 @@ DreamV3InitMemoryController(_In_ PDREAM_V3_DEVICE_EXTENSION DevExt)
      */
 
     /* Configure GB_ADDR_CONFIG for BC-250 (Cyan Skillfish)
-     * Linux golden value: 0x00100044 (from CYAN_SKILLFISH_GB_ADDR_CONFIG_GOLDEN)
+     * Linux CYAN_SKILLFISH_GB_ADDR_CONFIG_GOLDEN = 0x00100044 (gfx_v10_0.c)
      * Bits [3:0] = NUM_PIPES: 4 (0x4)
      * Bits [7:4] = PIPE_INTERLEAVE: 256B (0x4)
      * Bits [19:16] = NUM_PKRS: 1 (0x1)
+     * Address: mmGB_ADDR_CONFIG = 0x13DE (BASE_IDX=0) -> BAR5 0x61D8.
      */
     DreamV3WriteRegister(DevExt, AMDBC250_REG_GB_ADDR_CONFIG,
-                         0x00100044);  /* BC-250 golden value from Linux */
+                         0x00100044);  /* CYAN_SKILLFISH_GB_ADDR_CONFIG_GOLDEN */
 
     /* Configure framebuffer location */
     if (DevExt->FbSize > 0) {
