@@ -332,6 +332,7 @@ Amdbc250PspCoreUnlock(PVOID GpuBar5Va, PULONG OutCoreMaskBefore,
 
     /* 3. Already fully unlocked? */
     if ((maskBefore & 0xFF) == 0xFF) {
+        if (OutCoreMaskAfter) *OutCoreMaskAfter = maskBefore;
         if (OutResult) *OutResult = 2;
         return STATUS_SUCCESS;
     }
