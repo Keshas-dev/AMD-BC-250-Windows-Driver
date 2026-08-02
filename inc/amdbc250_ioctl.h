@@ -194,6 +194,10 @@ typedef struct _AMDBC250_IOCTL_SMU_TELEMETRY {
     /* Compute state */
     UINT32 ActiveWgps;          /* msg 0x1E (0 = GFXOFF/deep sleep) */
     UINT32 EnabledSmuFeatures;  /* msg 0x3D bitmask */
+    /* CPU state (Q3 queue + SMN) */
+    UINT32 CpuCoreMask;         /* SMN[0x0115A870] (0x77=6 cores, 0xFF=8) */
+    UINT32 CpuVoltageMv;        /* Q3 msg 0x36 GetCurrentCpuVoltage (mV) */
+    UINT32 GpuVoltageMv;        /* Q3 msg 0x37 GetCurrentGpuVoltage (mV) */
     /* Raw SMN sensor probes (0x03B1xxxx, valid != 0xFFFFFFFF) */
     UINT32 SmnEdgeTemp;         /* 0x03B10000 */
     UINT32 SmnJunctionTemp;     /* 0x03B10020 */

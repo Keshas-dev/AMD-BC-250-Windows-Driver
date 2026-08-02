@@ -80,6 +80,10 @@ static void print_snapshot(const AMDBC250_IOCTL_SMU_TELEMETRY *t) {
     else
         printf("  GfxVid     : %u (unsupported)\n", t->GfxVid);
     printf("  ActiveWgps : %u%s\n", t->ActiveWgps, t->ActiveWgps ? "" : "  (GFXOFF / gated)");
+    printf("  CpuCore    : mask=0x%08X (%u cores)  CpuV=%u mV  GpuV=%u mV\n",
+           t->CpuCoreMask,
+           (t->CpuCoreMask & 0xFF) == 0xFF ? 8 : ((t->CpuCoreMask & 0xFF) == 0x77 ? 6 : 0),
+           t->CpuVoltageMv, t->GpuVoltageMv);
     printf("  Features   : 0x%08X\n", t->EnabledSmuFeatures);
     for (int b = 0; b < 32; b++) {
         if (t->EnabledSmuFeatures & (1u << b)) {
@@ -114,7 +118,7 @@ int main(int argc, char **argv) {
         csv = fopen(csvpath, "w");
         if (csv) {
             fprintf(csv, "Time_s,Version,GfxFreqMhz,QueryGfxclk,GfxVid,mV,ActiveWgps,Features,"
-                         "EdgeTemp,JunctionTemp,MemTemp,FanRpm,FanPwm\n");
+                         "CoreMask,CpuV_mV,GpuV_mV,EdgeTemp,JunctionTemp,MemTemp,FanRpm,FanPwm\n");
         } else {
             printf("WARN: cannot open %s, CSV disabled\n", csvpath);
         }
@@ -130,9 +134,10 @@ int main(int argc, char **argv) {
             if (once) { if (csv) fclose(csv); CloseHandle(g_h); return 1; }
         }
         if (csv) {
-            fprintf(csv, "%d,0x%08X,%u,%u,%u,%u,%u,0x%08X,0x%08X,0x%08X,0x%08X,0x%08X,0x%08X\n",
+            fprintf(csv, "%d,0x%08X,%u,%u,%u,%u,%u,0x%08X,0x%08X,%u,%u,0x%08X,0x%08X,0x%08X,0x%08X,0x%08X\n",
                     n, t.SmuVersion, t.GfxFreqMhz, t.QueryGfxclkMhz, t.GfxVid, t.GfxMillivolts,
                     t.ActiveWgps, t.EnabledSmuFeatures,
+                    t.CpuCoreMask, t.CpuVoltageMv, t.GpuVoltageMv,
                     t.SmnEdgeTemp, t.SmnJunctionTemp, t.SmnMemTemp, t.SmnFanRpm, t.SmnFanPwm);
             fflush(csv);
         }

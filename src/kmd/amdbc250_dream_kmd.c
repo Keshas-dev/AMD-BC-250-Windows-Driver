@@ -3626,6 +3626,21 @@ DreamV3DeviceControl(
         SMU_TEL_QUERY(0x1E, 0, t->ActiveWgps);          /* QueryActiveWgp */
         SMU_TEL_QUERY(0x3D, 0, t->EnabledSmuFeatures);  /* GetEnabledSmuFeatures */
 
+        /* CPU/GPU voltage + core mask via Q3 queue (safe, read-only). */
+        {
+            ULONG resp = 0, rstat = 0;
+            NTSTATUS st = Amdbc250PspSmuQ3Msg(mmio, 0x36, 0, &resp, &rstat);  /* GetCurrentCpuVoltage */
+            if (NT_SUCCESS(st)) t->CpuVoltageMv = resp;
+            else t->CpuVoltageMv = 0;
+
+            resp = 0; rstat = 0;
+            st = Amdbc250PspSmuQ3Msg(mmio, 0x37, 0, &resp, &rstat);            /* GetCurrentGpuVoltage */
+            if (NT_SUCCESS(st)) t->GpuVoltageMv = resp;
+            else t->GpuVoltageMv = 0;
+
+            t->CpuCoreMask = Amdbc250PspSmnRead(mmio, 0x0115A870);
+        }
+
         /* VID -> mV: vid = round((1.55 - mv/1000) / 0.00625), invert it.
          * mV = round((-vid*0.00625 + 1.55) * 1000). */
         if (t->GfxVid <= 255) {
