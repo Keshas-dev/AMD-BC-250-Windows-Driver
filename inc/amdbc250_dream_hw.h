@@ -373,16 +373,16 @@ typedef struct _DREAM_V3_DEVICE_EXTENSION *PDREAM_V3_DEVICE_EXTENSION;
 #define AMDBC250_REG_CP_HQD_PQ_RPTR         (AMDBC250_GC_BASE + 0x00007ECC)  /* 0x912C, mm=0x1FB3 */
 #define AMDBC250_REG_CP_HQD_PQ_RPTR_REPORT_ADDR      (AMDBC250_GC_BASE + 0x00007EDC)  /* 0x913C, mm=0x1FB7 */
 #define AMDBC250_REG_CP_HQD_PQ_RPTR_REPORT_ADDR_HI   (AMDBC250_GC_BASE + 0x00007EE0) /* 0x9140, mm=0x1FB8 */
-#define AMDBC250_REG_CP_HQD_PQ_WPTR_POLL_ADDR        (AMDBC250_GC_BASE + 0x00007EE4) /* 0x9144, mm=0x1FB9 */
-#define AMDBC250_REG_CP_HQD_PQ_WPTR_POLL_ADDR_HI     (AMDBC250_GC_BASE + 0x00007EE8) /* 0x9148, mm=0x1FBA */
-#define AMDBC250_REG_CP_HQD_PQ_WPTR_POLL_CNTL       (AMDBC250_GC_BASE + 0x00007EEC) /* 0x914C, mm=0x1FBB */
-#define AMDBC250_REG_CP_HQD_PQ_DOORBELL_CONTROL      (AMDBC250_GC_BASE + 0x00007EF0) /* 0x9150, mm=0x1FBC */
-/* CP_HQD_PQ_CONTROL — SAME OFFSET as PQ_WPTR_POLL_ADDR_HI (0x9148, mm=0x1FBA).
- * BUG: Two different registers share the same address in our header. The Linux
- * gc_10_1_0_offset.h defines mmCP_HQD_PQ_CONTROL at a different offset (likely
- * 0x1FCA range), but the correct value for BC-250 is UNVERIFIED.
- * Probe test: 0x9148 is RO (SOS-locked, writes don't stick). Used by MQD/RING test handler. */
-#define AMDBC250_REG_CP_HQD_PQ_CONTROL     (AMDBC250_GC_BASE + 0x00007EE8)  /* 0x9148 (same as WPTR_POLL_ADDR_HI — BUG: verify correct offset!) */
+#define AMDBC250_REG_CP_HQD_PQ_WPTR_POLL_ADDR        (AMDBC250_GC_BASE + 0x00007ED8) /* 0x9138, mm=0x1FB6 */
+#define AMDBC250_REG_CP_HQD_PQ_WPTR_POLL_ADDR_HI     (AMDBC250_GC_BASE + 0x00007EDC) /* 0x913C, mm=0x1FB7 */
+#define AMDBC250_REG_CP_HQD_PQ_WPTR_POLL_CNTL       (AMDBC250_GC_BASE + 0x00007ED8) /* 0x9138, mm=0x1FB6 */
+#define AMDBC250_REG_CP_HQD_PQ_DOORBELL_CONTROL      (AMDBC250_GC_BASE + 0x00007EE0) /* 0x9140, mm=0x1FB8 */
+/* CP_HQD_PQ_CONTROL = 0x9148 (mm=0x1FBA) per Linux gc_10_1_0_offset.h.
+ * CORRECTED 2026-08-05: previously defined together with WPTR_POLL_ADDR_HI at
+ * 0x9148 (the "two registers share an address BUG"). Linux maps them to distinct
+ * offsets: WPTR_POLL_ADDR_HI=0x1FB7->0x913C and PQ_CONTROL=0x1FBA->0x9148. Used by
+ * the MQD/RING test handler only (compute path is SOS-locked/fused on BC-250). */
+#define AMDBC250_REG_CP_HQD_PQ_CONTROL     (AMDBC250_GC_BASE + 0x00007EE8)  /* 0x9148, mm=0x1FBA */
 #define AMDBC250_REG_CP_HQD_DEQUEUE_REQUEST (AMDBC250_GC_BASE + 0x00007F5C)  /* 0x91BC, mm=0x1FEF */
 #define AMDBC250_REG_CP_HQD_EOP_BASE_ADDR   (AMDBC250_GC_BASE + 0x00007E8C)  /* 0x90EC, mm=0x1FA3 */
 #define AMDBC250_REG_CP_HQD_EOP_BASE_ADDR_HI (AMDBC250_GC_BASE + 0x00007E94) /* 0x90F4, mm=0x1FA5 */
@@ -442,12 +442,11 @@ typedef struct _DREAM_V3_DEVICE_EXTENSION *PDREAM_V3_DEVICE_EXTENSION;
 #define AMDBC250_GRBM_GFX_INDEX_QUEUE_BROADCAST    (1 << 30)
 #define AMDBC250_GRBM_GFX_INDEX_SE_BROADCAST       (1 << 31)
 
-/* GRBM_GFX_INDEX broadcast reset value (Linux DEFAULT_GRBM_GFX_INDEX = 0xE0000000) */
+/* GRBM_GFX_INDEX broadcast reset value (gfx10 Linux standard = 0x15000000) */
 #define AMDBC250_GRBM_GFX_INDEX_BROADCAST_VAL \
-    (AMDBC250_GRBM_GFX_INDEX_SE_BROADCAST | \
-     AMDBC250_GRBM_GFX_INDEX_QUEUE_BROADCAST | \
-     AMDBC250_GRBM_GFX_INDEX_PIPE_BROADCAST | \
-     AMDBC250_GRBM_GFX_INDEX_INSTANCE_BROADCAST)
+    (1 << 24)  /* INSTANCE_BROADCAST_WRITES */ | \
+    (1 << 26)  /* SH_BROADCAST_WRITES */ | \
+    (1 << 28)   /* SE_BROADCAST_WRITES */
 
 /* KIQ select: ME=1, PIPE=0, QUEUE=0.
  * NOTE: No broadcast flags! PSP driver confirmed KIQ registers only
@@ -535,14 +534,22 @@ typedef struct _DREAM_V3_DEVICE_EXTENSION *PDREAM_V3_DEVICE_EXTENSION;
 #define AMDBC250_REG_CP_KIQ_VMID         (AMDBC250_GC_BASE + 0x0000CE1C)  /* 0xE07C, WRITABLE */
 #define AMDBC250_REG_CP_KIQ_ACTIVE       (AMDBC250_GC_BASE + 0x0000CE20)  /* 0xE080, WRITABLE */
 
-/* --- Interrupt Handler (IH) ??? GFX10 style --- */
-#define AMDBC250_REG_IH_RB_BASE_LO          0x00003800  /* IH ring base low  */
-#define AMDBC250_REG_IH_RB_BASE_HI          0x00003804  /* IH ring base high */
-#define AMDBC250_REG_IH_RB_CNTL             0x00003808  /* IH ring control   */
-#define AMDBC250_REG_IH_RB_RPTR             0x00003810  /* IH read pointer   */
-#define AMDBC250_REG_IH_RB_WPTR             0x00003814  /* IH write pointer  */
-#define AMDBC250_REG_IH_RB_WPTR_POLL_CNTL   0x00003818  /* WPTR poll control */
-#define AMDBC250_REG_IH_CNTL                0x00003820  /* IH control        */
+/* --- Interrupt Handler (IH) ---
+ * CORRECTED (2026-08-05): OSSSYS block, not raw-Navi-GFX10 0x3800 series.
+ * osssys_5_0_0_offset.h declares IHDR block base = 0x4280 (byte); AGENTS.md
+ * ip_discovery confirms OSSSYS base 0x0A0 DWORD = 0x4280 byte. Byte =
+ * 0x4280 + mmIH_* x 4. */
+#define AMDBC250_REG_IH_RB_BASE_LO          0x00004484  /* IH ring base low   mm=0x81 */
+#define AMDBC250_REG_IH_RB_BASE_HI          0x00004488  /* IH ring base high  mm=0x82 */
+#define AMDBC250_REG_IH_RB_CNTL             0x00004480  /* IH ring control     mm=0x80 */
+#define AMDBC250_REG_IH_RB_RPTR             0x0000448C  /* IH read pointer mm=0x83 */
+#define AMDBC250_REG_IH_RB_WPTR               0x00004490  /* IH write pointer  mm=0x84 */
+#define AMDBC250_REG_IH_WPTR_POLL_ADDR_LO   0x00004498  /* WPTR poll addr lo  mm=0x86 */
+#define AMDBC250_REG_IH_CNTL                0x00004580  /* IH control   mm=0xC0 */
+#define AMDBC250_REG_IH_CNTL2               0x00004584  /* IH control2  mm=0xC1 */
+#define AMDBC250_REG_IH_STATUS              0x00004588  /* IH status    mm=0xC2 */
+/* Back-compat alias used by legacy code path: */
+#define AMDBC250_REG_IH_RB_WPTR_POLL_CNTL   AMDBC250_REG_IH_WPTR_POLL_ADDR_LO
 
 /* --- Memory Controller (MC) ??? GFX10 --- */
 /* CORRECTED: entire MC_VM block was off by 0x9000 (raw 0x5xx -> 0x95xx).

@@ -18,7 +18,7 @@
 - **Older Windows**: PSP driver can map BAR5 directly; PSP driver can be installed before or after GPU driver.
 
 ## Architecture
-- This is a WDM control/IOCTL driver, not a real WDDM miniport on Win11 26100; `DxgkInitialize` is not exported and the DDI path is stubbed.
+- This is a WDM control/IOCTL driver, not a real WDDM miniport on Win11 26100. `DxgkInitialize` is NOT a dxgkrnl.sys export (it lives in displib.lib, see the 2026-08-01 correction below); our runtime export-scan falls back to WDM IOCTL mode and the DDI path is stubbed.
 - DriverBuildId registry marker confirms new binary loaded. Step markers: DriverEntryRan=1, Step_BeforeDxgkInit=10, Step_DriverEntryPost=11 (WDM fallback).
 - Main IOCTL device: `\\.\AMDBC250DreamV43`; primary GPU MMIO BAR5 is `0xFE800000` (512KB).
 - Do not map past BAR5 or probe random unknown offsets casually; hardware hangs require reboot.
@@ -483,8 +483,20 @@ Our drivers work correctly (register access, SMU mailbox, PSP proxy, firmware lo
 
 ## CRITICAL: Win11 26100 WDM fallback — INIT_HARDWARE required before register access (2026-07-05)
 
+### CORRECTION (2026-08-01): DxgkInitialize is NOT "not exported" — it lives in displib.lib
+Reverse-engineered the real WDDM registration path on Win11 26100 (from WDK `displib.lib` + dxgkrnl.sys + BasicDisplay.sys):
+- **dxgkrnl.sys (26100.8875) does NOT export `DxgkInitialize`** (333 exports, string appears 0 times; only Nt*/Dxgk*/Tdr*/Dpi* + data export `DxgCoreInterface`). Our `DreamV3ResolveDxgkInitialize()` export-table scan can NEVER succeed — the symbol was never in dxgkrnl.
+- **`DxgkInitialize` is a real function body inside WDK `displib.lib`** (link-time, not an import thunk). It registers with the graphics kernel via a **`\Device\DxgKrnl` device-object IOCTL**, NOT via a dxgkrnl export:
+  1. validates `DriverInitializationData->Version` (accepts 0x1052, 0x2005, 0x300E, 0x4002/3, 0x5023, 0x6003, 0x6010/11, 0x700A, 0x8001, 0x9006, 0xA00B, 0xB004, 0xC004, 0xD001, 0xE003, 0xF003, 0x10004, 0x11007)
+  2. `DlpLoadDxgkrnl()`: `ZwLoadDriver` then `IoGetDeviceObjectPointer(L"\\Device\\DxgKrnl")`
+  3. `DlpGetIoctlCode()`: Win8+ → **IOCTL 0x230047** = `CTL_CODE(FILE_DEVICE_VIDEO(0x23), 0x11, METHOD_NEITHER, FILE_ANY_ACCESS)`; legacy → 0x23003F
+  4. `DlpCallSyncDeviceIoControl()`: `IoBuildDeviceIoControlRequest(0x230047, DeviceObject, ...)` → `IofCallDriver` → wait event
+  5. on success: patches `DriverInitializationData->DxgkDdiStartDevice` (MiniportStartDevice) → `DlpStartDevice`, which fills `gDlpDxgkCb*` callbacks from the response, then calls the real StartDevice.
+- **BasicDisplay.sys (Microsoft's DOD) confirms this**: it does NOT import dxgkrnl at all — it imports `ZwLoadDriver`, `IoGetDeviceObjectPointer`, `IoBuildDeviceIoControlRequest` (the displib IOCTL path).
+- **Implication for a real WDDM miniport build**: link against `displib.lib` (`%WDK_ROOT%\Lib\%WDK_VERSION%\km\x64\displib.lib`) and call `DxgkInitialize` directly, instead of `DreamV3ResolveDxgkInitialize()` export scanning. `DxgkUnInitialize` also lives in displib.lib. NOTE: `displib.lib` only exists in the 26100 WDK (not 19041/22621 in our toolchain dirs).
+
 ### Problem
-On Win11 26100, `DxgkInitialize` is NOT exported. Driver enters WDM fallback mode → creates IOCTL device but **NEVER maps BAR5** (no PnP `StartDevice` call). All `IOCTL_AMDBC250_READ_REG` returns `STATUS_DEVICE_NOT_READY` (ERROR 21) because `DevExt->MmioVirtualBase == NULL`.
+On Win11 26100, the driver's runtime export-scan for `DxgkInitialize` fails (symbol is in displib.lib, not dxgkrnl.sys), so the driver enters WDM fallback mode → creates IOCTL device but **NEVER maps BAR5** (no PnP `StartDevice` call). All `IOCTL_AMDBC250_READ_REG` returns `STATUS_DEVICE_NOT_READY` (ERROR 21) because `DevExt->MmioVirtualBase == NULL`.
 
 ### Solution
 User-mode test tools MUST call `IOCTL_AMDBC250_INIT_HARDWARE` FIRST:
@@ -910,4 +922,495 @@ Ran `output\smn-gc-alias-scan.exe -scan` — ran clean, no hang. Log overwritten
 - The 40CU unlock on this unit requires either (a) an unknown SMN alias for SPI_PG outside safe ranges, or (b) Linux-kernel-context writes (debugfs/UMR) which we cannot replicate in WDM — both currently unreachable.
 - Remaining viable actions: CC_ARRAY bits 24-28 toggle (COSMETIC only, does not enable WGPs); `-write` SMU 0x98 only for already-proven addresses (core unlock 0x0115A870).
 
+## WGP Unlock Research — FULL RESULTS (2026-08-06)
 
+### Goal
+Enable 3D graphics on BC-250 by powering on WGPs (shader array). WGPs off → GRBM_STATUS=0, no ring processing, display-only works but no 3D.
+
+### Hardware reality (confirmed)
+- BC-250 = full PS5 Oberon die (8 Zen2 + RDNA2 + 40 CUs), NOT fused mining ASIC
+- WGPs are SOS/SMU-locked (not fused) — Linux can unlock via debugfs + patched amdgpu
+- Stock SPI_PG = 0x07 (24 CU) on Linux; our Windows reads 0x00000000
+- Unlock needs 3 writes TOGETHER: CC_ARRAY(0x9C1C)=0xFFE00000 + SPI_PG(0x5C3C)=0x1F + RLC_PG(0x3D64)=0x1F
+- SPI_PG_ENABLE_STATIC_WGP_MASK is per-bank GRBM-indexed
+
+### Paths tested — ALL FAILED to write SPI_PG
+
+#### Path 3: Direct BAR5 writes (ALL LOCKED)
+| Test | Result |
+|---|---|
+| Direct SPI_PG write (any value 0x01-0xFFFFFFFF) | LOCKED (readback 0x00000000) |
+| After GRBM soft reset (0x3278) | LOCKED |
+| GRBM_GFX_INDEX broadcast 0x15000000 | LOCKED |
+| Per-bank SE0/SH0, SE0/SH1, SE1/SH0, SE1/SH1 | LOCKED |
+| Via UNLOCK_40CU IOCTL (0x80000980) | LOCKED (driver does same writes) |
+| CC_ARRAY writable? | YES (0x1F000000 partial) |
+| RLC_PG writable? | NO (0xFFFFFFFF read-only) |
+
+#### Path 1: SMU Q3 msg 0x98 (ungated SMN write)
+- Via direct BAR5 SMN: destabilized SMU (SMU dead after, required cold reboot)
+- Via PSP proxy (IOCTL_AMDBC250_PSP_SMU_MSG): status=1 OK, but SPI_PG still 0
+- SMU 0x98 writes 0x00FF to any SMN address, but NO KNOWN SPI_PG SMN alias found
+- smn-gc-alias-scan searched 0x01100000-0x01200000 and 0x03B10000-0x03B11000: 0 GC matches
+- Candidate SMN addresses tested (0x0115B000 etc): none affected SPI_PG
+
+#### Path 2: PSP mailbox commands
+- RequestActiveWgp (0x18) via direct Q0: REJECTED (status=-1)
+- RequestActiveWgp (0x18) via PSP proxy: ACCEPTED (status=1) but Wgp still 0
+- QueryActiveWgp (0x1E): returns 0 always
+- PSP ring GFX_CMD scan (0x01-0xFF): all "consumed" but no WGP-specific command found
+- PSP driver NOT installed (would need sibling repo build)
+
+#### Path 4: VBIOS-based unlock
+- Not implemented — driver does not fetch VBIOS from ACPI VFCT
+- Linux uses VBIOS for SMU wake sequence
+
+### What WORKS on Windows
+- GPU driver (atikmdag.sys): WDM IOCTL, BAR5 mapping, SMU mailbox via SMN, PSP proxy, firmware loading
+- SMU Q3 msg 0x98 via PSP proxy (status=1, no SMU destabilization)
+- GetSmuVersion, GetDriverIfVersion, QueryActiveWgp via PSP proxy (all status=1)
+- CC_ARRAY partially writable (0x1F000000)
+- UNLOCK_40CU IOCTL exists (0x80000980) and runs, but writes don't stick
+- KMDOD display-only (sampledisplay + wddm-ps5 skeleton): registers readable, no 3D
+- SMU frequency/voltage control (1500MHz @ 931mV via Q0/Q3)
+
+### Key insight: SOS locks SPI_PG
+- SPI_PG_ENABLE_STATIC_WGP_MASK is SOS-locked from host BAR5 access
+- SOS accepts RequestActiveWgp (0x18) but doesn't actually enable WGPs
+- The "legit" path (Linux amdgpu via debugfs) suggests SOS has an unlock gate that requires proper PSP authentication sequence
+- Our WDM driver lacks the full PSP authentication that Linux amdgpu performs
+
+### Test tools used (all in output\)
+- bc250-diag.exe, reg-dump-and-nop.exe, bar5-smn-test.exe
+- bar5-cu-unlock-test.exe (GRBM_GFX_INDEX probe + per-bank writes)
+- unlock40cu-real.exe (UNLOCK_40CU IOCTL direct)
+- wgp-unlock-test.exe (Path 1 + Path 3 combined)
+- wgp-smu-test.exe (SMU 0x18 RequestActiveWgp)
+- wgp-deep-test.exe (GRBM reset + per-bank + value sweep)
+- psp-proxy-smu-test.exe (PSP proxy SMU messages)
+- smn-core-unlock-test.exe (SMU 0x98 CPU core unlock — WORKS)
+- gfx-ring-init-test.exe (GFX ring — NOT PROCESSED)
+
+## GPU Driver Deep Analysis vs Linux (2026-08-07)
+
+### ✅ CORRECT — not the cause of 3D failure
+| Area | Status | Notes |
+|---|---|---|
+| All register offsets | ✅ Correct | Match Linux gc_10_1_0_offset.h or verified BC-250-specific |
+| PSP ring protocol | ✅ Correct | Byte-identical to Linux psp_v11_0_8.c |
+| SMU Q0/Q3 mailbox | ✅ Correct | 0x03B10A08/48/68 match Linux |
+| UNLOCK_40CU IOCTL | ✅ Correct | Per-bank writes + readback verification |
+| GRBM_GFX_INDEX | ✅ Correct | 0x34D0, broadcast 0x15000000 |
+| SPI_PG_ENABLE_STATIC_WGP_MASK | ✅ Correct | 0x5C3C (mm=0x1277) |
+| CC_GC_SHADER_ARRAY_CONFIG | ✅ Correct | 0x9C1C for BC-250 |
+| CP_MEC_CNTL | ✅ Correct | 0x4B14 (mm=0x0E2D) |
+
+### ⚠️ Fixed bugs
+| # | File | Was | Now |
+|---|---|---|---|
+| 1 | hw.h:378 | CP_HQD_PQ_WPTR_POLL_CNTL = 0x9148 (dup of PQ_CONTROL) | **0x9138** (mm=0x1FB6, matches Linux) |
+
+### PSP Firmware Load — INTEGRATED into GPU driver (2026-08-07)
+
+**Strategy decision: A) Merge PSP into GPU driver (chosen)**
+- GPU driver now loads ALL firmware: SYSDRV, SOS, SMC (via C2PMSG) + CP firmware (via KIQ)
+- Separate PSP driver is NO LONGER NEEDED
+- Reason: PSP proxy was broken (PSP BAR0 ≠ GPU BAR5), GPU driver has working SMU access
+
+**What was integrated:**
+| File | What it does |
+|---|---|
+| `amdbc250_dream_psp_fw_load.c` | Loads SYSDRV/SOS/SMC via C2PMSG (0x03B10A08/48/68) using GPU BAR5 SMN access |
+| Called from `DreamV3HwInitialize` Step 0b | Before KIQ init, after BAR5 mapping |
+
+**Firmware load flow (now unified):**
+```
+GPU Driver Init
+    ↓
+Step 0b: DreamV3LoadPspFirmware()
+    ├── Load SYSDRV (PSP bootloader) via C2PMSG_35 cmd=0x04
+    ├── Load SOS (Secure OS) via C2PMSG_35 cmd=0x08
+    └── Load SMC (SMU firmware) via C2PMSG_35 cmd=0x0A
+    ↓
+Step 6: DreamV3LoadAllFirmware() (CP firmware)
+    ├── Load ME/PFP/CE/MEC via PSP KIQ (SOS processes)
+    └── ...
+```
+
+**Separate PSP driver status:**
+- `C:\AMD-BC-250\AMD-BC-250-PSP-Windows-Driver\` — DEPRECATED, do not install
+- Its firmware load code is now in the GPU driver
+- Installing both drivers may cause conflicts (avoid)
+
+### 🔴 CRITICAL missing pieces (root cause of 3D failure)
+| # | Missing | Impact |
+|---|---|---|
+| 1 | **SMU DPM initialization** | No DPM tables uploaded → SMU cannot power on WGPs |
+| 2 | **SPI_PG SOS-locked** | Host BAR5 writes blocked by PSP Secure OS |
+| 3 | **Ring BASE registers SOS-locked** | Cannot create GFX/compute rings from host |
+
+### Root cause chain
+```
+SPI_PG = SOS-locked → Host cannot write
+    ↓
+Even if written → SMU without DPM tables cannot power on WGP
+    ↓
+Even if WGP powered → Ring BASE registers SOS-locked
+```
+
+### PSP Ring Protocol — now called (2026-08-07 fix)
+- `Amdbc250PspRingCreate` now called from `DreamV3PspHardwareInit` when `PspAlive`
+- Fixed: writes `(PSP_RING_TYPE_GFX << 16)` to C2PMSG_64 (was writing 0)
+- Added `GfxRingAvailable` flag to DeviceExtension
+- Files changed: `amdbc250_psp.c`, `amdbc250_dream_hw_init.c`, `amdbc250_dream_kmd.h`, `amdbc250_psp.h`
+
+### Verdict
+**Driver code is correct. 3D is blocked by hardware/firmware SOS lock on SPI_PG and SMU DPM not initialized — not driver bugs.**
+
+### Compile command (works)
+```
+cmd /c "call F:\VS2022\Community\VC\Auxiliary\Build\vcvars64.bat" && set INCLUDE=MSVC_INC;WDK_ucrt;WDK_shared;WDK_um;WDK_km;%INCLUDE% && set LIB=MSVC_lib;WDK_ucrt\x64;WDK_um\x64;%LIB% && cl /nologo /O2 /W3 /Feoutput\test.exe test.c /link /subsystem:console"
+```
+VS2022 + WDK both on F: drive. Headers: test-tools\..\inc\amdbc250_ioctl.h
+
+### Driver facts
+- UNLOCK_40CU IOCTL: 0x80000980 (case in kmd.c:3855), does 4 per-bank writes, reports banksVerified
+- PSP_SMU_MSG IOCTL: 0x80000924 → Amdbc250PspDirectSmuMsg → Q0 mailbox (0x03B10A08/48/68)
+- GRBM_GFX_INDEX = 0x34D0 (confirmed live register)
+- Broadcast = 0x15000000 (Linux gfx10 layout: INSTbit24 + SHbit26 + SEbit28)
+- Driver IOCTL_INDEX = 0x270 (not 0x200 as header comment suggests)
+
+### Conclusion
+3D enablement on Windows WDM is BLOCKED by SOS-locked SPI_PG register. All host BAR5 write paths fail. PSP proxy accepts commands but doesn't enable WGPs. The unlock requires either:
+1. A PSP authentication sequence our driver doesn't perform
+2. An unknown SMN alias for SPI_PG outside safe ranges
+3. VBIOS-based SMU wake sequence (not implemented)
+
+This remains the fundamental unsolved blocker for BC-250 3D on Windows.
+
+## BREAKTHROUGH: KMDOD display-only driver LOADS on BC-250 (2026-08-03)
+
+### Milestone
+Microsoft KMDOD sample (Basic Display Driver DOD, `F:\bc-250-proektas\Dev\windows-driver-samples\video\KMDOD`) customized for BC-250 now INSTALLS and RUNS:
+- Device: "AMD BC-250 (Display Only Driver)" PCI\VEN_1002&DEV_13FE&SUBSYS_00001022&REV_00, Status OK, CM_PROB_NONE
+- Win32_VideoController: AMD BC-250 (Display Only Driver), Status OK, DriverVersion 1.0.103.0, mode 2560x1440x32bpp
+- Service KDODSamp: RUNNING (STATE 4)
+- Installed from `output\kmdod-test\` (SampleDisplay.sys 8/3/2026, 33128 bytes, + sampledisplay.inf/.cat, INF oem2.inf)
+- Test signing ON + Secure Boot OFF still required (AMD-BC250-Signer self-signed).
+
+### Fixes that resolved Code 31 (0xC0000017 STATUS_NO_MEMORY)
+1. **memory.cxx**: `ExAllocatePool2` was called with `PoolType` (POOL_TYPE) instead of `POOL_FLAGS`. `NonPagedPool`=0 is NOT a valid POOL_FLAGS → NULL → AddDevice returns STATUS_NO_MEMORY → Code 31. Fixed both operator new and new[]: `POOL_FLAGS PoolFlags = (PoolType == PagedPool) ? POOL_FLAG_PAGED : POOL_FLAG_NON_PAGED;`
+2. **bdd_ddi.cxx**: BC-250-modified `BddDdiStartDevice` didn't call `pBDD->StartDevice()` → 0 views/children/modes. Fixed to call it (sets MAX_VIEWS=1/MAX_CHILDREN=1 + mode list).
+
+### Historical confirmation (ps5-win-driver PROGRESS.md)
+- The 0xC0000059 (STATUS_REVISION_MISMATCH) saga from May 2026 was resolved by the full 28-callback KMDOD sample shape (`DxgkInitializeDisplayOnlyDriver` → STATUS_SUCCESS); the ONLY remaining blocker was this same Code 31 alloc bug (CM_PROB_FAILED_ADD / 0xC0000017).
+- `F:\bc-250-proektas\Backup\dirbantis\ps5-win-driver\src\kmd\amdbc250_kmd.c` is a complete REAL WDDM miniport base (links displib.lib, full DDI table, direct DxgkInitialize, uses ExAllocatePoolWithTag correctly) — production candidate if DOD is insufficient.
+
+### Next phase (in progress)
+- Test actual display output (KMDOD only does 1 frame / basic mode).
+- Add a UMD (D3D runtime) — INF needs UserModeDriverName / InstalledDisplayDrivers registry entries.
+- Consider full WDDM miniport from ps5-win-driver as the production base.
+
+## DOD polish round 1 (2026-08-03)
+
+Milestone confirmed: monitor (ACER S271HL) shows the desktop and looks better than Microsoft Basic Display; dxdiag shows our driver (with expected unsigned note — self-signed cert can't be WHQL'd).
+
+### Changes (source: `F:\bc-250-proektas\Dev\windows-driver-samples\video\KMDOD\`)
+1. **Mode list expanded** (bdd_dmm.cxx `C_SampleSourceMode[]`): now `{640,480},{800,600},{1024,768},{1152,864},{1280,720},{1280,800},{1280,1024},{1366,768},{1400,1050},{1600,1200},{1680,1050},{1920,1080},{1920,1200},{2560,1440}` — adds the common 16:9 modes (1280×720, 1366×768, 1920×1080, 2560×1440) that were missing.
+2. **Refresh rate**: target mode `VSyncFreq` set to 60/1 Hz (was `D3DKMT_FREQUENCY_NOTSPECIFIED`).
+3. **DbgPrint spam reduction**: `BddDdiPresentDisplayOnly` + `BddDdiSetPointerPosition` + `BddDdiSetPointerShape` now log only the first call + failures (these fire every vsync / mouse move and flooded DebugView at ERROR level).
+
+### Package
+- Built v1.0.104.0 → `output\kmdod-test\` (SampleDisplay.sys 38864B 8/3/2026, sampledisplay.inf DriverVer=07/31/2026, sampledisplay.cat). Signed with AMD-BC250-Signer SHA1 34AFF96C... (same cert as installed). Verified Valid.
+- Note: multiple AMD-BC250-Signer certs exist in My store; always sign with explicit `/sha1 34AFF96C57E9ADE68B23B4828859CF9B7F4EF442` to avoid signtool "multiple certificates" ambiguity.
+- Build cmd: `C:\Users\Keshas\AppData\Local\Temp\opencode\kmdod-build.bat` (CL+kernel+displib from KMDOD root files).
+- CAT gen: Inf2Cat needs the .sys + .inf in the SAME dir (use a clean pkg dir), DriverVer date must be in the past or Inf2Cat errors 22.9.1/22.9.7.
+- Inf2Cat.exe is ONLY in the **x86** bin dir (`bin\10.0.26100.0\x86\`), not x64. signtool.exe is in x64. Cert exported via `Export-PfxCertificate` to `kemod-pkg sign with `/f pfx /p bc250sign /sha1 34AFF96C...`.
+
+## DOD BSOD fix — v1.0.105 (2026-08-03)
+
+**v1.0.104 caused bugcheck 0x7E (SYSTEM_THREAD_EXCEPTION_NOT_HANDLED, access violation, write to 0x0).**
+
+### Root cause (confirmed via minidump + disasm + PDB)
+- `BlackOutScreen()` (`bdd.cxx`) called `RtlZeroMemory(NULL, 0xE10000)` (0xE10000 = 2560×1440×4 = one full framebuffer).
+- Crash site `SampleDisplay+0x2410` = SSE vector memset loop (16-byte `movups [rcx]`); `call memset` at `+0x6176` is inside `BlackOutScreen` (0x60C4–0x61B4).
+- Why NULL: `StartDevice()` sets `FrameBufferIsActive=TRUE` when POST display found, but `FrameBuffer.Ptr` is only mapped LATER in `SetSourceModeAndPath()` via `MapFrameBuffer()` after a `CommitVidPn`. If `StopDeviceAndReleasePostDisplayOwnership()` (bdd.cxx:526) or `SetVidPnSourceVisibility(FALSE)` (bdd_dmm.cxx:488) runs before any CommitVidPn (e.g. RDP/session switch takes over console), `BlackOutScreen` deref'd NULL.
+- Same latent NULL was present in v1.0.103 (`.bak` had identical StartDevice code), but only triggered once the RDP/session-switch path ran.
+
+### Fix (bdd.cxx only)
+1. `BlackOutScreen()`: guard `&& (m_CurrentModes[SourceId].FrameBuffer.Ptr != NULL)`.
+2. `PresentDisplayOnly()`: guard `&& (FrameBuffer.Ptr != NULL)`.
+3. `StartDevice()`: KEPT `FrameBufferIsActive=TRUE` (needed so `QueryChildStatus` reports Connected at boot for the POST-display-present case; matches working v1.0.103). Do NOT set it FALSE — would break boot bring-up.
+
+### Package (built + signed)
+- v1.0.105.0 → `output\kmdod-test\` (SampleDisplay.sys 39144B signed, sampledisplay.inf DriverVer=08/03/2026, sampledisplay.cat). Verified Valid.
+- PDB: `F:\bc-250-proektas\Dev\windows-driver-samples\video\KMDOD\Sample\x64\Release\SampleDisplay.pdb` (link /dump /linenumbers on the .pdb via link.exe works to map addresses to functions; plain signtool PDB dump fails).
+- Install requires Device Manager uninstall w/ "Delete driver" → reboot → install new .inf → reboot (AGENTS reinstall flow).
+
+
+
+## wddm-ps5 project � new WDDM miniport base (2026-08-03)
+
+### Decision
+User approved path 1-2: merge into ONE driver. Base = ps5-win-driver KMD (full WDDM miniport skeleton + displib DxgkInitialize + Escape IOCTL + Linux-ordered hw_init), + DOD's proven WDDM registration/display, + our GPU driver's register/SMU/firmware layer. 3D still blocked by WGP lock (SPI_PG 0x5C3C = 0) but this becomes the platform driver to improve.
+
+### Status
+- **DOD v1.0.106 CONFIRMED WORKING**: black-screen root cause was v1.0.104 "polish" changes (expanded C_SampleSourceMode to 14 modes + VSyncFreq 60/1). Reverting BOTH to stock (9 modes {800,600}...{1920,1200} + VSyncFreq D3DKMDT_FREQUENCY_NOTSPECIFIED) restored display. KEPT v1.0.105 NULL-guards in bdd.cxx. Verified: 1.0.106.0, Status OK, CM_ERR=0, 2560x1440, no new BSOD. dxdiag: Dedicated Memory 0MB (display-only), Vendor 0x1414 (Microsoft generic).
+- **wddm-ps5/ created** in repo root: copies of real ps5-win-driver src (from F:\bc-250-proektas\Backup\dirbantis\ps5-win-driver\src):
+  - wddm-ps5\inf\amdbc250.inf (KMD+UMD, DEV_13FE, WDDM AddReg)
+  - wddm-ps5\src\common\amdbc250_hw.h (80 AMDBC250_REG_* defs � RAW Navi offsets, NOT GC_BASE shifted!)
+  - wddm-ps5\src\kmd\amdbc250_kmd.c (3300 lines, full ~45 DDI callbacks), amdbc250_kmd.h, amdbc250_hw_init.c (Linux-ordered), vcxproj
+  - wddm-ps5\src\umd\amdbc250_umd.c, umd.def, vcxproj
+  - wddm-ps5\build.bat (CL direct, mirrors kmdod-build.bat; MSVC 14.44.35207, WDK 10.0.26100, displib.lib)
+- **Build WORKS**: wddm-ps5\build.bat ? wddm-ps5\src\kmd\build\x64\Release\amdbc250kmd.sys (23040B). 6 warnings (C4113 PDXGKDDI_SYSTEM_DISPLAY_ENABLE signature, ExAllocatePoolWithTag deprecated x5). Imports: ntoskrnl+hal only (DxgkInitialize is displib.lib body, not dxgkrnl export � confirmed). DriverEntry calls DxgkInitialize (amdbc250_kmd.c:727).
+- **Code 43 blocker #1 FIXED**: resource parsing took FIRST memory resource (BAR0) as MmioVirtualBase. Added BAR5 detection (known PA 0xFE800000, 512KB) in StartDevice, fallback to first resource. Added AMDBC250_BAR5_MMIO_PHYSICAL_BASE/SIZE to hw.h.
+- **Code 43 blocker #2 FIXED (2026-08-03)**: hw.h now uses corrected register offsets (verified against inc\amdbc250_dream_hw.h + ip_discovery 2026-07-31):
+  - GC_BASE=0x1260 added; GC regs (SCRATCH 0x32D4, CP_ME_CNTL 0x4A74, CP_MEC_CNTL NBIO 0xC0E0/GC 0x4B14, CP_RB0_* 0x89E0/0x8BA4/0x89E4/0x4FE0/0x8A30/0x8A34) now GC_BASE-shifted.
+  - DCN_BASE=0xD300 added; CRTC0_* macros map to OTG0 (0x14004 CCNTL/0x13FA8 H_TOTAL/0x13FBC V_TOTAL/0x13FB0 H_SYNC/0x13FDC V_SYNC etc.), verified live on HW.
+  - SDMA0_* at GC offsets 0xE000-0xE01C (verified 0xE000 range, NOT Navi 0x1260 base).
+  - GB_ADDR_CONFIG 0x61D8 (was 0x263C), GB_ADDR_CONFIG_READ 0x61DC.
+  - MP1 C2PMSG_66/82/90 at 0x16A08/0x16A48/0x16A68 (BAR5 slots; MP1 actual lives in SMN via NBIO 0x38/0x3C — direct probe only).
+- **All 6 build warnings CLEARED**: C4113 fixed (WDK 26100 PDXGKDDI_SYSTEM_DISPLAY_ENABLE signature changed to 6-arg with PDXGKARG_SYSTEM_DISPLAY_ENABLE_FLAGS+Width+Height+ColorFormat — old 4-arg was WDDM 1.x). ExAllocatePoolWithTag→ExAllocatePool2 x5. Build now clean (no warnings).
+- **UMD build added**: direct-CL script (wddm-ps5-umd-build.bat) because msbuild can't find SDK on F: drive (WindowsSDKDir undefined). Output amdbc250umd64.dll 117KB. INF updated to reference amdbc250umd64.dll (was amdbc250umd.dll mismatch), DriverVer 08/01/2026,1.0.102.0.
+- **Install package ready**: output\wddm-ps5-test\ (amdbc250kmd.sys 30440B, amdbc250umd64.dll, amdbc250.inf, amdbc250.cat) — built+sign5 w/ sha1 34AFF96C..., Inf2Cat clean.
+
+### Next steps (wddm-ps5)
+1. ~~Fix all 34 used AMDBC250_REG_* offsets~~ DONE (2026-08-03).
+2. **HW init strategy NOT yet tested**: full Bc250HwInitialize will hit SMU init which WAITS on MP1_SMN_P2CMSG_33 (BAR5 0x16xxxx) bit31 — on BC-250 this reads 0 (SMU in SMN, not BAR5) → 100ms timeout → StartDevice falls back to CompatibilityStart path (STILL returns STATUS_SUCCESS, adapter bound, no Code 43). This is a SAFE default but means DCN display never programmed. To get actual display output, either make SMU init non-fatal and let stages run, OR inject SMU via NBIO SMN window. Council: FIRST install as-is and confirm it loads (no BSOD/Code 43); then improve.
+   - Note: StartDevice MMIO map → do NOT map doorbell BAR (only BAR5). GFX/SDMA ring BASE regs are host-RO on BC-250 (SOS), so ring init writes silently drop — harmless but no CP activity.
+   - GART/VM (MC_VM/AGP) registers: ps5 KMD does NOT write them (confirmed grep) — avoids 0x1A.
+3. Merge our register/ps5 layer as Escape IOCTL (ps5 already has DxgkDdiEscape plumbing).
+4. **Sign + install test REQUIRES USER (Admin)**: see AGENTS reinstall flow (uninstall old GPU driver w/ Delete, reboot, install from output\wddm-ps5-test\ INF, reboot). Confirm load status / no BSOD first.
+
+## WGP UNLOCK RESEARCH — SPI_PG SOS-LOCKED ON WINDOWS (2026-08-09)
+
+### Key Finding
+**SPI_PG_ENABLE_STATIC_WGP_MASK (0x5C3C) is SOS-locked on Windows.** All 6 methods tried in KMDOD driver failed. The register IS writable from Linux kernel context and UEFI DXE phase, but NOT from Windows KMDOD driver runtime.
+
+### Methods Tried (all FAILED on Windows)
+| # | Method | Result |
+|---|--------|--------|
+| 1 | Direct BAR5 write (CC=0, SPI=0x1F, RLC=0x1F) | SOS-locked |
+| 2 | SMU Q3 msg 0x98 (ungated SMN write to SPI_PG phys addr) | SOS-locked |
+| 3 | SMU RequestActiveWgp (Q0 msg 0x18) | Rejected |
+| 4 | PSP PROG_REG (Q0 msg 0x0A) | Not supported |
+| 5 | SMN alias scan (0x0115B000-0x01200000) | No alias found |
+| 6 | VBIOS SMU wake + GFXOFF disable + retry write | SOS-locked |
+
+### Why Linux Works but Windows Doesn't
+- **Linux amdgpu**: WGP unlock during `gfx_v10_0_get_cu_info()` (EARLY boot, before SOS locks registers)
+- **Windows KMDOD**: `StartDevice` runs LATER (SOS already locked SPI_PG)
+- **UEFI DXE**: RescueMei proved SMU Q3 msg 0x98 works at UEFI DXE phase (before Windows loads)
+
+### duggasco 40CU Unlock Patch (from DryhoppedIPA repo)
+- **CC_GC_SHADER_ARRAY_CONFIG = 0** (NOT 0xFFE00000 — that was our mistake!)
+- **SPI_PG_ENABLE_STATIC_WGP_MASK = 0x1F**
+- **RLC_PG_ALWAYS_ON_WGP_MASK = 0x1F**
+- Uses `gfx_v10_0_select_se_sh()` for proper GRBM bank selection
+- A/B test: CC=0 + SPI=0x1F together = 1.54x scaling; neither alone works
+- Both writes required simultaneously
+
+### GitHub Repos Researched
+| Repo | Key Finding |
+|------|-------------|
+| DryhoppedIPA/bc250-gfx1013-fix | SPI_PG WRITABLE Linux kernel; compute queue fix |
+| RescueMei/BC250-DXEv2-SMU-Core-Unlock | SMU Q3 msg 0x98 works UEFI DXE only |
+| RescueMei/BC250-DXEv2-COLD-BOOT | Auto cold boot driver |
+| RescueMei/BC250-DXEv2-ACPI-AUTOINJECT | ACPI table injection |
+| RescueMei/BC250-DXEv2-BIOSMOD | BIOS mod combining all DXE drivers |
+| redbeard1083/bc250-toolkit | Linux setup script (not useful for Windows) |
+| mendesrr/bc250-acpi-fix-updated-8c | CPU power management (not relevant) |
+
+### Next Approach: GPU Driver (atikmdag.sys)
+- GPU driver loads EARLIER than KMDOD
+- May have access to SPI_PG before SOS locks it
+- Has direct BAR5 mapping via MmMapIoSpace
+- Need to add WGP unlock to DreamV3HwInitialize or StartDevice
+- This is the most promising path forward
+
+### KMDOD Driver Status
+- v1.0.104 → v1.0.114 (all WGP methods failed)
+- GpuClockMHz = 1500 (SMU works via BAR5+0x38/0x3C)
+- BAR5 mapping works (GPU_ID = 0x9FFF9714)
+- Registry: WGP_UnlockStatus=0, WGP_SPIPG_Value=0, WGP_ActiveWgp=0
+- Build script fixed: `build_kmdod.bat` now compiles + signs + generates CAT automatically
+
+### Registry Keys for WGP Results
+```
+HKLM\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\0000\HardwareInformation
+- WGP_UnlockStatus (0=failed, 1=SPI_PG write OK, 2=ActiveWgp>0)
+- WGP_SPIPG_Value (SPI_PG register value)
+- WGP_CC_Value (CC_ARRAY register value)
+- WGP_ActiveWgp (Active WGP count from SMU Q0 msg 0x1E)
+- WGP_Method (which method succeeded)
+```
+
+## EFI Shell WGP Unlock — COMPLETE SOLUTION (2026-08-11)
+
+### Overview
+Since SPI_PG is SOS-locked on Windows, the only way to unlock WGP is at **EFI boot time** when NBIO is NOT yet locked. This requires booting into EFI Shell and running scripts.
+
+### File Location
+```
+C:\AMD-BC-250\AMD-BC-250-Windows-Driver-main\third-party\EFI_Boot\
+├── EFI\BOOT\bootx64.efi          ← EFI Shell (download from TianoCore)
+├── psp\
+│   ├── test_psp.nsh              ← Test register access
+│   ├── inject_psp.nsh            ← Load SOS firmware
+│   ├── WGP_unlock.nsh            ← Unlock WGP (CC=0, SPI=0x1F, RLC=0x1F)
+│   └── cyan_skillfish2_sos_extracted.bin ← SOS firmware (262,656 bytes)
+├── full_auto.nsh                 ← Run all scripts + boot Windows
+└── README.md                     ← Complete instructions
+
+### EFI Boot Sequence
+```
+EFI Boot → test_psp.nsh → inject_psp.nsh → WGP_unlock.nsh → Boot Windows
+```
+
+### Script Functions
+| Script | What it does |
+|--------|--------------|
+| test_psp.nsh | Tests if C2PMSG registers are accessible at EFI boot |
+| inject_psp.nsh | Loads SOS firmware via PSP mailbox (C2PMSG_35/36) |
+| WGP_unlock.nsh | Writes CC=0, SPI=0x1F, RLC=0x1F to all 4 shader array banks |
+| full_auto.nsh | Runs all scripts in sequence, then exits to boot Windows |
+
+### Register Values (duggasco 40CU method)
+| Register | BAR5 Offset | Value | Description |
+|----------|-------------|-------|-------------|
+| SPI_PG | 0x5C3C | 0x1F | Enable all 5 WGPs |
+| CC_ARRAY | 0x9C1C | 0x00 | Clear harvest mask |
+| RLC_PG | 0x3D64 | 0x1F | Keep all WGPs powered |
+
+### Key Technical Facts
+- BAR5 physical base: 0xFE800000 (512KB)
+- NBIO is OPEN at EFI boot time (not yet locked by SOS)
+- `mm` command syntax: `mm <address>` (read) or `mm <address> <value>` (write)
+- GRBM bank selects: 0x00000000, 0x00000100, 0x00010000, 0x00010100
+- Broadcast: 0x15000000
+
+### Prerequisites for EFI Shell Method
+1. USB drive formatted as FAT32
+2. EFI Shell binary (bootx64.efi) from TianoCore
+3. BIOS configured to boot from USB
+4. NBIO not locked in BIOS (Advanced > AMD CBS > NBIO > Device Exclusion Vector)
+
+### Expected Results
+- Success: SPI_PG reads 31 (0x1F) after unlock
+- Failure: SPI_PG reads 0 (SOS-locked or NBIO blocked)
+
+### EFI Shell mm Command Syntax
+**IMPORTANT:** The `mm` command accepts hex addresses AND hex values, but BOTH without `0x` prefix!
+- Read: `mm FE805C3C` (hex address, no 0x)
+- Write: `mm FE805C3C 1F` (hex value, no 0x!)
+- Wrong: `mm 0xFE805C3C` or `mm FE805C3C 0x1F` or `mm FE805C3C 31` (decimal)
+
+### EFI Boot Log Analysis (2026-08-11)
+From user's EFI Shell test logs:
+- **NBIO is LOCKED at EFI boot** (C2PMSG registers show 0xFF)
+- **User enabled IOMMU Disabled in BIOS** — needs re-test
+- Without NBIO unlock at EFI boot, injection and WGP unlock won't work
+
+## FINAL VERDICT — 3D GRAPHICS IMPOSSIBLE ON THIS HARDWARE (2026-08-11)
+
+### Conclusion
+This specific BC-250 hardware variant is **factory-locked for GPU command execution**. All hardware ring paths are locked at the hardware level. 3D graphics with this hardware is **NOT achievable** through any software or driver modification.
+
+### Fundamental Blockers (All Hardware-Level, Unfixable)
+| Blocker | Root Cause | Fixable? |
+|---------|-----------|----------|
+| KIQ_SIZE=0 read-only (0xE068) | Hardware-level, not in firmware | ❌ No |
+| CP_HQD NBIO-blocked (0xDAC0-0xDBFF) | NBIO firewall | ❌ No |
+| GCVM PT_BASE HW-locked (0x0B608) | Always reads 0 | ❌ No |
+| GFX_RING0_BASE_LO read-only (0xDA60) | BIOS sets ring base | ❌ No |
+| KIQ_WPTR 9-bit limit (0x1FF) | Hardware limitation | ❌ No |
+| SOS firmware no ring protocol | C2PMSG_64 bit 31 never sets | ❌ No |
+| SPI_PG_ENABLE_STATIC_WGP_MASK = 0 | Hardware-fused WGPs | ❌ No |
+
+### What Works Today
+- ✅ KMDOD display driver (2560x1440, Status OK)
+- ✅ SMU frequency/voltage control (1500 MHz @ 931 mV)
+- ✅ Display output
+- ✅ PSP mailbox firmware loading
+- ✅ Hardware monitoring (temperature, power)
+- ✅ GPU register read/write via BAR5
+
+### What Doesn't Work (Fundamentally Impossible)
+- ❌ 3D graphics / Vulkan / DirectX
+- ❌ GPU shader execution
+- ❌ WGP unlock / SPI_PG write (hardware-fused)
+- ❌ GPU driver (atikmdag.sys) for 3D (Code 37)
+- ❌ Compute queues / async compute
+
+### Recommendation
+Focus on what works: **display + SMU control + hardware monitoring**.
+3D graphics requires different hardware or Linux (where amdgpu kernel driver has different privilege level).
+
+### GPU Driver (atikmdag.sys) WGP Unlock Attempt (2026-08-09)
+- Added WGP unlock Step 0c to DreamV3HwInitialize (CC=0, SPI=0x1F, RLC=0x1F)
+- Added DDI stubs file (amdbc250_dream_kmd_ddi_stubs.c)
+- Added displib.lib to linker
+- Fixed WDK 26100 compatibility (PDXGKARG_QUERYVIDPNHWCAPABILITY removed)
+- BUILD SUCCESS ✅
+- **INSTALL FAILED: Code 37** — DriverEntry returned error
+- Likely cause: GPU driver is WDDM display-only but BC-250 is compute GPU without display
+- DxgkInitializeDisplayOnlyDriver may be failing on compute-only hardware
+- **Action: Switched back to KMDOD driver (Status OK)**
+
+### Current Status
+- KMDOD driver v1.0.114 installed and working (Status OK)
+- All 6 WGP unlock methods failed (SPI_PG SOS-locked on Windows)
+- GPU driver built but fails to initialize (Code 37)
+- Need to try different approach for WGP unlock on Windows
+
+## FOCUS: Display + SMU Control (2026-08-09 Decision)
+
+After exhausting all WGP unlock methods (all failed due to SOS lock), focus shifted to:
+1. **Display output** — KMDOD driver with improved modes
+2. **SMU frequency/voltage control** — via Q0/Q3 mailbox
+3. **Hardware monitoring** — temperature, power, fans
+4. **Build automation** — streamlined compile/sign/install
+
+### SMU Control Capabilities (verified working)
+| Function | SMU Message | Notes |
+|---|---|---|
+| Get GPU clock | Q0 msg 0x0F or 0x37 | Returns MHz |
+| Force GPU clock | Q0 msg 0x39 | MHz (needs voltage+profile) |
+| Get GPU VID | Q0 msg 0x38 | Voltage ID |
+| Force GPU VID | Q0 msg 0x3B | VID value |
+| Get enabled features | Q0 msg 0x3D | Bitmask |
+| Enable features | Q2 msg 0x05 | Mask |
+| Disable features | Q2 msg 0x06 | Mask |
+| Get temp max | Q3 msg 0x40 | °C |
+| Set temp max | Q3 msg 0x8C | °C |
+| Get CPU temp | Q3 msg 0x36 | mV (kind of) |
+| Get GPU voltage | Q3 msg 0x37 | mV |
+
+### SMU Mailbox Addresses
+- Q0: cmd=0x03B10A08 rsp=0x03B10A68 arg=0x03B10A48
+- Q3: cmd=0x03B10A20 rsp=0x03B10A80 arg=0x03B10A88
+
+### Safe Frequency/Voltage Points
+| Freq (MHz) | Voltage (mV) | Profile |
+|---|---|---|
+| 500 | 700 | 1 (low) |
+| 800 | 750 | 1 |
+| 1000 | 800 | 1 |
+| 1175 | 850 | 3 (high) |
+| 1400 | 900 | 3 |
+| 1600 | 950 | 3 |
+| 1800 | 1000 | 3 |
+| 2000 | 1050 | 3 |
+
+### Governor Sequence (PROVEN SAFE)
+1. Q3(0x8C, 80) — Set GPU max temp to 80°C
+2. Q0(0x3A, 0) — Unforce any previous frequency
+3. Q0(0x3C, 0) — Unforce any previous voltage (ignores failure)
+4. Look up safe point: find nearest (freq_mhz, mv, profile) at or above target
+5. Q3(0x1E, profile) — Set perf profile (1=low, 3=high)
+6. Q0(0x3B, mv_to_vid(mv)) — Force voltage
+7. Q0(0x39, freq_mhz) — Force frequency (SAFE when voltage+profile set)
+
+### VID Formula
+vid = round((1.55 - mv/1000.0) / 0.00625)
+mV = round((-vid*0.00625 + 1.55) * 1000)

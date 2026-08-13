@@ -94,6 +94,47 @@ AMD BC-250 Windows driver project by Keshas. Goal: fully working GPU driver for 
 
 ---
 
+## External Research & Verified Findings
+
+### BUILD-FIX-GUIDE.md (local, 2026-05-31)
+- **AllocVidMem BSOD fix**: Complete MDL-based reimplementation with IRQL/size validation, SEH protection, allocation tracking list with spinlock, cleanup on unload. Directly applicable to our 0x3B BSOD.
+- **Display Flip handler**: HUBPREQ-based (0x1C00+ range) with full parameter validation.
+- **Hardware init completion**: `HwInitializeGpu`, `HwInitializeRingBuffers`, `HwInitializeDisplayEngine`, `HwShutdown`.
+
+### GabriWar/bc250-rocm-working (GitHub, measured 2026-08-04 to 2026-08-08)
+
+#### 1. WGP registers come pre-unlocked from VBIOS on this specific board (doc 16)
+- **SPI_PG_ENABLE_STATIC_WGP_MASK** = `0x1F` at boot (after `constants_init`, after `rlc_resume`, after `cp_resume`)
+- **RLC_PG_ALWAYS_ON_WGP_MASK** = `0x1F` at boot
+- **CC_GC_SHADER_ARRAY_CONFIG** = `0xFFE00000` (harvest mask, read-only shadow from fuse)
+- **Cold boot confirmed**: values come from POST/VBIOS, not persistence from prior boot
+- **Our driver reads 0 for SPI_PG** — likely wrong GRBM_GFX_INDEX broadcast value (see point 4)
+
+#### 2. SDMA firmware is broken on BC-250 (doc 29)
+- `cyan_skillfish2_sdma.bin` (version `0x34`) **never drives user queues** — both SDMA0 and SDMA1 dead
+- `navi12_sdma.bin` (version `0x2c`) **works correctly** on BC-250 silicon (+20% H2D bandwidth)
+- Firmware headers structurally identical (SDMA 5.0 IP, same ucode size/offset)
+- **No signature checking** on BC-250 — other chips' firmware loads without rejection
+- Kernel ring (RLC queues) works, user queues dead with stock firmware
+
+#### 3. Compute TLB invalidation never works via MMIO (patch/docs 21-24)
+- `gmc_v10_0_flush_gpu_tlb_pasid()` scans `mmATC_VMID*_PASID_MAPPING` which gfx10 HWS never writes
+- KIQ route and direct register route both stall translation unit and reset GPU
+- **Only invalidation that works**: runlist rebuild via `execute_queues_cpsch()`
+- Windows cannot replicate this — requires Linux kernel HWS scheduling context
+
+#### 4. GRBM_GFX_INDEX broadcast value correction (from Linux gfx10 source)
+- **Correct broadcast for gfx10**: `0x15000000` (INST_BCAST_WR bit 24 | SH_BCAST_WR bit 26 | SE_BCAST_WR bit 28)
+- **Our hw.h documents `0xE0000000`** — matches older soc15 layout, NOT gfx10
+- Per-bank selects: SH=`1<<8`, SE=`1<<16` (matches Linux `gfx_v9_0_select_se_sh`)
+- **Impact**: SPI_PG read may start returning `0x1F` after GRBM fix — confirms VBIOS unlock state
+
+#### 5. WDK 26100 DDI signature change
+- `PDXGKDDI_SYSTEM_DISPLAY_ENABLE` changed from 4-arg to 6-arg (adds `PDXGKARG_SYSTEM_DISPLAY_ENABLE_FLAGS` + `Width` + `Height` + `ColorFormat`)
+- Our wddm-ps5 driver had C4113 warning, now fixed
+
+---
+
 ## Mistakes & Lessons Learned
 
 ### Critical Mistakes

@@ -36,6 +36,8 @@ Environment:
 #define FW_TYPE_CE      3
 #define FW_TYPE_MEC     4
 #define FW_TYPE_RLC     8
+#define FW_TYPE_SDMA0   9
+#define FW_TYPE_SDMA1   10
 
 /* Maximum firmware size */
 #define MAX_FW_SIZE     (4 * 1024 * 1024)
@@ -164,9 +166,11 @@ static const FW_LOAD_ENTRY g_FwLoadTable[] = {
     { FW_TYPE_PFP, L"\\SystemRoot\\System32\\drivers\\bc-250\\cyan_skillfish2_pfp.bin" },
     { FW_TYPE_CE,  L"\\SystemRoot\\System32\\drivers\\bc-250\\cyan_skillfish2_ce.bin" },
     { FW_TYPE_MEC, L"\\SystemRoot\\System32\\drivers\\bc-250\\cyan_skillfish2_mec.bin" },
+    { FW_TYPE_SDMA0, L"\\SystemRoot\\System32\\drivers\\bc-250\\navi12_sdma.bin" },
+    { FW_TYPE_SDMA1, L"\\SystemRoot\\System32\\drivers\\bc-250\\navi12_sdma1.bin" },
 };
 
-static NTSTATUS
+NTSTATUS
 DreamV3LoadFirmwareFromFile(
     _In_ PCWSTR FileName,
     _Out_ PUCHAR *OutData,

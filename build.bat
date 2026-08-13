@@ -11,6 +11,11 @@ set "CERT_NAME=AMD-BC250-Signer"
 
 rem --- Detect Visual Studio on D:, E:, or C: drive ---
 set "VSWHERE="
+if exist "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat" (
+    set "VSWHERE=C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat"
+    echo Found Visual Studio 2022 BuildTools on C: drive
+    goto :SetupEnv
+)
 if exist "D:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Auxiliary\Build\vcvars64.bat" (
     set "VSWHERE=D:\Program Files\Microsoft Visual Studio\2022\Professional\VC\Auxiliary\Build\vcvars64.bat"
     echo Found Visual Studio 2022 Professional on D: drive
@@ -63,10 +68,10 @@ if exist "D:\Program Files (x86)\Windows Kits\10\Include" (
     set "WDK_ROOT=D:\Program Files (x86)\Windows Kits\10"
 ) else if exist "E:\Program Files (x86)\Windows Kits\10\Include" (
     set "WDK_ROOT=E:\Program Files (x86)\Windows Kits\10"
-) else if exist "C:\Program Files (x86)\Windows Kits\10\Include" (
-    set "WDK_ROOT=C:\Program Files (x86)\Windows Kits\10"
 ) else if exist "F:\Program Files (x86)\Windows Kits\10\Include" (
     set "WDK_ROOT=F:\Program Files (x86)\Windows Kits\10"
+) else if exist "C:\Program Files (x86)\Windows Kits\10\Include" (
+    set "WDK_ROOT=C:\Program Files (x86)\Windows Kits\10"
 ) else (
     echo ERROR: Windows Kit not found
     exit /b 1
@@ -140,10 +145,12 @@ cl.exe /c /kernel /W3 /Zi /Od /DAMD64 /D_AMD64_ /DAMDBC250_DREAM_V3 ^
   "%SRC_DIR%\kmd\amdbc250_dream_vm.c" ^
   "%SRC_DIR%\kmd\amdbc250_psp.c" ^
   "%SRC_DIR%\kmd\amdbc250_dream_fw_load.c" ^
+  "%SRC_DIR%\kmd\amdbc250_dream_psp_fw_load.c" ^
   "%SRC_DIR%\kmd\amdbc250_dream_golden.c" ^
-  "%SRC_DIR%\kmd\amdbc250_dream_hdp.c" ^
-  "%SRC_DIR%\kmd\amdbc250_dream_rlc.c" ^
-  "%SRC_DIR%\kmd\amdbc250_dream_vbios.c"
+   "%SRC_DIR%\kmd\amdbc250_dream_hdp.c" ^
+   "%SRC_DIR%\kmd\amdbc250_dream_rlc.c" ^
+   "%SRC_DIR%\kmd\amdbc250_dream_vbios.c" ^
+   "%SRC_DIR%\kmd\amdbc250_dream_kmd_ddi_stubs.c"
 
 if errorlevel 1 (
     echo KMD compilation FAILED!
@@ -154,8 +161,8 @@ if errorlevel 1 (
 echo Linking KMD...
 link.exe /DRIVER /SUBSYSTEM:NATIVE /ENTRY:DriverEntry ^
   /OUT:"%OUTPUT_DIR%\atikmdag.sys" ^
-  amdbc250_dream_kmd.obj amdbc250_dream_hw_init.obj amdbc250_dream_power.obj amdbc250_dream_vm.obj amdbc250_psp.obj amdbc250_dream_fw_load.obj amdbc250_dream_golden.obj amdbc250_dream_hdp.obj amdbc250_dream_rlc.obj amdbc250_dream_vbios.obj ^
-  ntoskrnl.lib wdm.lib win32k.lib ntstrsafe.lib BufferOverflowK.lib hal.lib ^
+  amdbc250_dream_kmd.obj amdbc250_dream_hw_init.obj amdbc250_dream_power.obj amdbc250_dream_vm.obj amdbc250_psp.obj amdbc250_dream_fw_load.obj amdbc250_dream_psp_fw_load.obj amdbc250_dream_golden.obj amdbc250_dream_hdp.obj amdbc250_dream_rlc.obj amdbc250_dream_vbios.obj amdbc250_dream_kmd_ddi_stubs.obj ^
+  ntoskrnl.lib wdm.lib win32k.lib ntstrsafe.lib BufferOverflowK.lib hal.lib displib.lib ^
   /LIBPATH:"%WDK_ROOT%\Lib\%WDK_VERSION%\km\x64"
 
 if errorlevel 1 (
@@ -236,6 +243,7 @@ copy "%PROJECT_DIR%\inf\amdbc250_dream.inf" "%OUTPUT_DIR%\" >nul
 echo Copying firmware files...
 if not exist "%OUTPUT_DIR%\firmware" mkdir "%OUTPUT_DIR%\firmware"
 copy "%PROJECT_DIR%\firmware\cyan_skillfish2_*.bin" "%OUTPUT_DIR%\firmware\" >nul 2>&1
+copy "%PROJECT_DIR%\firmware\navi12_sdma*.bin" "%OUTPUT_DIR%\firmware\" >nul 2>&1
 echo   Firmware files copied
 
 echo.

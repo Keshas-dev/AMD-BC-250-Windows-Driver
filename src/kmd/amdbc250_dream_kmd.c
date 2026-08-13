@@ -1,6 +1,6 @@
-/*++
+﻿/*++
 
-Copyright (c) 2026 AMD BC-250 "Dream Drivers" Project � Version 3.0
+Copyright (c) 2026 AMD BC-250 "Dream Drivers" Project ∩┐╜ Version 3.0
 
 Module Name:
     amdbc250_dream_kmd.c
@@ -9,7 +9,7 @@ Abstract:
     Kernel-Mode Display Miniport Driver (KMD) for AMD BC-250 APU.
     
     ========================================
-    VERSION 3.0 � COMPLETE REWRITE
+    VERSION 3.0 ∩┐╜ COMPLETE REWRITE
     ========================================
     
     ARCHITECTURE: RDNA2 / Cyan Skillfish (GFX1013)
@@ -37,11 +37,11 @@ static PDRIVER_OBJECT g_DriverObject = NULL;
 
 static PDEVICE_OBJECT g_ControlDevice = NULL;
 
-/* TRUE if DxgkInitialize succeeded � dxgkrnl owns the DriverObject */
+/* TRUE if DxgkInitialize succeeded ∩┐╜ dxgkrnl owns the DriverObject */
 static BOOLEAN g_DxgkInitialized = FALSE;
 
 /* PCI device extension (from DxgkDdiAddDevice) - used by IOCTL handler */
-static PDREAM_V3_DEVICE_EXTENSION g_PciDevExt = NULL;
+PDREAM_V3_DEVICE_EXTENSION g_PciDevExt = NULL;
 
 /* Shared memory communication with Vulkan ICD */
 static PVOID g_SharedBuffer = NULL;
@@ -55,7 +55,7 @@ static DRIVER_INITIALIZATION_DATA g_InitData = {0};
 static UNICODE_STRING g_DeviceName;
 static UNICODE_STRING g_SymlinkName;
 
-/* MDL tracking table � prevents memory leak in ALLOC_VIDMEM IOCTL */
+/* MDL tracking table ∩┐╜ prevents memory leak in ALLOC_VIDMEM IOCTL */
 typedef struct _DREAM_V3_MDL_ENTRY {
     PVOID Va;
     PMDL Mdl;
@@ -67,6 +67,88 @@ static KSPIN_LOCK g_MdlTableLock;
 
 /* Forward declarations */
 NTSTATUS DreamV3DeviceControl(PDEVICE_OBJECT, PIRP);
+
+/* ===== ALLOC_VIDMEM HELPER (MDL-based, BUILD-FIX-GUIDE.md) ===== */
+static NTSTATUS DreamV3AllocVidMem(
+    _In_ SIZE_T RequestedSize,
+    _Out_ PULONG64 OutPa,
+    _Out_ PULONG64 OutVa
+    )
+{
+    NTSTATUS status = STATUS_INSUFFICIENT_RESOURCES;
+    SIZE_T allocSize = (SIZE_T)RequestedSize;
+    allocSize = (allocSize + 0xFFF) & ~0xFFFULL;
+    if (allocSize < 4096) allocSize = 4096;
+    if (allocSize > 64 * 1024 * 1024) allocSize = 64 * 1024 * 1024;
+
+    if (KeGetCurrentIrql() > APC_LEVEL) {
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
+            "AMDBC250: AllocVidMem invalid IRQL %d (max: %d)\n",
+            KeGetCurrentIrql(), APC_LEVEL));
+        return STATUS_INVALID_DEVICE_STATE;
+    }
+
+    PHYSICAL_ADDRESS low = {0}, high, skip = {0};
+    high.QuadPart = 0x3FFFFFFFFFULL;
+
+    PMDL mdl = MmAllocatePagesForMdlEx(low, high, skip, allocSize, MmCached, 0);
+    if (mdl == NULL) {
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
+            "AMDBC250: AllocVidMem MmAllocatePagesForMdlEx failed for %llu bytes\n",
+            (ULONG64)allocSize));
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+
+    __try {
+        PVOID va = MmMapLockedPagesSpecifyCache(mdl, KernelMode, MmCached,
+                                                NULL, FALSE, NormalPagePriority);
+        if (va == NULL) {
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
+                "AMDBC250: AllocVidMem MmMapLockedPages failed\n"));
+            MmFreePagesFromMdl(mdl);
+            ExFreePoolWithTag(mdl, 'MDL');
+            return STATUS_INSUFFICIENT_RESOURCES;
+        }
+
+        PHYSICAL_ADDRESS pa = MmGetPhysicalAddress(va);
+        if (pa.QuadPart == 0) {
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
+                "AMDBC250: AllocVidMem invalid physical address\n"));
+            MmUnmapLockedPages(va, mdl);
+            MmFreePagesFromMdl(mdl);
+            ExFreePoolWithTag(mdl, 'MDL');
+            return STATUS_INSUFFICIENT_RESOURCES;
+        }
+
+        KIRQL oldIrql;
+        KeAcquireSpinLock(&g_MdlTableLock, &oldIrql);
+        for (int m = 0; m < 64; m++) {
+            if (g_MdlTable[m].Va == NULL) {
+                g_MdlTable[m].Va = va;
+                g_MdlTable[m].Mdl = mdl;
+                g_MdlTable[m].Size = allocSize;
+                break;
+            }
+        }
+        KeReleaseSpinLock(&g_MdlTableLock, oldIrql);
+
+        *OutPa = pa.QuadPart;
+        *OutVa = (ULONG64)(UINT_PTR)va;
+        status = STATUS_SUCCESS;
+
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+            "AMDBC250: AllocVidMem OK: %llu bytes, PA=0x%llX VA=%p\n",
+            (ULONG64)allocSize, pa.QuadPart, va));
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
+            "AMDBC250: AllocVidMem EXCEPTION 0x%X\n", GetExceptionCode()));
+        MmFreePagesFromMdl(mdl);
+        ExFreePoolWithTag(mdl, 'MDL');
+        status = STATUS_UNSUCCESSFUL;
+    }
+
+    return status;
+}
 NTSTATUS DreamV3CreateClose(PDEVICE_OBJECT, PIRP);
 NTSTATUS DreamV3DdiEscape(HANDLE, CONST DXGKARG_ESCAPE*);
 NTSTATUS DreamV3SdmaCopyBuffer(PDREAM_V3_DEVICE_EXTENSION, PHYSICAL_ADDRESS, PHYSICAL_ADDRESS, SIZE_T);
@@ -94,9 +176,12 @@ NTSTATUS APIENTRY DreamV3DdiIsSupportedVidPn(PVOID, PVOID);
 NTSTATUS APIENTRY DreamV3DdiRecommendVidPnTopology(PVOID, PVOID);
 NTSTATUS APIENTRY DreamV3DdiStopCapture(PVOID, PVOID);
 NTSTATUS APIENTRY DreamV3DdiCreateOverlay(PVOID, PVOID, PVOID);
+NTSTATUS DreamV3SmuSendMessage(PDREAM_V3_DEVICE_EXTENSION DevExt, ULONG MessageId, ULONG Param, PULONG Response);
+NTSTATUS DreamV3SmuWakeGfx(PDREAM_V3_DEVICE_EXTENSION DevExt);
+VOID DreamV3MarkHwInitStep(ULONG Step);
 
 /*===========================================================================
-  DreamV3DisplayWritesEnabled — guard for live DCN (HUBPREQ/OTG) writes.
+  DreamV3DisplayWritesEnabled ΓÇö guard for live DCN (HUBPREQ/OTG) writes.
 
   BC-250's OTG0 scans out a real 2560x1440@60 framebuffer from the GOP/UEFI
   BIOS. Writing HUBPREQ surface address / FLIP_CONTROL into that LIVE scanout
@@ -134,7 +219,7 @@ DreamV3DisplayWritesEnabled(VOID)
 }
 
 /*===========================================================================
-  DreamV3DxgkInitialize � Calls real DxgkInitialize from dxgkrnl.sys
+  DreamV3DxgkInitialize ∩┐╜ Calls real DxgkInitialize from dxgkrnl.sys
   Resolves at RUNTIME from dxgkrnl.sys export table (link-time import
   from dxgkrnl.lib causes Code 39 on Win11 26100).
 ===========================================================================*/
@@ -177,7 +262,7 @@ DreamV3ResolveDxgkInitialize(VOID)
         PUCHAR modPath = pEntry + entrySize - 256;
 
         /* Compare last 11 bytes of FullPathName with "dxgkrnl.sys" byte-by-byte.
-           No CRT dependency � avoids strnlen/_strnicmp link issues. */
+           No CRT dependency ∩┐╜ avoids strnlen/_strnicmp link issues. */
         BOOLEAN match = FALSE;
         for (int j = 255; j >= 10; j--) {
             if (modPath[j] == 's' && modPath[j-1] == 'y' && modPath[j-2] == 's' &&
@@ -225,7 +310,7 @@ DreamV3ResolveDxgkInitialize(VOID)
 
     for (ULONG i = 0; i < pExports->NumberOfNames; i++) {
         PCHAR name = (PCHAR)((PUCHAR)modBase + pNames[i]);
-        /* Manual byte comparison � avoids CRT strcmp dependency */
+        /* Manual byte comparison ∩┐╜ avoids CRT strcmp dependency */
         if (name[0] == 'D' && name[1] == 'x' && name[2] == 'g' && name[3] == 'k' &&
             name[4] == 'I' && name[5] == 'n' && name[6] == 'i' && name[7] == 't' &&
             name[8] == 'i' && name[9] == 'a' && name[10] == 'l' && name[11] == 'i' &&
@@ -277,7 +362,7 @@ DreamV3DxgkInitialize(
 static VOID DreamV3WdmUnload(_In_ PDRIVER_OBJECT DriverObject);
 
 /*===========================================================================
-   DriverEntry � Main entry point (WDDM 2.x/3.x)
+   DriverEntry ∩┐╜ Main entry point (WDDM 2.x/3.x)
 ===========================================================================*/
 
 NTSTATUS
@@ -333,7 +418,7 @@ DriverEntry(
                "AMDBC250-DREAM-V4.3: Architecture: 24 CU RDNA2, 16GB GDDR6\n"));
 
     /* Initialize the DDI callback table */
-    /* Use WIN8 version � enough for basic WDDM but not too many mandatory DDIs */
+    /* Use WIN8 version ∩┐╜ enough for basic WDDM but not too many mandatory DDIs */
     InitData.Version = DXGKDDI_INTERFACE_VERSION_WIN8;
     
     /* Core device lifecycle */
@@ -444,10 +529,10 @@ DriverEntry(
     }
 
     if (NT_SUCCESS(Status)) {
-        /* Never reached � DxgkInitialize always returns STATUS_NOT_SUPPORTED */
+        /* Never reached ∩┐╜ DxgkInitialize always returns STATUS_NOT_SUPPORTED */
     } else {
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
-                   "AMDBC250-DREAM-V4.3: DxgkInitialize FAILED: 0x%08X � falling back to WDM IOCTL mode\n", Status));
+                   "AMDBC250-DREAM-V4.3: DxgkInitialize FAILED: 0x%08X ∩┐╜ falling back to WDM IOCTL mode\n", Status));
 
         /* DxgkInitialize failed: create WDM control device for IOCTL communication */
         {
@@ -578,7 +663,7 @@ DriverEntry(
 }
 
 /*===========================================================================
-  DxgkDdiAddDevice � PnP manager found matching PCI device
+  DxgkDdiAddDevice ∩┐╜ PnP manager found matching PCI device
 ===========================================================================*/
 
 NTSTATUS
@@ -639,7 +724,7 @@ DreamV3DdiAddDevice(
 }
 
 /*===========================================================================
-  DxgkDdiStartDevice � Start the device
+  DxgkDdiStartDevice ∩┐╜ Start the device
 ===========================================================================*/
 
 NTSTATUS
@@ -694,7 +779,7 @@ DreamV3DdiStartDevice(
     DevExt->SubsystemId = 0;
 
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-               "AMDBC250-DREAM-V4.3: PCI %04X:%04X (Rev %02X) � Cyan Skillfish\n",
+               "AMDBC250-DREAM-V4.3: PCI %04X:%04X (Rev %02X) ∩┐╜ Cyan Skillfish\n",
                DevExt->VendorId, DevExt->DeviceId, DevExt->RevisionId));
 
     /* Verify this is our GPU */
@@ -707,7 +792,7 @@ DreamV3DdiStartDevice(
     if (DevExt->DeviceId != AMDBC250_DEVICE_ID_PRIMARY) {
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
                    "AMDBC250-DREAM-V4.3: Unexpected device ID: %04X\n", DevExt->DeviceId));
-        /* Continue anyway � might be a variant */
+        /* Continue anyway ∩┐╜ might be a variant */
     }
 
     /* Map MMIO BAR - use safe iteration */
@@ -770,17 +855,17 @@ DreamV3DdiStartDevice(
     
     if (!MmioFound) {
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
-                   "AMDBC250-DREAM-V4.3: *** NO MMIO RESOURCE FOUND � continuing in software mode ***\n"));
-        /* Don't fail � PS5 may not expose MMIO resources to PnP.
+                   "AMDBC250-DREAM-V4.3: *** NO MMIO RESOURCE FOUND ∩┐╜ continuing in software mode ***\n"));
+        /* Don't fail ∩┐╜ PS5 may not expose MMIO resources to PnP.
            The driver still works for D3DKMTEscape queries. */
     }
 
-    /* CRITICAL: Initialize hardware � non-fatal if fails (PS5 NBIO may block MMIO) */
+    /* CRITICAL: Initialize hardware ∩┐╜ non-fatal if fails (PS5 NBIO may block MMIO) */
     Status = DreamV3HwInitialize(DevExt);
     if (!NT_SUCCESS(Status)) {
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
-                   "AMDBC250-DREAM-V4.3: Hardware init failed: 0x%08X � continuing in software mode\n", Status));
-        /* Don't fail � continue with software-only mode for Escape queries */
+                   "AMDBC250-DREAM-V4.3: Hardware init failed: 0x%08X ∩┐╜ continuing in software mode\n", Status));
+        /* Don't fail ∩┐╜ continue with software-only mode for Escape queries */
     }
 
     /* Report display topology */
@@ -826,7 +911,7 @@ DreamV3DdiStartDevice(
 
     /* Control device: only exists in WDM IOCTL mode (when DxgkInitialize failed) */
     if (g_ControlDevice != NULL) {
-        /* Control device exists from DriverEntry fallback � update pointers */
+        /* Control device exists from DriverEntry fallback ∩┐╜ update pointers */
         if (g_ControlDevice->DeviceExtension == NULL) {
             g_ControlDevice->DeviceExtension = DevExt;
         }
@@ -834,10 +919,10 @@ DreamV3DdiStartDevice(
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                    "AMDBC250-DREAM-V4.3: Control device already exists, pointers updated (WDM mode)\n"));
     } else {
-        /* DxgkInitialize succeeded � no WDM control device, dxgkrnl owns everything */
+        /* DxgkInitialize succeeded ∩┐╜ no WDM control device, dxgkrnl owns everything */
         g_PciDevExt = DevExt;
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-                   "AMDBC250-DREAM-V4.3: WDDM mode � dxgkrnl owns adapter\n"));
+                   "AMDBC250-DREAM-V4.3: WDDM mode ∩┐╜ dxgkrnl owns adapter\n"));
     }
 
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
@@ -845,7 +930,7 @@ DreamV3DdiStartDevice(
 
     /* Only re-set MajorFunction in WDM IOCTL mode (when DxgkInitialize failed and
        we have a control device). When DxgkInitialize succeeded, dxgkrnl owns the
-       DriverObject and we must NOT touch MajorFunction � it causes BSOD. */
+       DriverObject and we must NOT touch MajorFunction ∩┐╜ it causes BSOD. */
     if (g_ControlDevice != NULL) {
         g_DriverObject->MajorFunction[IRP_MJ_CREATE] = DreamV3CreateClose;
         g_DriverObject->MajorFunction[IRP_MJ_CLOSE] = DreamV3CreateClose;
@@ -854,7 +939,7 @@ DreamV3DdiStartDevice(
                    "AMDBC250-DREAM-V4.3: MajorFunction re-set (WDM IOCTL mode)\n"));
     } else {
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-                   "AMDBC250-DREAM-V4.3: MajorFunction NOT re-set (WDDM mode � dxgkrnl owns)\n"));
+                   "AMDBC250-DREAM-V4.3: MajorFunction NOT re-set (WDDM mode ∩┐╜ dxgkrnl owns)\n"));
     }
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                "AMDBC250-DREAM-V4.3:   24 CU RDNA2, 1536 SP\n"));
@@ -868,7 +953,7 @@ DreamV3DdiStartDevice(
 }
 
 /*===========================================================================
-  DxgkDdiStopDevice � Stop device
+  DxgkDdiStopDevice ∩┐╜ Stop device
 ===========================================================================*/
 
 NTSTATUS
@@ -924,7 +1009,7 @@ DreamV3DdiStopDevice(
 }
 
 /*===========================================================================
-  DxgkDdiRemoveDevice � Final cleanup
+  DxgkDdiRemoveDevice ∩┐╜ Final cleanup
 ===========================================================================*/
 
 NTSTATUS
@@ -948,7 +1033,7 @@ DreamV3DdiRemoveDevice(
 }
 
 /*===========================================================================
-  DxgkDdiResetDevice � TDR recovery
+  DxgkDdiResetDevice ∩┐╜ TDR recovery
 ===========================================================================*/
 
 VOID
@@ -981,7 +1066,7 @@ DreamV3DdiResetDevice(
     DevExt->GpuResetInProgress = FALSE;
 }
 
-/* WDM DriverUnload � called by PnP when driver is unloaded */
+/* WDM DriverUnload ∩┐╜ called by PnP when driver is unloaded */
 static VOID DreamV3WdmUnload(_In_ PDRIVER_OBJECT DriverObject)
 {
     UNREFERENCED_PARAMETER(DriverObject);
@@ -1037,7 +1122,7 @@ static VOID DreamV3WdmUnload(_In_ PDRIVER_OBJECT DriverObject)
                    "AMDBC250-DREAM-V4.3: Control device deleted by WDM unload\n"));
     }
 
-    /* Free separately-allocated device extension (WDM path only — WDDM path frees in RemoveDevice) */
+    /* Free separately-allocated device extension (WDM path only ΓÇö WDDM path frees in RemoveDevice) */
     if (g_PciDevExt != NULL) {
         ExFreePoolWithTag(g_PciDevExt, '3vDA');
         g_PciDevExt = NULL;
@@ -1082,7 +1167,7 @@ DreamV3DdiUnload(VOID)
 }
 
 /*===========================================================================
-  Interrupt Routine (ISR) � Runs at DIRQL
+  Interrupt Routine (ISR) ∩┐╜ Runs at DIRQL
 ===========================================================================*/
 
 BOOLEAN
@@ -1121,7 +1206,7 @@ DreamV3DdiInterruptRoutine(
 }
 
 /*===========================================================================
-  DPC Routine � Deferred interrupt processing
+  DPC Routine ∩┐╜ Deferred interrupt processing
 ===========================================================================*/
 
 VOID
@@ -1161,7 +1246,7 @@ DreamV3DdiDpcRoutine(
         switch (ClientId) {
         case IH_CLIENTID_GFX:
             if (SrcId == 0xE0) {
-                /* EOP � fence completion */
+                /* EOP ∩┐╜ fence completion */
                 DXGKARGCB_NOTIFY_INTERRUPT_DATA NotifyData = {0};
                 NotifyData.InterruptType = DXGK_INTERRUPT_DMA_COMPLETED;
                 NotifyData.DmaCompleted.SubmissionFenceId = (UINT64)Entry[2] | ((UINT64)Entry[3] << 32);
@@ -1203,7 +1288,7 @@ DreamV3DdiDpcRoutine(
 }
 
 /*===========================================================================
-  QueryAdapterInfo � Report GPU capabilities
+  QueryAdapterInfo ∩┐╜ Report GPU capabilities
 ===========================================================================*/
 
 NTSTATUS
@@ -1281,7 +1366,7 @@ DreamV3DdiQueryAdapterInfo(
 }
 
 /*===========================================================================
-  CreateDevice � Per-process GPU context
+  CreateDevice ∩┐╜ Per-process GPU context
 ===========================================================================*/
 
 NTSTATUS
@@ -1316,7 +1401,7 @@ DreamV3DdiCreateDevice(
     pCreateDevice->hDevice = (HANDLE)Context;
 
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_TRACE_LEVEL,
-               "AMDBC250-DREAM-V4.3: CreateDevice � Context %d, VMID %d\n",
+               "AMDBC250-DREAM-V4.3: CreateDevice ∩┐╜ Context %d, VMID %d\n",
                Context->ContextId, Context->VmId));
 
     return STATUS_SUCCESS;
@@ -1462,7 +1547,7 @@ DreamV3DdiDestroyAllocation(
 }
 
 /*===========================================================================
-  PM4 Packet Building Helpers � GFX10 (RDNA2)
+  PM4 Packet Building Helpers ∩┐╜ GFX10 (RDNA2)
 ===========================================================================*/
 
 /*
@@ -1582,7 +1667,7 @@ DreamV3WriteEopFence(
         WPtr = 0;
     }
 
-    /* IT_EVENT_WRITE_EOP packet � 6 DWORDs total (count=4 in header = 5 payload + 1 header = 6)
+    /* IT_EVENT_WRITE_EOP packet ∩┐╜ 6 DWORDs total (count=4 in header = 5 payload + 1 header = 6)
      * Format per AMD GPU ISA:
      *   DWORD 0: PM4 header
      *   DWORD 1: Control (EVENT_TYPE | EVENT_INDEX | DATA_SEL | INT_SEL)
@@ -1616,7 +1701,7 @@ DreamV3WriteEopFence(
 }
 
 /*
- * Software PM4 executor — translate PM4 packets to direct register writes.
+ * Software PM4 executor ΓÇö translate PM4 packets to direct register writes.
  *
  * Handles: IT_NOP, IT_WRITE_DATA, IT_EVENT_WRITE_EOP, IT_RELEASE_MEM,
  *          IT_SET_CONFIG_REG, IT_SET_CONTEXT_REG, IT_SET_SH_REG, PM4_TYPE_0,
@@ -1657,7 +1742,7 @@ DreamV3SwPm4Process(
 {
     ULONG i = 0;
 
-    /* Depth guard — prevent stack overflow from nested IT_INDIRECT_BUFFER */
+    /* Depth guard ΓÇö prevent stack overflow from nested IT_INDIRECT_BUFFER */
     if (Depth == 0) {
         return STATUS_ALERTED;
     }
@@ -1694,7 +1779,7 @@ DreamV3SwPm4Process(
             ULONG opcode = (header >> 8) & 0xFF;
             i++;
 
-            /* NOP has no meaningful payload — skip count validation */
+            /* NOP has no meaningful payload ΓÇö skip count validation */
             if (opcode != IT_NOP && i + count > CommandCount) {
                 return STATUS_BUFFER_TOO_SMALL;
             }
@@ -1782,7 +1867,7 @@ DreamV3SwPm4Process(
             case IT_SET_SH_REG: {
                 /* SH register space: hwOff = mmREGISTER / 4.
                  * On BC-250: BAR5_offset = AMDBC250_GC_BASE + hwOff * 4
-                 * (No +0x2C000 — BC-250's mmREGISTER already encodes GC block offset.) */
+                 * (No +0x2C000 ΓÇö BC-250's mmREGISTER already encodes GC block offset.) */
                 if (count >= 1) {
                     ULONG hwOff = Commands[i];
                     ULONG numRegs = count - 1;
@@ -1877,7 +1962,7 @@ DreamV3SubmitGfxRing(
     
     /* Only write to hardware if MMIO is mapped */
     if (DevExt->MmioVirtualBase != NULL && DevExt->HardwareInitialized) {
-        /* Write WPTR � use HQD/SRBM path if available */
+        /* Write WPTR ∩┐╜ use HQD/SRBM path if available */
         if (DevExt->UseHqdKiq) {
             DreamV3WriteRegister(DevExt, DevExt->GrbmGfxIndexOffset,
                 AMDBC250_GRBM_GFX_INDEX_KIQ_VAL);
@@ -2050,7 +2135,7 @@ DreamV3DdiPresent(
 
     if (pSrcAlloc != NULL && pSrcAlloc->PhysicalAddress.QuadPart != 0) {
         if (!DreamV3DisplayWritesEnabled()) {
-            /* DCN HUBPREQ writes are DISABLED by default — they target a LIVE
+            /* DCN HUBPREQ writes are DISABLED by default ΓÇö they target a LIVE
              * 2560x1440 scanout (0xEB28+) and black-screen/hang the GPU unless
              * a full DCN pipeline is initialized. See DreamV3DisplayWritesEnabled. */
             KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
@@ -2098,7 +2183,7 @@ DreamV3DdiRender(
 }
 
 /*===========================================================================
-  BuildPagingBuffer � Memory management (page table updates)
+  BuildPagingBuffer ∩┐╜ Memory management (page table updates)
 
   This function is called by DXGKRNL to update GPU page tables
   for virtual memory management. Critical for D3D12!
@@ -2131,7 +2216,7 @@ DreamV3DdiPreemptCommand(
 }
 
 /*===========================================================================
-  VidPN (Video Present Network) Implementation � DCN 2.1 Display Engine
+  VidPN (Video Present Network) Implementation ∩┐╜ DCN 2.1 Display Engine
 
   VidPN manages the relationship between:
   - Sources (framebuffers in VRAM)
@@ -2176,7 +2261,7 @@ DreamV3DdiRecommendFunctionalVidPn(
     }
 
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-               "AMDBC250-DREAM-V4.3: RecommendFunctionalVidPn � DCN 2.1\n"));
+               "AMDBC250-DREAM-V4.3: RecommendFunctionalVidPn ∩┐╜ DCN 2.1\n"));
 
     /*
      * Recommend a functional VidPN by:
@@ -2235,7 +2320,7 @@ DreamV3DdiCommitVidPn(
     }
 
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-               "AMDBC250-DREAM-V4.3: CommitVidPn � Activating display config\n"));
+               "AMDBC250-DREAM-V4.3: CommitVidPn ∩┐╜ Activating display config\n"));
 
     /*
      * Commit VidPN makes the recommended configuration active:
@@ -2275,7 +2360,7 @@ DreamV3DdiSetVidPnSourceAddress(
     }
 
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_TRACE_LEVEL,
-               "AMDBC250-DREAM-V4.3: SetVidPnSourceAddress � Source %u\n",
+               "AMDBC250-DREAM-V4.3: SetVidPnSourceAddress ∩┐╜ Source %u\n",
                pSetVidPnSourceAddress->VidPnSourceId));
 
     /* Get framebuffer physical address from primary surface */
@@ -2283,13 +2368,13 @@ DreamV3DdiSetVidPnSourceAddress(
 
     if (SurfAddress.QuadPart == 0) {
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
-                   "AMDBC250-DREAM-V4.3: SetVidPnSourceAddress � NULL address (expected for stub)\n"));
+                   "AMDBC250-DREAM-V4.3: SetVidPnSourceAddress ∩┐╜ NULL address (expected for stub)\n"));
         return STATUS_SUCCESS;
     }
 
     /* Program HUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS (DCN 2.1) */
     if (!DreamV3DisplayWritesEnabled()) {
-        /* Live-scanout HUBPREQ writes are DISABLED by default — see
+        /* Live-scanout HUBPREQ writes are DISABLED by default ΓÇö see
          * DreamV3DisplayWritesEnabled (writing 0xEB28+ hangs the GPU). */
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
             "AMDBC250-DREAM-V4.3: SetVidPnSourceAddress HUBPREQ write SKIPPED (DisplayWritesEnabled=0)\n"));
@@ -2322,7 +2407,7 @@ DreamV3DdiSetVidPnSourceVisibility(
     }
 
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_TRACE_LEVEL,
-               "AMDBC250-DREAM-V4.3: SetVidPnSourceVisibility � Source %u, Visible=%d\n",
+               "AMDBC250-DREAM-V4.3: SetVidPnSourceVisibility ∩┐╜ Source %u, Visible=%d\n",
                pSetVidPnSourceVisibility->VidPnSourceId,
                pSetVidPnSourceVisibility->Visible));
 
@@ -2331,7 +2416,7 @@ DreamV3DdiSetVidPnSourceVisibility(
      * DDI display path is stubbed on Win11 26100 (WDM fallback). */
     if (DevExt->MmioVirtualBase != NULL) {
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_TRACE_LEVEL,
-                   "AMDBC250-DREAM-V4.3: SetVidPnSourceVisibility — OTG stub (DDI display disabled)\n"));
+                   "AMDBC250-DREAM-V4.3: SetVidPnSourceVisibility ΓÇö OTG stub (DDI display disabled)\n"));
     }
 
     return STATUS_SUCCESS;
@@ -2512,7 +2597,7 @@ DreamV3DdiQueryInterface(
 }
 
 /*===========================================================================
-  DreamV3DdiEscape � UMD?KMD communication via WDDM Escape
+  DreamV3DdiEscape ∩┐╜ UMD?KMD communication via WDDM Escape
   
   This is the WDDM-correct path for user-mode to kernel-mode communication.
   Replaces the MajorFunction[IRP_MJ_DEVICE_CONTROL] that caused bugcheck 0x3B.
@@ -2521,11 +2606,11 @@ DreamV3DdiQueryInterface(
   We use D3DKMT_ESCAPE_DRIVERPRIVATE with custom command IDs.
   
   Command IDs (in pPrivateDriverData->CommandId):
-    0x01 = GET_CAPS        � return GPU capabilities
-    0x02 = GET_VRAM_INFO   � return VRAM layout
-    0x03 = READ_MMIO       � read GPU register (safe reads only)
-    0x04 = GET_BIOS_INFO   � return BIOS/firmware info
-    0x05 = GET_FW_VERSION  � return firmware version strings
+    0x01 = GET_CAPS        ∩┐╜ return GPU capabilities
+    0x02 = GET_VRAM_INFO   ∩┐╜ return VRAM layout
+    0x03 = READ_MMIO       ∩┐╜ read GPU register (safe reads only)
+    0x04 = GET_BIOS_INFO   ∩┐╜ return BIOS/firmware info
+    0x05 = GET_FW_VERSION  ∩┐╜ return firmware version strings
 ===========================================================================*/
 
 /* ===========================================================================
@@ -2685,7 +2770,7 @@ DreamV3DdiEscape(
 
     case 0x03: /* READ_MMIO */
     {
-        /* Read a GPU register � safe reads only (BAR5 writes cause hard freeze) */
+        /* Read a GPU register ∩┐╜ safe reads only (BAR5 writes cause hard freeze) */
         if (pEscape->PrivateDriverDataSize < sizeof(DREAM_ESCAPE_HEADER) + sizeof(ULONG) * 2) {
             Header->Status = STATUS_BUFFER_TOO_SMALL;
             Header->OutputSize = 0;
@@ -2697,7 +2782,7 @@ DreamV3DdiEscape(
         if (Offset >= 0x100000 && Offset < 0x140000) {
             Params[1] = 0xDEAD0000; /* Refuse unsafe range */
         } else if (Offset < 0x100000) {
-            /* Safe to read � but we need physical mapping.
+            /* Safe to read ∩┐╜ but we need physical mapping.
                For now return placeholder. */
             Params[1] = 0x00000000;
         } else {
@@ -2854,7 +2939,7 @@ DreamV3VmInitialize(_In_ PDREAM_V3_DEVICE_EXTENSION DevExt)
 #endif
 
 /*===========================================================================
-  IOCTL Dispatch � UMD ? KMD Communication
+  IOCTL Dispatch ∩┐╜ UMD ? KMD Communication
   
   The UMD opens \\.\AMDBC250DreamV43 and sends IOCTLs.
   This device is created by DreamV3DdiAddDevice via IoCreateDevice.
@@ -2881,11 +2966,11 @@ DreamV3DeviceControl(
 {
     /* CRITICAL: Only handle IRPs for our control device.
        This handler is set on g_DriverObject->MajorFunction which covers ALL
-       device objects from this driver � including the dxgkrnl WDDM adapter.
+       device objects from this driver ∩┐╜ including the dxgkrnl WDDM adapter.
        dxgkrnl sends its own IRPs (DxgkIrp) to the adapter device object.
-       We must NOT try to parse those as DeviceIoControl � it causes bugcheck 0x3B. */
+       We must NOT try to parse those as DeviceIoControl ∩┐╜ it causes bugcheck 0x3B. */
     if (DeviceObject != g_ControlDevice) {
-        /* Not our control device � pass through to next handler */
+        /* Not our control device ∩┐╜ pass through to next handler */
         Irp->IoStatus.Status = STATUS_NOT_SUPPORTED;
         IoCompleteRequest(Irp, IO_NO_INCREMENT);
         return STATUS_NOT_SUPPORTED;
@@ -2913,7 +2998,7 @@ DreamV3DeviceControl(
     PIO_STACK_LOCATION irpSp = IoGetCurrentIrpStackLocation(Irp);
     NTSTATUS status = STATUS_SUCCESS;
     ULONG bytesReturned = 0;
-    /* WARNING: METHOD_BUFFERED — inputBuffer == outputBuffer (same SystemBuffer).
+    /* WARNING: METHOD_BUFFERED ΓÇö inputBuffer == outputBuffer (same SystemBuffer).
      * Read ALL input fields BEFORE writing to output. Do NOT RtlZeroMemory before reading. */
     PVOID inputBuffer = Irp->AssociatedIrp.SystemBuffer;
     PVOID outputBuffer = Irp->AssociatedIrp.SystemBuffer;
@@ -2921,7 +3006,7 @@ DreamV3DeviceControl(
     ULONG outputLen = irpSp->Parameters.DeviceIoControl.OutputBufferLength;
     ULONG ioctlCode = irpSp->Parameters.DeviceIoControl.IoControlCode;
 
-    /* IMMEDIATE MARKER � write before anything else */
+    /* IMMEDIATE MARKER ∩┐╜ write before anything else */
     {
         static BOOLEAN once = FALSE;
         if (!once) {
@@ -3009,46 +3094,10 @@ DreamV3DeviceControl(
         case 0x80000840: { /* ALLOC_VIDMEM - proper MDL allocation */
             if (inputLen >= sizeof(ULONG) * 3 && outputLen >= sizeof(ULONG64) * 2) {
                 PULONG InData = (PULONG)inputBuffer;
-                SIZE_T allocSize = (SIZE_T)InData[0];
-                allocSize = (allocSize + 0xFFF) & ~0xFFFULL; /* 4KB align */
-                if (allocSize < 4096) allocSize = 4096;
-                if (allocSize > 64 * 1024 * 1024) allocSize = 64 * 1024 * 1024;
-
-                PHYSICAL_ADDRESS low = {0}, high, skip = {0};
-                high.QuadPart = 0x3FFFFFFFFFULL; /* 40-bit */
-
-                PMDL mdl = MmAllocatePagesForMdlEx(low, high, skip, allocSize, MmCached, 0);
-                if (mdl != NULL) {
-                    PVOID va = MmMapLockedPagesSpecifyCache(mdl, KernelMode, MmCached,
-                                                           NULL, FALSE, NormalPagePriority);
-                    if (va != NULL) {
-                        PHYSICAL_ADDRESS pa = MmGetPhysicalAddress(va);
-                        PULONG64 OutData = (PULONG64)outputBuffer;
-                        OutData[0] = pa.QuadPart;
-                        OutData[1] = (ULONG64)(UINT_PTR)va;
-                        bytesReturned = sizeof(ULONG64) * 2;
-                        /* Store MDL for later cleanup � prevents memory leak */
-                        {
-                            KIRQL oldIrql;
-                            KeAcquireSpinLock(&g_MdlTableLock, &oldIrql);
-                            for (int m = 0; m < 64; m++) {
-                                if (g_MdlTable[m].Va == NULL) {
-                                    g_MdlTable[m].Va = va;
-                                    g_MdlTable[m].Mdl = mdl;
-                                    g_MdlTable[m].Size = allocSize;
-                                    break;
-                                }
-                            }
-                            KeReleaseSpinLock(&g_MdlTableLock, oldIrql);
-                        }
-                        status = STATUS_SUCCESS;
-                    } else {
-                        MmFreePagesFromMdl(mdl);
-                        ExFreePool(mdl);
-                        status = STATUS_INSUFFICIENT_RESOURCES;
-                    }
-                } else {
-                    status = STATUS_INSUFFICIENT_RESOURCES;
+                PULONG64 OutData = (PULONG64)outputBuffer;
+                status = DreamV3AllocVidMem((SIZE_T)InData[0], &OutData[0], &OutData[1]);
+                if (NT_SUCCESS(status)) {
+                    bytesReturned = sizeof(ULONG64) * 2;
                 }
             } else {
                 status = STATUS_BUFFER_TOO_SMALL;
@@ -3250,68 +3299,12 @@ DreamV3DeviceControl(
 
     /* --- Allocate Video Memory --- */
     case 0x80000840: { /* IOCTL_AMDBC250_ALLOC_VIDMEM */
-        /* Mark that we reached this case */
-        {
-            UNICODE_STRING devPath;
-            OBJECT_ATTRIBUTES objAttr;
-            RtlInitUnicodeString(&devPath, L"\\Registry\\Machine\\SYSTEM\\CurrentControlSet\\Services\\atikmdag");
-            InitializeObjectAttributes(&objAttr, &devPath, OBJ_CASE_INSENSITIVE, NULL, NULL);
-            HANDLE hKey = NULL;
-            if (NT_SUCCESS(ZwOpenKey(&hKey, KEY_SET_VALUE, &objAttr))) {
-                UNICODE_STRING valName;
-                ULONG val = ioctlCode;
-                RtlInitUnicodeString(&valName, L"LastIoctlCode");
-                ZwSetValueKey(hKey, &valName, 0, REG_DWORD, &val, sizeof(val));
-                ZwClose(hKey);
-            }
-        }
         if (inputLen >= sizeof(ULONG) * 3 && outputLen >= sizeof(ULONG64) * 2) {
             PULONG InData = (PULONG)inputBuffer;
-            ULONG SizeLo = InData[0];
-            SIZE_T AllocSize = (SIZE_T)SizeLo;
-
-            /* Safety: cap at 64KB for testing */
-            if (AllocSize > 64 * 1024) AllocSize = 64 * 1024;
-            if (AllocSize < 4096) AllocSize = 4096;
-
-            PHYSICAL_ADDRESS highestAddr;
-            highestAddr.QuadPart = 0xFFFFFFFFULL;
-
-            PVOID virtualAddr = NULL;
-            __try {
-                virtualAddr = MmAllocateContiguousMemory(AllocSize, highestAddr);
-            } __except (EXCEPTION_EXECUTE_HANDLER) {
-                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
-                    "AMDBC250-DREAM-V4.3: AllocVidMem EXCEPTION 0x%X\n", GetExceptionCode()));
-                virtualAddr = NULL;
-            }
-
-            if (virtualAddr != NULL) {
-                PHYSICAL_ADDRESS physAddr;
-                __try {
-                    physAddr = MmGetPhysicalAddress(virtualAddr);
-                } __except (EXCEPTION_EXECUTE_HANDLER) {
-                    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
-                        "AMDBC250-DREAM-V4.3: MmGetPhysicalAddress EXCEPTION\n"));
-                    MmFreeContiguousMemory(virtualAddr);
-                    virtualAddr = NULL;
-                    physAddr.QuadPart = 0;
-                }
-
-                if (virtualAddr != NULL) {
-                    PULONG64 OutData = (PULONG64)outputBuffer;
-                    OutData[0] = physAddr.QuadPart;
-                    OutData[1] = (ULONG64)(UINT_PTR)virtualAddr;
-                    bytesReturned = sizeof(ULONG64) * 2;
-
-                    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-                        "AMDBC250-DREAM-V4.3: AllocVidMem OK: %llu bytes, PA=0x%llX VA=%p\n",
-                        (ULONG64)AllocSize, physAddr.QuadPart, virtualAddr));
-                }
-            }
-
-            if (virtualAddr == NULL) {
-                status = STATUS_INSUFFICIENT_RESOURCES;
+            PULONG64 OutData = (PULONG64)outputBuffer;
+            status = DreamV3AllocVidMem((SIZE_T)InData[0], &OutData[0], &OutData[1]);
+            if (NT_SUCCESS(status)) {
+                bytesReturned = sizeof(ULONG64) * 2;
             }
         } else {
             status = STATUS_BUFFER_TOO_SMALL;
@@ -3385,8 +3378,8 @@ DreamV3DeviceControl(
             ULONG ibSize = 0;
 
             /* Dual-format compatibility:
-               Old format (Vulkan ICD): {0, 0, fence, 0}  � fence at InData[2]
-               New format (D3D9):       {PA_lo, PA_hi, size, fence} � fence at InData[3] */
+               Old format (Vulkan ICD): {0, 0, fence, 0}  ∩┐╜ fence at InData[2]
+               New format (D3D9):       {PA_lo, PA_hi, size, fence} ∩┐╜ fence at InData[3] */
             if (ibAddrLo == 0) {
                 fenceValue = InData[2];  /* Old format: fence at field 2 */
             } else {
@@ -3509,7 +3502,7 @@ DreamV3DeviceControl(
 
             if (physAddr != 0) {
                 if (!DreamV3DisplayWritesEnabled()) {
-                    /* Live-scanout HUBPREQ writes are DISABLED by default — see
+                    /* Live-scanout HUBPREQ writes are DISABLED by default ΓÇö see
                      * DreamV3DisplayWritesEnabled. Writing 0xEB28+ hangs the GPU. */
                     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
                         "AMDBC250-DREAM-V4.3: FlipDisplay HUBPREQ write SKIPPED (DisplayWritesEnabled=0)\n"));
@@ -3604,7 +3597,7 @@ DreamV3DeviceControl(
 
         PUCHAR mmio = (PUCHAR)DevExt->MmioVirtualBase;
 
-        /* Helper macros — one SMU mailbox round-trip each, tracking the worst
+        /* Helper macros ΓÇö one SMU mailbox round-trip each, tracking the worst
          * response status so a single dead message doesn't mask the rest. */
 #define SMU_TEL_QUERY(_msg, _arg, _out)                                        \
         do {                                                                   \
@@ -3625,21 +3618,6 @@ DreamV3DeviceControl(
         SMU_TEL_QUERY(0x38, 0, t->GfxVid);              /* GetGfxVid */
         SMU_TEL_QUERY(0x1E, 0, t->ActiveWgps);          /* QueryActiveWgp */
         SMU_TEL_QUERY(0x3D, 0, t->EnabledSmuFeatures);  /* GetEnabledSmuFeatures */
-
-        /* CPU/GPU voltage + core mask via Q3 queue (safe, read-only). */
-        {
-            ULONG resp = 0, rstat = 0;
-            NTSTATUS st = Amdbc250PspSmuQ3Msg(mmio, 0x36, 0, &resp, &rstat);  /* GetCurrentCpuVoltage */
-            if (NT_SUCCESS(st)) t->CpuVoltageMv = resp;
-            else t->CpuVoltageMv = 0;
-
-            resp = 0; rstat = 0;
-            st = Amdbc250PspSmuQ3Msg(mmio, 0x37, 0, &resp, &rstat);            /* GetCurrentGpuVoltage */
-            if (NT_SUCCESS(st)) t->GpuVoltageMv = resp;
-            else t->GpuVoltageMv = 0;
-
-            t->CpuCoreMask = Amdbc250PspSmnRead(mmio, 0x0115A870);
-        }
 
         /* VID -> mV: vid = round((1.55 - mv/1000) / 0.00625), invert it.
          * mV = round((-vid*0.00625 + 1.55) * 1000). */
@@ -3858,7 +3836,7 @@ DreamV3DeviceControl(
          *
          * NOTE 2026-07-31: SPI_PG_ENABLE_STATIC_WGP_MASK is a PER-BANK register
          * (one instance per SE/SH). The GRBM_GFX_INDEX per-bank select must be
-         * written first (SE0/SH0, SE0/SH1, SE1/SH0, SE1/SH1) — otherwise host
+         * written first (SE0/SH0, SE0/SH1, SE1/SH0, SE1/SH1) ΓÇö otherwise host
          * reads/writes land on the wrong instance and appear read-only (0x0).
          * Linux writes these via GRBM select inside gfx_v10_0_get_cu_info().
          * Per-bank selects (GRBM_GFX_INDEX values, no broadcast flags):
@@ -3878,7 +3856,7 @@ DreamV3DeviceControl(
 
             /* Per-bank GRBM_GFX_INDEX values (SE/SH combinations, layout B).
              * NOTE 2026-08-01: host BAR5 writes to SPI_PG are SOS-locked on
-             * BC-250 — verified they do NOT stick on ANY bank (smn-gc-alias-scan
+             * BC-250 ΓÇö verified they do NOT stick on ANY bank (smn-gc-alias-scan
              * v2). This handler still performs the writes and then reads back to
              * report the TRUE result instead of claiming success. */
             static const ULONG BankSelects[4] = {
@@ -3902,7 +3880,7 @@ DreamV3DeviceControl(
                 /* Read back and verify the SPI gate state on this bank.
                  * CC_GC_SHADER_ARRAY_CONFIG CU mask is bits [31:19]; compare
                  * that field (0xFFF80000=0x1FFF stock 24CU vs 0xFFE00000=0x1FFE
-                 * unlocked 40CU), NOT the whole DWORD — a plain 0xFFE00000 mask
+                 * unlocked 40CU), NOT the whole DWORD ΓÇö a plain 0xFFE00000 mask
                  * is identical for both states. */
                 ULONG spiBack = DreamV3ReadRegister(DevExt, AMDBC250_REG_SPI_PG_ENABLE_STATIC_WGP_MASK);
                 ULONG ccBack = DreamV3ReadRegister(DevExt, AMDBC250_REG_CC_GC_SHADER_ARRAY_CONFIG);
@@ -3924,10 +3902,10 @@ DreamV3DeviceControl(
             if (enable) {
                 KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
                     "AMDBC250-DREAM-V4.3: *** WGP UNLOCK ENABLED *** "
-                    "CC=0xFFE00000 SPI=0x1F (WGP0-4) — %lu/4 banks verified\n", banksVerified));
+                    "CC=0xFFE00000 SPI=0x1F (WGP0-4) ΓÇö %lu/4 banks verified\n", banksVerified));
             } else {
                 KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-                    "AMDBC250-DREAM-V4.3: WGP unlock DISABLED (WGP0-2, stock) — %lu/4 banks verified\n",
+                    "AMDBC250-DREAM-V4.3: WGP unlock DISABLED (WGP0-2, stock) ΓÇö %lu/4 banks verified\n",
                     banksVerified));
             }
             status = STATUS_SUCCESS;
@@ -4150,7 +4128,7 @@ DreamV3DeviceControl(
                 KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                     "AMDBC250-DREAM-V4.3: GPU reg[0x0000] = 0x%08X (NBIO_MAP test)\n", gpuId));
                 
-                /* 40 CU unlock deferred — inaccurate offsets cause hangs */
+                /* 40 CU unlock deferred ΓÇö inaccurate offsets cause hangs */
                 
                 DevExt->HardwareInitialized = TRUE;
                 DevExt->GpuClockMhz = AMDBC250_BOOST_CLOCK_MHZ;
@@ -4167,7 +4145,7 @@ DreamV3DeviceControl(
                         "AMDBC250-DREAM-V4.3: KIQ init FAILED in NBIO_MAP mode\n"));
                 }
 
-                /* SDMA ring init SKIPPED — suspected BSOD 0x1a source.
+                /* SDMA ring init SKIPPED ΓÇö suspected BSOD 0x1a source.
                  * Register range 0xE000-0xE018 needs probing first. */
                 KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                     "AMDBC250-DREAM-V4.3: SDMA ring init SKIPPED\n"));
@@ -4183,14 +4161,14 @@ DreamV3DeviceControl(
              * test below, Step_HwInit stays 100. */
             DreamV3MarkHwInitStep(100);
 
-            /* Verify GPU is alive � read a known register */
+            /* Verify GPU is alive ∩┐╜ read a known register */
             {
                 ULONG gpuId = DreamV3ReadRegister(DevExt, 0x0000); /* GPU_ID or scratch */
                 KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                     "AMDBC250-DREAM-V4.3: GPU reg[0x0000] = 0x%08X (GPU alive test)\n", gpuId));
             }
 
-            /* Try to enable PCI Memory Space � scan for BC-250 via IO ports */
+            /* Try to enable PCI Memory Space ∩┐╜ scan for BC-250 via IO ports */
             {
                 BOOLEAN foundPci = FALSE;
                 for (ULONG bus = 0; bus < 256 && !foundPci; bus++) {
@@ -4229,7 +4207,7 @@ DreamV3DeviceControl(
             if (!NT_SUCCESS(hwStatus)) {
                 KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
                     "AMDBC250-DREAM-V4.3: HwInitialize failed: 0x%08X (continuing anyway)\n", hwStatus));
-                /* Continue � some things may still work */
+                /* Continue ∩┐╜ some things may still work */
             }
 
             DevExt->HardwareInitialized = TRUE;
@@ -4274,7 +4252,7 @@ DreamV3DeviceControl(
                 break;
             }
 
-            /* PATH 1: PSP KIQ ring (preferred � KIQ_WPTR works via PSP driver) */
+            /* PATH 1: PSP KIQ ring (preferred ∩┐╜ KIQ_WPTR works via PSP driver) */
             if (Amdbc250PspKiqIsInitialized()) {
                 /* Build PM4 buffer: user commands + EOP fence (if requested).
                  * PSP KIQ submit accepts max 64 DWORDs total. */
@@ -4323,7 +4301,7 @@ DreamV3DeviceControl(
                 ULONG EopSize = 6 * sizeof(ULONG); /* EOP packet is 6 DWORDs */
                 ULONG TotalBytes = BytesNeeded + (SendPm4->FenceValue > 0 ? EopSize : 0);
 
-                /* Ring wrap if needed (including space for EOP) — use 64-bit to avoid overflow */
+                /* Ring wrap if needed (including space for EOP) ΓÇö use 64-bit to avoid overflow */
                 if ((ULONG64)WPtr + TotalBytes > RingSize) {
                     ULONG NopCount = (RingSize - WPtr) / sizeof(ULONG);
                     for (ULONG i = 0; i < NopCount; i++) {
@@ -4343,7 +4321,7 @@ DreamV3DeviceControl(
 
                 /* Write EOP fence BEFORE doorbell
                  * NOTE: Fence PM4 is written to GfxRing buffer but doorbell
-                 * below kicks HQD/KIQ ring — fence never consumed by HW.
+                 * below kicks HQD/KIQ ring ΓÇö fence never consumed by HW.
                  * TODO: Move fence to SavedPm4Cmds/KIQ ring instead. */
                 if (SendPm4->FenceValue > 0) {
                     DreamV3WriteEopFence(DevExt, (ULONG64)SendPm4->FenceValue);
@@ -4750,7 +4728,7 @@ DreamV3DeviceControl(
                         "AMDBC250-DREAM-V4.3: IO port write B%u:D%u:F%u+0x%02X = 0x%08X readback 0x%08X (blocked)\n",
                         w->Bus, w->Device, w->Function, w->Offset, w->Value, readback));
 
-                    /* Method 2: ECAM write (memory-mapped config) � try all known bases */
+                    /* Method 2: ECAM write (memory-mapped config) ∩┐╜ try all known bases */
                     PHYSICAL_ADDRESS ecamBases[] = {
                         {0xE0000000, 0}, {0xF0000000, 0}, {0xF8000000, 0}, {0xFC000000, 0},
                     };
@@ -4763,7 +4741,7 @@ DreamV3DeviceControl(
                             /* Test if ECAM is alive by reading vendor ID first */
                             UINT16 vid = *(volatile UINT16*)va;
                             if (vid != 0x0000 && vid != 0xFFFF) {
-                                /* ECAM is responsive � write the value */
+                                /* ECAM is responsive ∩┐╜ write the value */
                                 *(volatile PULONG)(va) = w->Value;
                                 KeMemoryBarrier();
                                 ULONG ecamReadback = *(volatile PULONG)(va);
@@ -5575,7 +5553,7 @@ DreamV3DeviceControl(
             PVOID ptPml4Va = NULL, ptPdpVa = NULL, ptPdVa = NULL, ptPtVa = NULL;
             PHYSICAL_ADDRESS ptPml4Pa = {0}, ptPdpPa = {0}, ptPdPa = {0}, ptPtPa = {0};
 
-            /* Register access via DreamV3WriteRegister (WRITE_REGISTER_ULONG � works on Win11 26100)
+            /* Register access via DreamV3WriteRegister (WRITE_REGISTER_ULONG ∩┐╜ works on Win11 26100)
              * NOTE: Direct BAR5 volatile pointer writes are silently dropped on Win11 26100!
              * Must use DreamV3WriteRegister/ReadRegister which use WDK WRITE_REGISTER_ULONG macro. */
             #define BAR5_WRITE(off, val) DreamV3WriteRegister(DevExt, (off), (val))
@@ -5702,17 +5680,17 @@ DreamV3DeviceControl(
              *   GCVM_CONTEXT0_PT_BASE_HI = 0x6C90
              *
              * RDNA2 4-level page table: PML4 ? PDP ? PD ? PT
-             * Each level: 512 entries � 8 bytes = 4KB per page
+             * Each level: 512 entries ∩┐╜ 8 bytes = 4KB per page
              * PTE format: (PA & 0xFFFFFFFFF000) | flags
              *   flags: bit0=VALID bit5=READABLE bit6=WRITABLE
              *
              * We create identity mapping (VA=PA) for the ring buffer page.
              */
-            #define GCVM_CONTEXT0_CNTL_REG     0x0B460   /* OLD offset � verified WRITABLE */
+            #define GCVM_CONTEXT0_CNTL_REG     0x0B460   /* OLD offset ∩┐╜ verified WRITABLE */
             #define MC_VM_FB_LOCATION_BASE      AMDBC250_REG_MC_VM_FB_LOCATION_BASE  /* 0x9520 from hw.h */
-            #define GCVM_CONTEXT0_PT_BASE_LO   0x6C8C    /* Linux offset � verified WRITABLE */
-            #define GCVM_CONTEXT0_PT_BASE_HI   0x6C90    /* Linux offset � verified WRITABLE */
-            #define GCVM_L2_CNTL_REG           0x0B360   /* OLD offset � verified WRITABLE */
+            #define GCVM_CONTEXT0_PT_BASE_LO   0x6C8C    /* Linux offset ∩┐╜ verified WRITABLE */
+            #define GCVM_CONTEXT0_PT_BASE_HI   0x6C90    /* Linux offset ∩┐╜ verified WRITABLE */
+            #define GCVM_L2_CNTL_REG           0x0B360   /* OLD offset ∩┐╜ verified WRITABLE */
 
             /* Step 2b: Set up GCVM page tables for identity mapping */
             {
@@ -5759,7 +5737,7 @@ DreamV3DeviceControl(
                         BAR5_READ(GCVM_CONTEXT0_PT_BASE_HI),
                         BAR5_READ(GCVM_CONTEXT0_PT_BASE_LO)));
 
-                    /* Enable GCVM context 0 — MUST be 4-level (PAGE_TABLE_DEPTH=3).
+                    /* Enable GCVM context 0 ΓÇö MUST be 4-level (PAGE_TABLE_DEPTH=3).
                      * Ring GPU VA is 0xF4FFFA000 (bits[39:30]=0xD); a flat
                      * (depth=0) single-level PT can't walk those top bits -> VM
                      * fault -> ring never fetched. depth field = bits[2:1]=0x06. */
@@ -5855,7 +5833,7 @@ DreamV3DeviceControl(
                 ULONG meVal = BAR5_READ(ME_CNTL);
                 BAR5_WRITE(ME_CNTL, meVal & ~((1 << 28) | (1 << 30)));  /* clear ME_HALT | PFP_HALT */
             }
-            /* Step 18b: UNHALT MEC — KIQ runs on MEC0; if MEC is left halted
+            /* Step 18b: UNHALT MEC ΓÇö KIQ runs on MEC0; if MEC is left halted
              * (minimal PSP SOS / firmware load may leave it halted) the ring is
              * never fetched even though WPTR advances. This was the missing piece. */
             {
@@ -5889,14 +5867,14 @@ DreamV3DeviceControl(
                 if (useIb) {
                     /* IB path: write IB registers + RLC trigger (bypasses HQD/KIQ) */
                     /* Write IB registers with broadcast GRBM first */
-                    BAR5_WRITE(GRBM_INDEX, 0xE0000000);
+                    BAR5_WRITE(GRBM_INDEX, AMDBC250_GRBM_GFX_INDEX_BROADCAST_VAL);
                     BAR5_WRITE(0x3BAC, (ULONG)(ringPa.QuadPart & 0xFFFFFFFF));
                     BAR5_WRITE(0x3BB0, (ULONG)(ringPa.QuadPart >> 32));
                     BAR5_WRITE(0x3BC0, 32);  /* 32 dwords */
                     /* Then set ME=1 for RLC scheduler trigger */
                     BAR5_WRITE(GRBM_INDEX, 0x00010000);
-                    BAR5_WRITE(0xECA8, 0xA0);  /* RLC_CP_SCHEDULERS — correct offset */
-                    BAR5_WRITE(GRBM_INDEX, 0xE0000000);  /* restore broadcast */
+                    BAR5_WRITE(0xECA8, 0xA0);  /* RLC_CP_SCHEDULERS ΓÇö correct offset */
+                    BAR5_WRITE(GRBM_INDEX, AMDBC250_GRBM_GFX_INDEX_BROADCAST_VAL);  /* restore broadcast */
                     kiqTest->HqdProgrammed = 2;  /* IB mode */
                 } else {
                     /* KIQ/HQD path: KICK via DOORBELL (CP_HQD_PQ_WPTR is
@@ -5955,7 +5933,7 @@ DreamV3DeviceControl(
                 useIb ? "IB" : "KIQ",
                 kiqTest->ScratchBefore, kiqTest->ScratchAfter, kiqTest->Result));
 
-            /* Step 22b: Retry kick — if MEC was just unhalted (or the engine
+            /* Step 22b: Retry kick ΓÇö if MEC was just unhalted (or the engine
              * simply needed a second WPTR kick / more time), re-assert WPTR and
              * wait again. Capture retry diagnostics into the *_2 fields. */
             if (kiqTest->ScratchAfter != 0x5AFEBABE) {
@@ -6162,7 +6140,7 @@ DreamV3DeviceControl(
             "AMDBC250-DREAM-V4.3: LOAD_CP_FW header: total=%u hdrSize=%u ver=%u ucodeSize=%u ucodeOff=%u jtOffDw=%u jtSizeDw=%u\n",
             totalSize, hdrSizeBytes, ucodeVersion, ucodeSize, ucodeOffset, jtOffsetDw, jtSizeDw));
 
-        /* Validate header fields — avoid integer overflow */
+        /* Validate header fields ΓÇö avoid integer overflow */
         if (ucodeSize == 0 || ucodeOffset < hdrSizeBytes || 
             ucodeSize > fwSize || ucodeOffset > fwSize - ucodeSize) {
             KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
@@ -6198,7 +6176,7 @@ DreamV3DeviceControl(
          * the host IC_BASE DMA + CP unhalt path.
          *
          * On BC-250 the host cannot un-halt a CP engine after loading microcode
-         * — doing so lets the GPU run the firmware and perform a rogue host DMA
+         * ΓÇö doing so lets the GPU run the firmware and perform a rogue host DMA
          * write that corrupts system memory (0x1A MEMORY_MANAGEMENT). The PSP
          * driver hands the blob to the SOS, which loads it through the secure
          * mailbox (GFX_CMD_ID_LOAD_IP_FW), exactly like Linux does for this ASIC.
@@ -6275,7 +6253,7 @@ DreamV3DeviceControl(
         break;
     }
 
-    /* --- Register state dump (read-only, safe � no state modification) --- */
+    /* --- Register state dump (read-only, safe ∩┐╜ no state modification) --- */
     case IOCTL_AMDBC250_REG_DUMP: {
         if (outputLen >= sizeof(AMDBC250_IOCTL_REG_DUMP) && DevExt && DevExt->MmioVirtualBase) {
             PAMDBC250_IOCTL_REG_DUMP dump = (PAMDBC250_IOCTL_REG_DUMP)outputBuffer;
@@ -6293,7 +6271,7 @@ DreamV3DeviceControl(
             dump->SpiWgpMask          = DUMP_REG32(0x34FC);
             dump->GrbmGfxIndex        = DUMP_REG32(0x34D0);
 
-            /* CP registers � BOTH sets of offsets to compare:
+            /* CP registers ∩┐╜ BOTH sets of offsets to compare:
              * The fresh boot dump used Navi10+GC_BASE and got 0xFFFFFFFF for CP.
              * The GPU_KIQ_TEST uses raw BAR5 offsets that work.
              * Let's dump BOTH and see. */
@@ -6381,7 +6359,7 @@ DreamV3DeviceControl(
             /* 0x0B460 = empirically-verified alive GCVM_CONTEXT0_CNTL (see hw.h) */
             #define KIQ_GCVM_CTX0_CNTL  AMDBC250_REG_GCVM_CONTEXT0_CNTL
 
-            /* Step 0: Save BIOS state (use DreamV3ReadRegister — no volatile pointer!) */
+            /* Step 0: Save BIOS state (use DreamV3ReadRegister ΓÇö no volatile pointer!) */
             kt->ScratchBefore           = DreamV3ReadRegister(DevExt, KIQ_SCRATCH_OFF);
             kt->KiqRptrBefore           = DreamV3ReadRegister(DevExt, KIQ_RPTR_OFF);
             kt->MeCntlBefore            = DreamV3ReadRegister(DevExt, KIQ_ME_CNTL_OFF);
@@ -6412,7 +6390,7 @@ DreamV3DeviceControl(
 
             KdPrint(("AMDBC250-DREAM-V4.3: KIQ_NOP_TEST ring PA=0x%llX\n", ringPa.QuadPart));
 
-            /* Step 2: Read current KIQ_BASE — if non-zero, BIOS configured KIQ */
+            /* Step 2: Read current KIQ_BASE ΓÇö if non-zero, BIOS configured KIQ */
             {
                 ULONG kBaseLo = DreamV3ReadRegister(DevExt, KIQ_BASE_LO_OFF);
                 ULONG kBaseHi = DreamV3ReadRegister(DevExt, KIQ_BASE_HI_OFF);
@@ -6535,7 +6513,7 @@ DreamV3DeviceControl(
             #define BIOS_GCVM_CONTEXT0_CNTL    0x0B460
             #define BIOS_GCVM_CONTEXT0_PT_BASE_LO 0x6C8C
 
-            /* Step 0: Wake up GPU from GFXOFF � write ME_CNTL to trigger power-on */
+            /* Step 0: Wake up GPU from GFXOFF ∩┐╜ write ME_CNTL to trigger power-on */
             {
                 ULONG meVal = BIOS_READ(BIOS_ME_CNTL_OFF);
                 KdPrint(("KIQ_BIOS_RING: ME_CNTL before wake=0x%08X\n", meVal));
@@ -6547,7 +6525,7 @@ DreamV3DeviceControl(
                 KdPrint(("KIQ_BIOS_RING: ME_CNTL after wake=0x%08X\n", meVal));
             }
 
-            /* Step 1: Determine ring PA � read input BEFORE zeroing (METHOD_BUFFERED shares buffer) */
+            /* Step 1: Determine ring PA ∩┐╜ read input BEFORE zeroing (METHOD_BUFFERED shares buffer) */
             PHYSICAL_ADDRESS ringPa = {0};
             if (inputLen >= sizeof(AMDBC250_IOCTL_KIQ_BIOS_RING_SUBMIT)) {
                 PAMDBC250_IOCTL_KIQ_BIOS_RING_SUBMIT inp = (PAMDBC250_IOCTL_KIQ_BIOS_RING_SUBMIT)inputBuffer;
@@ -6582,7 +6560,7 @@ DreamV3DeviceControl(
             /* If still bad, try reading from BIOS state we saved earlier */
             if (ringPa.LowPart == 0xFFFFFFFF || ringPa.HighPart == 0xFFFFFFFF ||
                 (ringPa.LowPart == 0 && ringPa.HighPart == 0)) {
-                /* GPU may need more time � try once more after longer delay */
+                /* GPU may need more time ∩┐╜ try once more after longer delay */
                 KeStallExecutionProcessor(10000);
                 ringPa.LowPart = BIOS_READ(BIOS_KIQ_BASE_LO);
                 ringPa.HighPart = BIOS_READ(BIOS_KIQ_BASE_HI);
@@ -6749,7 +6727,7 @@ DreamV3DeviceControl(
                 break;
             }
 
-            /* Step 7.5: CRITICAL � flush CPU stores before WPTR update */
+            /* Step 7.5: CRITICAL ∩┐╜ flush CPU stores before WPTR update */
             KeMemoryBarrier();
 
             /* Step 8: Set WPTR = 8 DWORDs (header + control + offset + data + 4 NOPs) */
@@ -6780,7 +6758,7 @@ DreamV3DeviceControl(
                 resp->RingDword2 = ring[2];
                 resp->RingDword3 = ring[3];
             } __except(EXCEPTION_EXECUTE_HANDLER) {
-                /* Ring may have been unmapped — non-fatal */
+                /* Ring may have been unmapped ΓÇö non-fatal */
                 resp->RingDword0 = resp->RingDword1 = resp->RingDword2 = resp->RingDword3 = 0xDEAD;
             }
 
@@ -6904,7 +6882,7 @@ DreamV3DeviceControl(
         break;
     }
 
-    case 0x8000098C: { /* IOCTL_AMDBC250_GCVM_PT_SETUP — Set up GCVM page table */
+    case 0x8000098C: { /* IOCTL_AMDBC250_GCVM_PT_SETUP ΓÇö Set up GCVM page table */
         {
             PHYSICAL_ADDRESS lowAddr = {0x100000}, highAddr = {0xFFFFFFFFFFFFFFFFULL}, boundaryAddr = {0};
             PHYSICAL_ADDRESS ringPhys, ptPhys[3];
@@ -6976,7 +6954,7 @@ DreamV3DeviceControl(
                         4096, lowR, highR, boundaryR, MmNonCached);
                     if (DevExt->GcvmRingBuf) {
                         PHYSICAL_ADDRESS ringPa = MmGetPhysicalAddress(DevExt->GcvmRingBuf);
-                        DevExt->GcvmRingBufPa = ringPa.QuadPart;
+                        DevExt->GcvmRingBufPa = ringPa;
                         RtlZeroMemory(DevExt->GcvmRingBuf, 4096);
 
                         /* Write PM4 NOP at ring offset 0 */
@@ -6993,7 +6971,7 @@ DreamV3DeviceControl(
                     }
                 } else {
                     /* Reuse existing ring buffer */
-                    ringPhys.QuadPart = DevExt->GcvmRingBufPa;
+                    ringPhys.QuadPart = DevExt->GcvmRingBufPa.QuadPart;
 
                     /* Write PM4 NOP at ring offset 0 (re-init) */
                     RtlZeroMemory(DevExt->GcvmRingBuf, 4096);
@@ -7044,10 +7022,11 @@ DreamV3DeviceControl(
                 }
                 if (ptPages[0] == NULL || ptPages[1] == NULL || ptPages[2] == NULL) {
                     for (i = 0; i < 3; i++) {
-                        if (newlyAllocated[i] && DevExt->GcvmPtPages[i]) {
-                            MmFreeContiguousMemory(DevExt->GcvmPtPages[i]);
-                            DevExt->GcvmPtPages[i] = NULL;
-                        }
+                    if (newlyAllocated[i] && DevExt->GcvmPtPages[i] != NULL) {
+                        MmFreeContiguousMemory(DevExt->GcvmPtPages[i]);
+                        DevExt->GcvmPtPages[i] = NULL;
+                    }
+
                         ptPages[i] = NULL;
                     }
                     resp->Result = 0xDEADF00D;
@@ -7162,7 +7141,7 @@ DreamV3DeviceControl(
             DevExt->GcvmRingBuf = MmAllocateContiguousMemorySpecifyCache(
                 4096, lowR, highR, boundaryR, MmNonCached);
             if (DevExt->GcvmRingBuf) {
-                DevExt->GcvmRingBufPa = MmGetPhysicalAddress(DevExt->GcvmRingBuf).QuadPart;
+                DevExt->GcvmRingBufPa = MmGetPhysicalAddress(DevExt->GcvmRingBuf);
                 RtlZeroMemory(DevExt->GcvmRingBuf, 4096);
                 KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                     "AMDBC250-DREAM-V4.3: EXEC_RING: ring PA=0x%llX\n",
@@ -7176,7 +7155,7 @@ DreamV3DeviceControl(
            HQD fields at offsets 128-186. Shader at byte 1024 (dword 256). */
         {
             volatile PULONG buf = (volatile PULONG)DevExt->GcvmRingBuf;
-            ULONG64 ringPa = DevExt->GcvmRingBufPa;
+            ULONG64 ringPa = DevExt->GcvmRingBufPa.QuadPart;
             ULONG64 shaderPa = ringPa + 1024;
             int i;
             for (i = 0; i < 256; i++) buf[i] = 0;
@@ -7231,8 +7210,8 @@ DreamV3DeviceControl(
         DreamV3SmuSendMessage(DevExt, SMU_MSG_GetGfxFrequency, 0, &rp->SmuGfxFreqMhz);
 
         /* --- Baseline (MQD is at ring buffer offset 0) --- */
-        rp->RingPa = DevExt->GcvmRingBufPa;
-        rp->MqdPa  = DevExt->GcvmRingBufPa;
+        rp->RingPa = DevExt->GcvmRingBufPa.QuadPart;
+        rp->MqdPa  = DevExt->GcvmRingBufPa.QuadPart;
         rp->ScratchBefore = DreamV3ReadRegister(DevExt, AMDBC250_REG_SCRATCH_REG0);
 
         /* Step 1: Select ME=1 (MEC) AND unhalt ME + MEC + enable schedulers */
@@ -7262,15 +7241,15 @@ DreamV3DeviceControl(
         DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_HQD_ACTIVE, 0);
         rp->PqCtrlAfter = DreamV3ReadRegister(DevExt, AMDBC250_REG_CP_HQD_PQ_CONTROL);
         DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_MQD_BASE_ADDR,
-            (ULONG)(DevExt->GcvmRingBufPa & 0xFFFFFFFF));
+            (ULONG)(DevExt->GcvmRingBufPa.QuadPart & 0xFFFFFFFF));
         DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_MQD_BASE_ADDR_HI,
-            (ULONG)(DevExt->GcvmRingBufPa >> 32));
+            (ULONG)(DevExt->GcvmRingBufPa.QuadPart >> 32));
         /* Ring buffer layout:
            0-1023  = MQD (256 dwords)
            1024+   = ring PM4 data (ring base at ringPA+1024, PQ_BASE = (ringPA+1024)>>8) */
         #define RING_DATA_OFFSET_BYTES  1024
         #define RING_DATA_OFFSET_DWORDS 256
-        ULONG64 ringDataPa = DevExt->GcvmRingBufPa + RING_DATA_OFFSET_BYTES;
+        ULONG64 ringDataPa = DevExt->GcvmRingBufPa.QuadPart + RING_DATA_OFFSET_BYTES;
         DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_HQD_PQ_BASE_LO,
             (ULONG)((ringDataPa >> 8) & 0xFFFFFFFF));
         DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_HQD_PQ_BASE_HI,
@@ -7363,7 +7342,7 @@ DreamV3DeviceControl(
         if (DevExt->GcvmRingBuf != NULL) {
             /* Shader well past MQD + ring area (offset 3072 = dword 768) */
             #define SHADER_OFFSET_BYTES  3072
-            ULONG64 shaderPa = DevExt->GcvmRingBufPa + SHADER_OFFSET_BYTES;
+            ULONG64 shaderPa = DevExt->GcvmRingBufPa.QuadPart + SHADER_OFFSET_BYTES;
             WRITE_REGISTER_ULONG((PULONG)((PUCHAR)DevExt->GcvmRingBuf + SHADER_OFFSET_BYTES), 0xBF810000UL);
             KeMemoryBarrier();
             /* Select ME=1 (MEC) */
@@ -7435,7 +7414,7 @@ Cleanup:
 }
 
 /*===========================================================================
-  SDMA Copy Engine � Hardware buffer copies via DMA
+  SDMA Copy Engine ∩┐╜ Hardware buffer copies via DMA
   
   SDMA (System DMA) engine copies data without CPU involvement.
   Used for: buffer copies, texture uploads, buffer fills.
@@ -7596,7 +7575,7 @@ DreamV3SdmaFillBuffer(
 }
 
 /*===========================================================================
-  TDR (Timeout Detection and Recovery) � Enhanced Reset
+  TDR (Timeout Detection and Recovery) ∩┐╜ Enhanced Reset
   
   Windows TDR mechanism: if GPU doesn't respond within 2 seconds,
   the display driver is reset. Our driver implements:
@@ -7701,7 +7680,7 @@ DreamV3TdrReset(
 }
 
 /*===========================================================================
-  EDID Parsing � Read monitor capabilities from display
+  EDID Parsing ∩┐╜ Read monitor capabilities from display
   
   EDID (Extended Display Identification Data) contains:
   - Monitor name, serial, manufacture date
@@ -7823,7 +7802,7 @@ DreamV3ReadEdid(
 }
 
 /*===========================================================================
-  Shader Compilation Stub � DXBC ? PM4 command conversion
+  Shader Compilation Stub ∩┐╜ DXBC ? PM4 command conversion
   
   In a real driver, this would:
   1. Parse DXBC (DirectX Bytecode) shader binary
@@ -7882,19 +7861,6 @@ DreamV3ShaderCompileStub(
 // Output: ULONG Value (register value read)
 // This allows PSP driver to access mailbox registers on Windows 11 26100
 // where MmMapIoSpace for BAR5 is blocked from the PSP driver.
-
-/* Return the GPU BAR5 virtual mapping (or NULL if INIT_HARDWARE not done).
- * Used by the PSP proxy so it can read SOS status (C2PMSG_81) directly from
- * the GPU MMIO when the PSP driver's own GpuMmioBase is not yet established. */
-PVOID
-Amdbc250PspGetGpuBar5Va(VOID)
-{
-    if (!g_ControlDevice) return NULL;
-    PDREAM_V3_DEVICE_EXTENSION ext =
-        (PDREAM_V3_DEVICE_EXTENSION)g_ControlDevice->DeviceExtension;
-    if (!ext) return NULL;
-    return ext->MmioVirtualBase;
-}
 
 /* Publish the GPU BAR5 virtual mapping for the PSP proxy (called by INIT_HARDWARE). */
 VOID
