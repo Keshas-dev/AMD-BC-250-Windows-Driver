@@ -8,13 +8,14 @@ AMD BC-250 Windows driver project by Keshas. Goal: fully working GPU driver for 
 
 ## Hardware
 
-- **SoC:** AMD BC-250 (Cyan Skillfish) — 24 CU RDNA2, 16GB GDDR6 shared memory
+- **SoC:** AMD BC-250 (Cyan Skillfish) — RDNA2, 16GB GDDR6 shared memory
+  - **40 CU die, 24 active** (harvest mask — `CC_GC_SHADER_ARRAY_CONFIG` = 0xFFF80000 stock; 40 CU unlock via Linux/EFI targets 0xFFE00000). BC-250 is a full PS5 Oberon die (8× Zen2 + RDNA2 + 40 CUs), NOT a fused mining ASIC — features are SOS/SMU-masked, not fused.
 - **GPU ID:** 0x9FFF9700, **BIOS:** P4.00G
-- **Memory:** CPU and GPU share GDDR6 (UMA) — VRAM at 0xC0000000
+- **Memory:** CPU and GPU share GDDR6 (UMA). Linux reports **VRAM 256MB at 0xF400000000**; our driver defaults to 16GB total / 4GB visible. Split is configurable via memcfg (256MB–12GB, stored in CMOS).
 - **GPU BAR5:** 0xFE800000 (512KB MMIO register space)
 - **PSP BAR0:** 0xFD600000 (256KB)
 - **GC_BASE:** 0x1260 (BC-250 uses shifted register offsets vs Navi10)
-- **SMU version:** 88.6.0 (driver_if=8)
+- **SMU version:** 88.6.0 (driver_if=8); Linux runs 88.7.1
 - **PSP IP:** v11.0.8 (CYAN_SKILLFISH2 variant)
 
 ---
@@ -39,7 +40,7 @@ AMD BC-250 Windows driver project by Keshas. Goal: fully working GPU driver for 
 
 ### Not Working / Blocked
 - ❌ **SDMA self-test** — ring not initialized (RB_BASE_LO=0x00555555, no copy engine)
-- ❌ **3D graphics** — WGP compute permanently disabled (SPI_PG=0, SOS-locked)
+- ❌ **3D graphics on Windows WDM** — WGP compute SOS-locked (SPI_PG=0); NOT hardware-fused, Linux amdgpu runs shaders
 - ❌ **WGP unlock on Windows** — SPI_PG_ENABLE_STATIC_WGP_MASK SOS-locked
 - ❌ **KIQ_SIZE=0** — hardware read-only, cannot create compute rings
 - ❌ **Some PSP commands** — `GET_FW_ATTESTATION2` (0x10) and `FB_FW_RESERV_ADDR` (0x50) return `PSP_ERR_UNKNOWN_COMMAND` (0x100): BC-250 SOS does not implement them (protocol itself works)
@@ -166,9 +167,7 @@ GET_FW_ATTESTATION2 (0x10) / FB_FW_RESERV_ADDR (0x50): 0x00000100 UNKNOWN_COMMAN
 - ✅ **GCVM** — PT_BASE0 (0x0B408) writable; PT_BASE (0x0B608) HW-locked
 - ✅ **TLB invalidation** works (0x6C0C/0x6C10 protocol)
 - ✅ **GPU_ID** = 0x9FFF9700, **GRBM_STATUS** = 0x00000000 (idle)
-- ✅ **CC_ARRAY_CONFIG** (0x9C1C) — partially writable (bits 24-28: 0x1F000000)
-- ✅ **SPI_PG_ENABLE_STATIC_WGP_MASK** (0x5C3C) — READ-ONLY 0 (WGPs fused off)
-- ✅ **RLC_PG_ALWAYS_ON_WGP_MASK** (0x3D64) — READ-ONLY 0xFFFFFFFF
+- ✅ **CC_ARRAY_CONFIG** (0x9C1C) — partially writable (bits 24-28: 0x1F000000), persists across boots
 - ✅ **DISPATCH_INITIATOR** (0x80E0) — W1C trigger, VALID consumed but no execution
 - ✅ **COMPUTE_PGM_LO** (0x8110) — WRITABLE, persists across boots (shadow)
 - ✅ **CP_MQD_BASE_ADDR** (0x9104) — WRITABLE
@@ -179,7 +178,7 @@ GET_FW_ATTESTATION2 (0x10) / FB_FW_RESERV_ADDR (0x50): 0x00000100 UNKNOWN_COMMAN
 - ❌ **CP_HQD_*** (0xDAC0-0xDBFF) — all NBIO blocked (writes silently dropped)
 - ❌ **KIQ_SIZE** (0xE068) — read-only=0, cannot create compute rings
 - ❌ **GFX_RING0_BASE_LO** (0xDA60) — read-only, BIOS sets ring base
-- ❌ **SPI_PG_ENABLE_STATIC_WGP_MASK** (0x5C3C) — SOS-locked, reads 0
+- ❌ **SPI_PG_ENABLE_STATIC_WGP_MASK** (0x5C3C) — SOS-locked, reads 0 (per-bank GRBM selects confirmed correct; Linux can write it, host BAR5 cannot)
 - ❌ **RLC_PG_ALWAYS_ON_WGP_MASK** (0x3D64) — read-only 0xFFFFFFFF
 - ❌ **GRBM_GFX_CNTL** (0x2022) — doesn't exist on BC-250
 
@@ -316,21 +315,25 @@ Proof (`psp-ring-submit-test.exe` against installed atikmdag.sys):
 
 ## Community Findings (GabriWar/bc250-rocm-working)
 
-### WGP Registers Pre-Unlocked from VBIOS
+> ⚠️ These are **Linux** observations. **Our Windows unit does NOT reproduce them**
+> (SPI_PG reads 0 even with correct per-bank GRBM selects, RLC_PG reads 0xFFFFFFFF
+> read-only) — see "Hardware Locked" above and AGENTS.md 2026-08-01.
+
+### WGP Registers Pre-Unlocked from VBIOS (Linux claim)
 - **SPI_PG_ENABLE_STATIC_WGP_MASK** = 0x1F at boot (after VBIOS POST)
 - **RLC_PG_ALWAYS_ON_WGP_MASK** = 0x1F at boot
 - **CC_GC_SHADER_ARRAY_CONFIG** = 0xFFE00000 (harvest mask from fuse)
-- **Our driver reads 0 for SPI_PG even with correct per-bank GRBM selects** — SOS-locked from host writes, not a GRBM broadcast issue (verified 2026-08-01)
 
 ### SDMA Firmware Broken on BC-250
 - `cyan_skillfish2_sdma.bin` (v0x34) **never drives user queues**
 - `navi12_sdma.bin` (v0x2c) **works correctly** on BC-250 silicon (+20% H2D bandwidth)
 - No signature checking on BC-250 — other chips' firmware loads without rejection
 
-### GRBM_GFX_INDEX Broadcast Correction
-- **Correct broadcast for gfx10:** 0x15000000 (INST_BCAST_WR bit24 | SH_BCAST_WR bit26 | SE_BCAST_WR bit28)
-- **Our hw.h documents 0xE0000000** — matches older soc15 layout, NOT gfx10
-- Per-bank selects: SH=1<<8, SE=1<<16 (matches Linux `gfx_v9_0_select_se_sh`)
+### GRBM_GFX_INDEX Layout (RESOLVED 2026-08-01)
+- **hw.h documents BOTH layouts** (inc/amdbc250_dream_hw.h:410-455):
+  - A) Linux gfx9/gfx10: INST bits 7:0, SH 15:8, SE 23:16, broadcast = **0x15000000** — the macro `AMDBC250_GRBM_GFX_INDEX_BROADCAST_VAL` uses this (correct for per-bank WGP/SE/SH selects)
+  - B) older soc15: MEID/PIPEID/QUEUEID, broadcast = 0xE0000000 — KIQ select uses plain ME=1 (0x00010000), verified that KIQ regs only respond to layout B
+- Empirically: per-bank A-layout selects read SPI_PG=0 on ALL banks → the SPI_PG=0 result is SOS-locking, NOT a wrong bank select.
 
 ---
 
@@ -369,34 +372,33 @@ This allows **GPU register control** and hardware understanding, but **does not 
 
 ## Code Review: Bugs Found & Fixed
 
-### Fixed Bugs (17 total)
-| # | File | Bug | Fix Date |
-|---|------|-----|----------|
-| 1 | kmd.c | Integer overflow in READ/WRITE_REG bounds check | 2026-06-26 |
-| 2 | fw_load.c | BAR5_U32 volatile ptr silently dropped on Win11 26100 | 2026-06-26 |
-| 3 | kmd.c | LOAD_CP_FW halts ALL engines when only MEC needs loading | 2026-06-26 |
-| 4 | fw_load.c | Integer overflow in firmware header validation | 2026-06-26 |
-| 5 | kmd.c | Integer overflow in JT bounds check | 2026-06-26 |
-| 6 | kmd.c | SEND_PM4 ring wrap 32-bit overflow | 2026-06-26 |
-| 7 | PspKiq.c | body_size=1 → 4 (mismatch with PspCore.c) | 2026-06-26 |
-| 8 | PspKiq.c | Default ring size 0x2000 exceeds 9-bit WPTR max | 2026-06-26 |
-| 9 | PspKiq.c, PspCore.c | PspGpuProxyWriteRegister return values ignored | 2026-06-26 |
-| 10 | PspCore.c | Race condition on g_GpuDriverHandle init | 2026-06-26 |
-| 11 | hw.h:378 | CP_HQD_PQ_WPTR_POLL_CNTL = 0x9148 (dup of PQ_CONTROL) | 2026-08-07 |
-| 12 | test-tools/bar5-smn-test.c | Used header IOCTL codes (METHOD_BUFFERED) instead of driver's METHOD_NEITHER | 2026-08-13 |
-| 13 | test-tools/psp-fw-load.c | IOCTL code 0x80002480 instead of 0x80002483 | 2026-08-13 |
-| 14 | test-tools/psp-fw-load.c | SDMA firmware names wrong (cyan_skillfish2_sdma.bin → navi12_sdma.bin) | 2026-08-13 |
+### Fixed Bugs (17 driver + 3 test-tool — from 2026-08-13 SDMA/IOCTL audit)
+| # | Area | Bug | Status |
+|---|------|-----|--------|
+| 1 | BAR5_PROXY | Integer overflow in `offset + 4` (wraps when offset >= 0xFFFFFFFC) | FIXED |
+| 2 | RLC | RLC_CP_SCHEDULERS at 0xECA1 not 4-byte aligned | FIXED (uses 0xECA8, writable) |
+| 3 | GCVM | Page table pages double-freed on error | FIXED (`newlyAllocated[]` tracking) |
+| 4 | IOCTL | Name collision between GPU and PSP driver | FIXED (PSP uses raw 0x900) |
+| 5 | REG_DUMP | Reads GRBM_GFX_INDEX at wrong offset 0x33C4 | FIXED (reads 0x34D0) |
+| 6 | GCVM | Invalidate regs mismatch (hw.h 0x0B51C vs working 0x6C0C) | FIXED (both use 0x6C0C/0x6C10) |
+| 7 | REG_DUMP | GPU_ID read from 3 different offsets | FIXED (all use 0x0000) |
+| 8 | KIQ | KIQ_NOP_TEST / KIQ_BIOS_RING_SUBMIT lack `__try/__except` | FIXED (SEH added) |
+| 9 | PSP | PspGpuProxyWriteRegister return value ignored | FIXED |
+| 10 | SEND_PM4 | Ring wrap check 32-bit overflow | FIXED (cast to ULONG64) |
+| 11 | GCVM_PT | No MmioSize bounds check | FIXED |
+| 12 | PSP proxy | Race on init (no lock) | FIXED (spinlock + guard) |
+| 13 | LOAD_CP_FW | Halts ALL engines for MEC-only load | FIXED (targets fwType) |
+| 14 | GCVM | Page table pages never freed on unload | FIXED (freed in DreamV3WdmUnload) |
+| 15 | REG_DUMP | Reads SDMA0_CNTL at 0x10040 (wrong) | FIXED (uses hw.h 0xE018) |
+| 16 | hw.h | MEC_ME1_HALT bit may be inverted | DOCUMENTED |
+| 17 | hw.h | CpRb1BaseProbe field mislabels GFX ring0 regs | DOCUMENTED |
 
-### Remaining Bugs (7)
-| # | File | Description | Priority |
-|---|------|-------------|----------|
-| 1 | hw.h:360, PspKiq.c:57 | RLC_CP_SCHEDULERS at 0xECA1 not 4-byte aligned | High |
-| 2 | ioctl.h:420, PspCore.c:17 | IOCTL name collision (CTL_CODE vs raw) | Medium |
-| 3 | kmd.c:5419 | REG_DUMP reads GRBM_GFX_INDEX at wrong offset 0x33C4 | Low |
-| 4 | hw.h:453-454, vm.c:755-762 | GCVM invalidate regs mismatch | Low |
-| 5 | kmd.c:3570,3601,5412 | GPU_ID read from 3 different offsets | Low |
-| 6 | kmd.c:5469 | REG_DUMP reads SDMA0_CNTL at 0x10040 (hw.h says 0xE018) | Low |
-| 7 | kmd.h:428-430 | GCVM page table pages never freed on unload | Low |
+### Test tool fixes
+| # | Tool | Bug | Status |
+|---|------|-----|--------|
+| 18 | bar5-smn-test.c | Used header IOCTL codes (METHOD_BUFFERED) instead of driver's METHOD_NEITHER raw values | FIXED 2026-08-13 |
+| 19 | psp-fw-load.c | IOCTL code 0x80002480 instead of 0x80002483 | FIXED 2026-08-13 |
+| 20 | psp-fw-load.c | SDMA firmware names wrong (cyan_skillfish2 → navi12) | FIXED 2026-08-13 |
 
 ---
 
@@ -424,7 +426,7 @@ This allows **GPU register control** and hardware understanding, but **does not 
 - **Firmware execution** proven by corrupting first 8 bytes of ucode and observing SCRATCH changes
 - **KIQ_WPTR** only 9 bits (not 32) — HW limitation
 - **SDMA init** can cause BSOD if registers are wrong; needs sanity check
-- **Code review before build** — saves hours of debugging (17 bugs found, 14 fixed)
+- **Code review before build** — saves hours of debugging (17 bugs found, 15 fixed + 2 documented)
 - **PSP ring protocol** — earlier claim "SOS doesn't support TOS ring creation (C2PMSG_64 bit31 never sets)" was based on the **wrong MP0 base (0x103D0/0x105D0)**. Real base is `0x58000`; the ring now works (verified 2026-08-18). Always verify the register base before concluding hardware is dead.
 - **SMU mailbox via SMN** — use NBIO BAR5+0x38/0x3C, NOT BAR5 direct (MP1 not mapped into BAR5 on BC-250)
 
@@ -433,7 +435,7 @@ This allows **GPU register control** and hardware understanding, but **does not 
 ## How to Build
 
 ### Prerequisites
-- Visual Studio 2022 (Community/Professional) — auto-detected on F: or E: drive
+- Visual Studio 2022 (Community/Professional/BuildTools) — auto-detected on C:, D:, or E: drive
 - Windows WDK 10.0.26100.0
 - Test signing: `bcdedit /set testsigning on` (Admin), Secure Boot OFF
 
@@ -506,16 +508,24 @@ reg add "HKLM\SYSTEM\CurrentControlSet\Services\atikmdag" /v DisplayWritesEnable
 
 ```
 ├── src/kmd/                        # Kernel-Mode Driver
-│   ├── amdbc250_dream_kmd.c        # DriverEntry, IOCTL dispatch
+│   ├── amdbc250_dream_kmd.c        # DriverEntry, IOCTL dispatch, PSP GPCOM ring (INIT/SUBMIT/LOAD_IP_FW)
+│   ├── amdbc250_dream_kmd_driverentry.c  # DriverEntry wrapper
+│   ├── amdbc250_dream_kmd_ddi_stubs.c    # WDDM DDI stubs
 │   ├── amdbc250_dream_hw_init.c    # GPU init, ring buffers, PSP
+│   ├── amdbc250_dream_fw_load.c    # CP firmware via IC_BASE DMA
+│   ├── amdbc250_dream_psp_fw_load.c      # PSP/SMU firmware paths
 │   ├── amdbc250_dream_power.c      # Power/thermal management
 │   ├── amdbc250_dream_vm.c         # GPUVM, GART, page tables
+│   ├── amdbc250_dream_rlc.c        # RLC init
+│   ├── amdbc250_dream_vbios.c      # VBIOS handling
+│   ├── amdbc250_dream_hdp.c        # HDP flush
 │   ├── amdbc250_psp.c              # PSP proxy driver interface
 │   └── firmware_data.h             # Embedded PSP firmware
 ├── src/umd/                        # User-Mode Driver
 │   └── amdbc250_umd_v46.c          # D3D9 DDI (45+ functions)
 ├── inc/                            # Shared headers
 │   ├── amdbc250_dream_hw.h         # Hardware register definitions
+│   ├── amdbc250_hw_extra.h         # Extra register definitions
 │   └── amdbc250_ioctl.h            # IOCTL codes + structures
 ├── test-tools/                     # Diagnostic tools
 │   ├── bar5-smn-test.c             # SMU mailbox via SMN
@@ -525,6 +535,8 @@ reg add "HKLM\SYSTEM\CurrentControlSet\Services\atikmdag" /v DisplayWritesEnable
 │   ├── psp-ring-submit-test.c      # PSP GPCOM ring init + submit (VERIFIED)
 │   ├── psp-ring-create-v2.c        # user-mode ring_create proof (base 0x58000)
 │   ├── psp-ring-load-ip-fw-test.c  # Load IP firmware via the ring
+│   ├── smn-gc-alias-scan.c         # GC SMN alias scan + per-bank GRBM
+│   ├── smn-core-unlock-test.c      # CPU core unlock via SMU Q3 0x98
 │   └── ...                         # Many more diagnostic tools
 ├── output/                         # Build output (signed drivers)
 ├── docs/                           # Technical documentation
@@ -553,6 +565,24 @@ reg add "HKLM\SYSTEM\CurrentControlSet\Services\atikmdag" /v DisplayWritesEnable
 | [docs/GCVM-ANALYSIS.md](docs/GCVM-ANALYSIS.md) | GCVM page table investigation |
 | [third-party/EFI_Boot/](third-party/EFI_Boot/) | EFI Shell WGP unlock scripts (pre-boot) |
 | [third-party/linuxinfo/](third-party/linuxinfo/) | Linux firmware blobs and dmesg logs |
+
+---
+
+## Next Steps
+
+1. **Install the new driver + run `psp-ring-load-ip-fw-test.exe` on hardware** —
+   driver is built/signed, IOCTL `0x80000C20` not yet tested (needs reinstall + reboot).
+   Expect `RespStatus=0` (SUCCESS) for firmware types the SOS implements, `0x100`
+   (UNKNOWN_COMMAND) for unsupported ones.
+2. **PSP commands after LOAD_IP_FW** — `SETUP_TMR (0x05)`, `LOAD_TOC (0x20)`,
+   `AUTOLOAD_RLC (0x21)` via the same ring.
+3. **SDMA via ring** — load `navi12_sdma.bin` (v0x2c, type 9/10) through
+   `psp-ring-load-ip-fw-test.exe`, then retry SDMA ring init/copy.
+4. **KMDOD display driver** — expand modes, EDID, power management.
+5. **WGP unlock** — EFI Shell pre-boot scripts (`third-party/EFI_Boot/`) remain the
+   only Windows-side path to write SPI_PG; NBIO is locked at EFI boot on this unit.
+6. **wddm-ps5 real WDDM miniport** (displib.lib path) — production candidate, not
+   yet display-verified.
 
 ---
 
