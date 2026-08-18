@@ -66,8 +66,8 @@ NTSYSAPI NTSTATUS NTAPI ZwQuerySystemInformation(
 
 #define AMDBC250_DREAM_V3_VERSION_MAJOR    4
 #define AMDBC250_DREAM_V3_VERSION_MINOR    3
-#define AMDBC250_DREAM_V3_VERSION_PATCH    10
-#define AMDBC250_DREAM_V3_VERSION_STRING   L"4.3.0.10"
+#define AMDBC250_DREAM_V3_VERSION_PATCH    0
+#define AMDBC250_DREAM_V3_VERSION_STRING   L"4.3.0.0"
 #define AMDBC250_DREAM_V3_DESCRIPTION      L"AMD BC-250 Dream Drivers v4.3 (RDNA2/Cyan Skillfish)"
 
 /*===========================================================================
@@ -82,8 +82,45 @@ NTSYSAPI NTSTATUS NTAPI ZwQuerySystemInformation(
 #define DREAM_V3_TAG_VM                    '3mDA'
 
 /*===========================================================================
+  SMU v11.8 Message IDs (cyan_skillfish2 / BC-250)
+ ===========================================================================*/
+
+#define SMU_MSG_TestMessage                0x01
+#define SMU_MSG_GetSmuVersion              0x02
+#define SMU_MSG_GetDriverIfVersion         0x03
+#define SMU_MSG_GetEnabledSmuFeatures       0x3D
+#define SMU_MSG_GetGfxFrequency             0x37
+#define SMU_MSG_QueryGfxclk                 0x0F
+#define SMU_MSG_GetGfxVid                   0x38
+#define SMU_MSG_ForceGfxFreq                0x39
+#define SMU_MSG_UnforceGfxFreq              0x3A
+#define SMU_MSG_ForceGfxVid                 0x3B
+#define SMU_MSG_UnforceGfxVid               0x3C
+#define SMU_MSG_QueryActiveWgp              0x1E
+#define SMU_MSG_RequestActiveWgp            0x18
+#define SMU_MSG_QueryCorePstate             0x0C
+#define SMU_MSG_QueryDfPstate               0x13
+#define SMU_MSG_RequestCorePstate           0x0B
+#define SMU_MSG_RequestGfxclk               0x0E
+#define SMU_MSG_QueryVddcrSocClock           0x11
+#define SMU_MSG_SetSoftMinCclk              0x35
+#define SMU_MSG_SetSoftMaxCclk              0x36
+#define SMU_MSG_StartTelemetryReporting     0x1B
+#define SMU_MSG_StopTelemetryReporting      0x1C
+#define SMU_MSG_SetPerfProfileIndex         0x1E
+#define SMU_MSG_SetGpuMaxTemperature        0x8C
+#define SMU_MSG_SetCpuMaxTemperature        0x8B
+#define SMU_MSG_SetMaxTemperatureCpuGpu      0x20
+#define SMU_MSG_GetCurrentCpuVoltage         0x36
+#define SMU_MSG_GetCurrentGpuVoltage         0x37
+#define SMU_MSG_GetCpuTempMax                0x40
+#define SMU_MSG_EnableSmuFeatures            0x05
+#define SMU_MSG_DisableSmuFeatures           0x06
+
+/*===========================================================================
   Ring Buffer Descriptor
-===========================================================================*/
+ ===========================================================================*/
+
 
 typedef struct _DREAM_V3_RING_BUFFER {
     PHYSICAL_ADDRESS    PhysicalAddress;
@@ -337,6 +374,14 @@ typedef struct _DREAM_V3_DEVICE_EXTENSION {
     PVOID               MmioVirtualBase;
     SIZE_T              MmioSize;
 
+    /* GCVM Ring Buffer (for EXECUTE_RING_PM4 IOCTL) */
+    PHYSICAL_ADDRESS    GcvmRingBufPa;
+    PVOID               GcvmRingBuf;
+    ULONG               SavedPm4Count;
+    ULONG               SavedPm4Cmds[64];
+    PVOID               GcvmPtPages[3];      /* GCVM page table pages (virtual addresses) */
+    PVOID               HqdMqdBuf;          /* HQD/MQD buffer */
+
     /* Doorbell BAR */
     PHYSICAL_ADDRESS    DoorbellPhysicalBase;
     PVOID               DoorbellVirtualBase;
@@ -362,6 +407,7 @@ typedef struct _DREAM_V3_DEVICE_EXTENSION {
 
     /* Ring Buffers */
     DREAM_V3_RING_BUFFER GfxRing;          /* Graphics command ring */
+    BOOLEAN             GfxRingAvailable;  /* PSP ring created successfully */
     DREAM_V3_RING_BUFFER ComputeRing;      /* Compute ring (DISABLED - HW quirk) */
     DREAM_V3_RING_BUFFER SdmaRing;         /* SDMA ring */
     DREAM_V3_IH_RING    IhRing;            /* Interrupt handler ring */
@@ -406,6 +452,20 @@ typedef struct _DREAM_V3_DEVICE_EXTENSION {
     BOOLEAN             PspAlive;            /* SOS detected alive */
     BOOLEAN             NbioUnlocked;        /* NBIO firewall bypassed */
 
+    /* PSP KM (GPCOM) ring - created via Linux psp_v11_0_8_ring_create protocol.
+       Correct MP0 C2PMSG block is at BAR5 byte base 0x58000 (ip_discovery
+       MP0 base 0x16000 is in DWORD units). */
+    BOOLEAN             PspRingCreated;      /* KM ring initialized and ACKed */
+    PHYSICAL_ADDRESS    PspRingPa;           /* ring buffer physical address */
+    PVOID               PspRingVa;           /* ring buffer kernel VA */
+    ULONG               PspRingSize;         /* ring size (0x1000) */
+    PHYSICAL_ADDRESS    PspCmdPa;            /* command buffer physical address */
+    PVOID               PspCmdVa;            /* command buffer kernel VA */
+    PHYSICAL_ADDRESS    PspFencePa;          /* fence buffer physical address */
+    PVOID               PspFenceVa;          /* fence buffer kernel VA */
+    ULONG               PspFenceValue;       /* next fence index */
+    ULONG               PspRingWptr;         /* last written wptr (dwords) */
+
     /* KIQ ring support (primary path on BC-250) */
     BOOLEAN             KiqAvailable;        /* TRUE = KIQ ring initialized and usable */
 
@@ -424,19 +484,6 @@ typedef struct _DREAM_V3_DEVICE_EXTENSION {
     /* GPU VA management */
     UINT64              NextGpuVa;
 
-    /* GCVM Page Table Setup allocations */
-    PVOID               GcvmPtPages[3];
-    PVOID               GcvmRingBuf;        /* KIQ ring buffer page (4KB) */
-    ULONG64             GcvmRingBufPa;      /* Physical address of ring buffer */
-
-    /* MQD (Memory Queue Descriptor) for compute/KIQ ring init */
-    PVOID               HqdMqdBuf;          /* MQD buffer (768 bytes) */
-    ULONG64             HqdMqdBufPa;        /* Physical address of MQD */
-
-    /* Saved PM4 commands (saved before RtlZeroMemory clobbers input buffer) */
-    ULONG               SavedPm4Cmds[64];
-    ULONG               SavedPm4Count;
-
 } DREAM_V3_DEVICE_EXTENSION, *PDREAM_V3_DEVICE_EXTENSION;
 
 /*===========================================================================
@@ -446,11 +493,6 @@ typedef struct _DREAM_V3_DEVICE_EXTENSION {
 NTSTATUS
 DreamV3HwInitialize(
     _In_ PDREAM_V3_DEVICE_EXTENSION DevExt
-    );
-
-VOID
-DreamV3MarkHwInitStep(
-    _In_ ULONG Step
     );
 
 NTSTATUS
@@ -509,50 +551,6 @@ DreamV3PspHardwareInit(
 
 NTSTATUS
 DreamV3SmuInitialize(
-    _In_ PDREAM_V3_DEVICE_EXTENSION DevExt
-    );
-
-/* SMU v11.8 PPSMC Message IDs (Cyan Skillfish) */
-#define SMU_MSG_TestMessage             0x1
-#define SMU_MSG_GetSmuVersion           0x2
-#define SMU_MSG_GetDriverIfVersion      0x3
-#define SMU_MSG_SetDriverDramAddrHigh   0x4
-#define SMU_MSG_SetDriverDramAddrLow    0x5
-#define SMU_MSG_TransferTableSmu2Dram   0x6
-#define SMU_MSG_TransferTableDram2Smu   0x7
-#define SMU_MSG_RequestGfxclk           0xE
-#define SMU_MSG_QueryGfxclk             0xF
-#define SMU_MSG_QueryVddcrSocClock      0x11
-#define SMU_MSG_QueryDfPstate           0x13
-#define SMU_MSG_RequestActiveWgp        0x18
-#define SMU_MSG_SetMinDeepSleepGfxclkFreq 0x19
-#define SMU_MSG_SetMaxDeepSleepDfllGfxDiv 0x1A
-#define SMU_MSG_AllowGfxOff             0x1B
-#define SMU_MSG_DisallowGfxOff          0x1C
-#define SMU_MSG_QueryActiveWgp          0x1E
-#define SMU_MSG_SetCoreEnableMask       0x2C
-#define SMU_MSG_InitiateGcRsmuSoftReset 0x2E
-#define SMU_MSG_SetDriverTableVMID      0x34
-#define SMU_MSG_SetSoftMinCclk          0x35
-#define SMU_MSG_SetSoftMaxCclk          0x36
-#define SMU_MSG_GetGfxFrequency         0x37
-#define SMU_MSG_GetGfxVid               0x38
-#define SMU_MSG_ForceGfxFreq            0x39
-#define SMU_MSG_UnForceGfxFreq          0x3A
-#define SMU_MSG_ForceGfxVid             0x3B
-#define SMU_MSG_UnforceGfxVid           0x3C
-#define SMU_MSG_GetEnabledSmuFeatures   0x3D
-
-NTSTATUS
-DreamV3SmuSendMessage(
-    _In_ PDREAM_V3_DEVICE_EXTENSION DevExt,
-    _In_ ULONG MessageId,
-    _In_ ULONG Parameter,
-    _Out_opt_ PULONG Response
-    );
-
-NTSTATUS
-DreamV3SmuWakeGfx(
     _In_ PDREAM_V3_DEVICE_EXTENSION DevExt
     );
 
@@ -1017,21 +1015,17 @@ typedef struct {
     ULONG64 TotalAllocatedBytes;
 } GPU_ALLOCATION_MANAGER, *PGPU_ALLOCATION_MANAGER;
 
-/* ===== DCN 2.0.1 Display Engine Registers =====
- * CORRECTED (2026-08-01): real DCN base = 0xD300 (ip_discovery DMU/0
- * base 0x34C0 in DWORD units, x4). Register = 0xD300 + mm*4 from
- * dcn_2_0_1_offset.h. These HUBPREQ macros are the stub DDI display
- * path (not used on Win11 26100 WDM fallback). */
+/* ===== DCN 2.1 Display Engine Registers ===== */
 
 /* HUBP (HUB Pipe) base addresses */
-#define HUBPREQ0_BASE                   0xEB28  /* HUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS (0xD300 + 0x060A*4) */
-#define HUBPREQ_SURFACE_ADDRESS         (HUBPREQ0_BASE + 0x00)      // [31:0]
-#define HUBPREQ_SURFACE_ADDRESS_HIGH    (HUBPREQ0_BASE + 0x04)      // [39:32]
-#define HUBPREQ_SURFACE_PITCH           (0xD300 + 0x0607 * 4)       // 0xEB1C
-#define HUBPREQ_SURFACE_HEIGHT          (0xD300 + 0x05EA * 4)       // 0xEAA8 (HUBP viewport dim)
-#define HUBPREQ_SURFACE_FORMAT          (0xD300 + 0x061A * 4)       // 0xEB68 (surface control)
-#define HUBPREQ_ENABLE                  (0xD300 + 0x05F3 * 4)       // 0xEACC (HUBP0_DCHUBP_CNTL)
-#define HUBPREQ_FLIP_CONTROL            (0xD300 + 0x061B * 4)       // 0xEB6C
+#define HUBPREQ0_BASE                   0x1C00
+#define HUBPREQ_SURFACE_ADDRESS         (HUBPREQ0_BASE + 0x04)      // [31:0]
+#define HUBPREQ_SURFACE_ADDRESS_HIGH    (HUBPREQ0_BASE + 0x08)      // [39:32]
+#define HUBPREQ_SURFACE_PITCH           (HUBPREQ0_BASE + 0x0C)
+#define HUBPREQ_SURFACE_HEIGHT          (HUBPREQ0_BASE + 0x10)
+#define HUBPREQ_SURFACE_FORMAT          (HUBPREQ0_BASE + 0x14)
+#define HUBPREQ_ENABLE                  (HUBPREQ0_BASE + 0x18)
+#define HUBPREQ_FLIP_CONTROL            (HUBPREQ0_BASE + 0x1C)
 
 /* Pixel format constants */
 #define HUBPREQ_FORMAT_ARGB8888         0x00000004
@@ -1047,5 +1041,7 @@ typedef struct {
     ULONG PixelFormat;          // HUBPREQ_FORMAT_*
     ULONG VidPnSourceId;        // Display output ID
 } DISPLAY_FLIP_REQUEST, *PDISPLAY_FLIP_REQUEST;
+
+extern PDREAM_V3_DEVICE_EXTENSION g_PciDevExt;
 
 #endif /* _AMDBC250_DREAM_V3_KMD_H_ */

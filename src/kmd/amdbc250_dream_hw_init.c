@@ -34,6 +34,7 @@ Environment:
 /* Forward declarations */
 static NTSTATUS DreamV3InitCommandProcessor(_In_ PDREAM_V3_DEVICE_EXTENSION DevExt);
 static NTSTATUS DreamV3InitMemoryController(_In_ PDREAM_V3_DEVICE_EXTENSION DevExt);
+NTSTATUS DreamV3LoadPspFirmware(_In_ PDREAM_V3_DEVICE_EXTENSION DevExt);
 static PVOID DreamV3AllocateContiguousMemory(
     _In_  SIZE_T              SizeInBytes,
     _Out_ PPHYSICAL_ADDRESS   PhysicalAddress
@@ -128,6 +129,61 @@ DreamV3HwInitialize(
     }
 
     DreamV3MarkHwInitStep(0); /* reset marker */
+
+    /* Step 0b: Load PSP firmware (SYSDRV/SOS/SMC) via C2PMSG
+     * Must happen before SOS is alive and before KIQ init.
+     * Uses direct GPU BAR5 C2PMSG registers (MP0 base 0x103D0,
+     * C2PMSG_35/36/37 = 0x1055C/0x10560/0x10564, C2PMSG_81 = 0x10614). */
+    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                "AMDBC250-DREAM-V4.3: [STEP 0b] PSP firmware load (SYSDRV/SOS/SMC)\n"));
+    Status = DreamV3LoadPspFirmware(DevExt);
+    if (!NT_SUCCESS(Status)) {
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+                   "AMDBC250-DREAM-V4.3: [STEP 0b] PSP firmware load FAILED (non-fatal): 0x%08X — SOS may already be alive from PSP driver\n", Status));
+    } else {
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                   "AMDBC250-DREAM-V4.3: [STEP 0b] PSP firmware loaded OK\n"));
+    }
+
+    /* Step 0c: WGP unlock (SPI_PG/CC_ARRAY/RLC_PG) — duggasco 40CU method
+     * Must happen early after BAR5 mapping, before SOS locks registers.
+     * CC=0 (clear harvest mask), SPI=0x1F, RLC=0x1F per shader array bank.
+     * SEH-protected: GRBM_GFX_INDEX writes can BSOD on BC-250. */
+    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                "AMDBC250-DREAM-V4.3: [STEP 0c] WGP unlock (SPI_PG/CC_ARRAY/RLC_PG)\n"));
+    if (MaxStep != 0 && 0 > MaxStep) { } else {
+    if (DevExt->MmioVirtualBase != NULL)
+    {
+        PUCHAR bar5 = (PUCHAR)DevExt->MmioVirtualBase;
+        /* Per-bank GRBM_GFX_INDEX values (Linux gfx10 layout: SH=bits 15:8, SE=bits 23:16) */
+        static const ULONG bankSel[4] = { 0x00000000, 0x00000100, 0x00010000, 0x00010100 };
+        ULONG spiBefore = READ_REGISTER_ULONG((PULONG)(bar5 + 0x5C3C));
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                    "AMDBC250-DREAM-V4.3: [STEP 0c] SPI_PG before = 0x%08X\n", spiBefore));
+        __try {
+            for (int b = 0; b < 4; b++)
+            {
+                WRITE_REGISTER_ULONG((PULONG)(bar5 + 0x34D0), bankSel[b]); /* GRBM_GFX_INDEX */
+                WRITE_REGISTER_ULONG((PULONG)(bar5 + 0x9C1C), 0x00000000); /* CC = 0 (clear harvest) */
+                WRITE_REGISTER_ULONG((PULONG)(bar5 + 0x5C3C), 0x0000001F); /* SPI_PG = 0x1F */
+                WRITE_REGISTER_ULONG((PULONG)(bar5 + 0x3D64), 0x0000001F); /* RLC_PG = 0x1F */
+            }
+            WRITE_REGISTER_ULONG((PULONG)(bar5 + 0x34D0), 0x15000000); /* broadcast */
+            ULONG spiAfter = READ_REGISTER_ULONG((PULONG)(bar5 + 0x5C3C));
+            ULONG ccAfter  = READ_REGISTER_ULONG((PULONG)(bar5 + 0x9C1C));
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                        "AMDBC250-DREAM-V4.3: [STEP 0c] WGP unlock DONE: SPI_PG=0x%08X CC=0x%08X\n", spiAfter, ccAfter));
+        } __except(EXCEPTION_EXECUTE_HANDLER) {
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+                        "AMDBC250-DREAM-V4.3: [STEP 0c] WGP unlock FAILED (SEH caught)\n"));
+        }
+    }
+    else
+    {
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+                    "AMDBC250-DREAM-V4.3: [STEP 0c] SKIP — no BAR5 mapping\n"));
+    }
+    }
 
     /* Step 1: Memory controller (GDDR6) */
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
@@ -816,7 +872,7 @@ DreamV3HwInitSdmaRing(_In_ PDREAM_V3_DEVICE_EXTENSION DevExt)
     ULONG baseLo, baseHi, cntlVal;
     PHYSICAL_ADDRESS ringPhys;
     PVOID ringVirt;
-    ULONG ringSize = 8 * 1024;  /* 8KB - match BIOS ring */
+    ULONG ringSize = 8 * 1024;  /* 8KB */
 
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                "AMDBC250-DREAM-V4.3: InitSdmaRing\n"));
@@ -834,36 +890,38 @@ DreamV3HwInitSdmaRing(_In_ PDREAM_V3_DEVICE_EXTENSION DevExt)
         DevExt->SdmaRing.Initialized = FALSE;
     }
 
-    /* Read hardware ring base registers (BASE_LO is read-only on BC-250) */
-    baseLo = DreamV3ReadRegister(DevExt, AMDBC250_REG_SDMA0_GFX_RB_BASE_LO);
-    baseHi = DreamV3ReadRegister(DevExt, AMDBC250_REG_SDMA0_GFX_RB_BASE_HI);
-
-    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-               "AMDBC250-DREAM-V4.3: SDMA hw BASE_LO=0x%08X BASE_HI=0x%08X\n", baseLo, baseHi));
-
-    /* Sanity check: if both registers are 0 or 0xFFFFFFFF, SDMA block is dead */
-    if ((baseLo == 0 && baseHi == 0) || (baseLo == 0xFFFFFFFF && baseHi == 0xFFFFFFFF)) {
+    /* Allocate a new ring buffer from contiguous memory */
+    ringVirt = DreamV3AllocateContiguousMemory(ringSize, &ringPhys);
+    if (!ringVirt) {
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
-                   "AMDBC250-DREAM-V4.3: SDMA registers dead — skipping ring init\n"));
-        return STATUS_DEVICE_NOT_READY;
-    }
-
-    /* Reconstruct ring PA from hardware register values */
-    ringPhys.QuadPart = ((ULONG64)baseHi << 32) | ((ULONG64)baseLo << 8);
-
-    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-               "AMDBC250-DREAM-V4.3: SDMA ring PA=0x%llX\n", ringPhys.QuadPart));
-
-    /* Map the existing BIOS ring buffer (don't allocate - BASE_LO is R/O) */
-    ringVirt = MmMapIoSpace(ringPhys, ringSize, MmNonCached);
-    if (ringVirt == NULL) {
-        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
-                   "AMDBC250-DREAM-V4.3: Failed to map SDMA ring at PA 0x%llX\n",
-                   ringPhys.QuadPart));
+                   "AMDBC250-DREAM-V4.3: Failed to alloc SDMA ring\n"));
         return STATUS_INSUFFICIENT_RESOURCES;
     }
 
     RtlZeroMemory(ringVirt, ringSize);
+
+    /* Try to write ring base registers. On BC-250 these may be host-RO
+     * (SOS-locked), so we ignore failure and continue with the allocated
+     * buffer so the driver at least has a valid VA for potential future use. */
+    baseLo = DreamV3ReadRegister(DevExt, AMDBC250_REG_SDMA0_GFX_RB_BASE_LO);
+    baseHi = DreamV3ReadRegister(DevExt, AMDBC250_REG_SDMA0_GFX_RB_BASE_HI);
+
+    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+               "AMDBC250-DREAM-V4.3: SDMA hw BASE_LO=0x%08X BASE_HI=0x%08X\n",
+               baseLo, baseHi));
+
+    if (baseLo != 0xFFFFFFFF && baseHi != 0xFFFFFFFF) {
+        DreamV3WriteRegister(DevExt, AMDBC250_REG_SDMA0_GFX_RB_BASE_LO,
+                             (ULONG)(ringPhys.QuadPart >> 8));
+        DreamV3WriteRegister(DevExt, AMDBC250_REG_SDMA0_GFX_RB_BASE_HI,
+                             (ULONG)(ringPhys.QuadPart >> 40));
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                   "AMDBC250-DREAM-V4.3: SDMA ring base updated to PA=0x%llX\n",
+                   ringPhys.QuadPart));
+    } else {
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+                   "AMDBC250-DREAM-V4.3: SDMA BASE regs read-only, using allocated buffer only\n"));
+    }
 
     DevExt->SdmaRing.PhysicalAddress = ringPhys;
     DevExt->SdmaRing.VirtualAddress = ringVirt;
@@ -871,17 +929,17 @@ DreamV3HwInitSdmaRing(_In_ PDREAM_V3_DEVICE_EXTENSION DevExt)
     DevExt->SdmaRing.ReadPointer = 0;
     DevExt->SdmaRing.WritePointer = 0;
     DevExt->SdmaRing.Initialized = TRUE;
-    DevExt->SdmaRing.MappedIo = TRUE;
+    DevExt->SdmaRing.MappedIo = FALSE;
 
-    /* Enable ring + clear pointers (don't touch BASE regs) */
+    /* Enable ring + clear pointers */
     cntlVal = DreamV3ReadRegister(DevExt, AMDBC250_REG_SDMA0_GFX_RB_CNTL);
-    DreamV3WriteRegister(DevExt, AMDBC250_REG_SDMA0_GFX_RB_CNTL, cntlVal | 1); /* enable */
+    DreamV3WriteRegister(DevExt, AMDBC250_REG_SDMA0_GFX_RB_CNTL, cntlVal | 1);
     DreamV3WriteRegister(DevExt, AMDBC250_REG_SDMA0_GFX_RB_RPTR, 0);
     DreamV3WriteRegister(DevExt, AMDBC250_REG_SDMA0_GFX_RB_WPTR, 0);
 
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-               "AMDBC250-DREAM-V4.3: SDMA ring initialized (mapped BIOS ring PA=0x%llX)\n",
-               ringPhys.QuadPart));
+               "AMDBC250-DREAM-V4.3: SDMA ring initialized (PA=0x%llX VA=0x%p)\n",
+               ringPhys.QuadPart, ringVirt));
 
     return STATUS_SUCCESS;
 }
@@ -946,6 +1004,28 @@ DreamV3PspHardwareInit(
                    "AMDBC250-DREAM-V4.3: KIQ init FAILED: fallback to PSP proxy\n"));
     }
 
+    /* Step 9d: Create TOS GFX ring (PSP ring protocol) so SOS trusts our commands */
+    if (DevExt->PspAlive) {
+        PAMDBC250_PSP_CONTEXT pspCtx = Amdbc250PspGetContext();
+        NTSTATUS ringStatus = STATUS_NOT_SUPPORTED;
+        if (pspCtx && pspCtx->Initialized) {
+            ringStatus = Amdbc250PspRingCreate(DevExt->MmioVirtualBase,
+                                               PSP_RING_TYPE_GFX,
+                                               (ULONG)(pspCtx->RingPhysical.LowPart),
+                                               (ULONG)(pspCtx->RingPhysical.HighPart),
+                                               PSP_RING_SIZE);
+        }
+        if (NT_SUCCESS(ringStatus)) {
+            DevExt->GfxRingAvailable = TRUE;
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                       "AMDBC250-DREAM-V4.3: TOS GFX ring created\n"));
+        } else {
+            DevExt->GfxRingAvailable = FALSE;
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+                       "AMDBC250-DREAM-V4.3: TOS GFX ring create FAILED (non-fatal): 0x%08X — SOS may lack TOS\n", ringStatus));
+        }
+    }
+
     /* Step 9b: If SOS is alive, try NBIO unlock */
     if (DevExt->PspAlive) {
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
@@ -981,8 +1061,10 @@ DreamV3HwInitDisplay(_In_ PDREAM_V3_DEVICE_EXTENSION DevExt)
 
     /* ======================================================================
      * Display init is currently SKIPPED. Windows uses Microsoft Basic
-     * Display over the UEFI GOP framebuffer for output on Win11 26100
-     * (DxgkInitialize is not exported -> WDM fallback, no DDI display).
+     * Display over the UEFI GOP framebuffer for output on Win11 26100.
+     * (Our runtime DxgkInitialize export-scan can't find the symbol - it
+     * lives in displib.lib, not dxgkrnl.sys - so we fall back to WDM
+     * IOCTL mode with no DDI display. See AGENTS.md 2026-08-01.)
      *
      * CORRECTED (2026-08-01): real DCN base is 0xD300 (not 0x6000).
      * Verified live OTG0: OTG_CONTROL 0x14004 = 0x80011311 ENABLED,

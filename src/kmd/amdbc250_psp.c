@@ -1,4 +1,4 @@
-#include <ntddk.h>
+﻿#include <ntddk.h>
 #include <wdm.h>
 #include "amdbc250_psp.h"
 
@@ -43,7 +43,7 @@ typedef struct _PSP_GPU_INFO_REMOTE {
     ULONG TmrInitialized;
 } PSP_GPU_INFO_REMOTE;
 
-static HANDLE g_PspProxyHandle = NULL;
+HANDLE g_PspProxyHandle = NULL;
 static BOOLEAN g_PspProxyAvailable = FALSE;
 static BOOLEAN g_GpcomRingAvailable = FALSE; /* GPCOM ring created by PSP driver */
 static ULONG64 g_GpcomRingPa = 0;           /* GPCOM ring physical address (returned by PSP_GET_GPU_INFO) */
@@ -54,6 +54,15 @@ static PVOID g_GpcomRingVa = NULL;          /* Mapped GPCOM ring VA */
 static PVOID g_KiqRingVa = NULL;
 static PHYSICAL_ADDRESS g_KiqRingPa = {0};
 static ULONG g_KiqRingSize = 0;
+
+/* Get GPU BAR5 virtual address from the main driver's device extension */
+PVOID Amdbc250PspGetGpuBar5Va(VOID)
+{
+    if (g_PciDevExt != NULL && g_PciDevExt->MmioVirtualBase != NULL) {
+        return g_PciDevExt->MmioVirtualBase;
+    }
+    return NULL;
+}
 static ULONG g_KiqRingWptr = 0;
 static BOOLEAN g_KiqRingInitialized = FALSE;
 static KSPIN_LOCK g_KiqRingLock;
@@ -65,7 +74,7 @@ static ULONG g_FwBufferSize = 0;
 static ULONG g_FwCount = 0;
 static KSPIN_LOCK g_FwLock;
 
-/* Shared PSP/SOS context (SOS alive state, etc.) — declared early so the
+/* Shared PSP/SOS context (SOS alive state, etc.) â€” declared early so the
  * proxy init path can update it. */
 static AMDBC250_PSP_CONTEXT g_PspContext = {0};
 
@@ -78,18 +87,26 @@ static PVOID g_GpuBar5Va = NULL;
    writes PM4 packets into the GPCOM ring, which does not work.
    See Amdbc250PspKiqReadReg and Amdbc250PspKiqSubmit. */
 
-/* # C2PMSG mailbox (proven PSPSP. Signed offsets in GPU BAR5).
- *   C2PMSG_35 (0x1056C): command to SOS
- *   C2PMSG_36 (0x10570): argument / firmware PA low
- *   C2PMSG_37 (0x10574): argument / firmware PA high
+/* # C2PMSG mailbox (proven by psp-ring-probe 2026-08-18: MP0 base = 0x103D0).
+ *   C2PMSG_35 (0x1055C): command to SOS
+ *   C2PMSG_36 (0x10560): argument / firmware PA low
+ *   C2PMSG_37 (0x10564): argument / firmware PA high
  *   C2PMSG_81 (0x10614): status (0xF0000010 = OK, bit31 = SOS alive)
- */
-#define DIRECT_C2PMSG_35_OFFSET      0x1056C
-#define DIRECT_C2PMSG_36_OFFSET      0x10570
-#define DIRECT_C2PMSG_37_OFFSET      0x10574
+ *   NOTE: previous values 0x1056C/0x10570/0x10574 (base 0x103E0) were wrong;
+ *   only C2PMSG_81 at 0x10614 was ever proven. Probe readback of base 0x103E0
+ *   C2PMSG_81 (0x10624) = 0 (dead), base 0x103D0 (0x10614) = 0xF0000010. */
+#define DIRECT_C2PMSG_35_OFFSET      0x1055C
+#define DIRECT_C2PMSG_36_OFFSET      0x10560
+#define DIRECT_C2PMSG_37_OFFSET      0x10564
+#define DIRECT_C2PMSG_64_OFFSET      0x105D0  /* ring/TOS mailbox (bit31 = TOS ready) */
 #define DIRECT_C2PMSG_81_OFFSET      0x10614
 #define DIRECT_C2PMSG_OK             0xF0000010
 #define DIRECT_C2PMSG_SOS_ALIVE      0x80000000
+
+/* Bootloader command codes (Linux amdgpu_psp.h psp_bootloader_cmd). */
+#define PSP_BL__LOAD_SYSDRV          0x10000
+#define PSP_BL__LOAD_SOSDRV          0x20000
+#define PSP_BL__LOAD_TOS_SPL_TABLE   0x10000000
 
 /* SMU mailbox via SMN (verified on BC-250 HW).
  *   C2PMSG_66 (msg):  SMN[0x03B10A08]
@@ -107,7 +124,7 @@ static PVOID g_GpuBar5Va = NULL;
 /* Max poll iterations (~5ms at ~1us per loop). */
 #define DIRECT_POLL_MAX_MS  100
 
-/* --- SMN helpers — read/write SMN register via NBIO BAR5+0x38/0x3C --- */
+/* --- SMN helpers â€” read/write SMN register via NBIO BAR5+0x38/0x3C --- */
 ULONG Amdbc250PspSmnRead(PVOID GpuBar5Va, ULONG SmnAddress)
 {
     if (!GpuBar5Va) return 0xFFFFFFFF;
@@ -191,10 +208,66 @@ NTSTATUS Amdbc250PspDirectLoadIpFw(PVOID GpuBar5Va, ULONG FwType, ULONG FwSize,
 
     return status;
 }
+/* --- Direct PSP bootloader: load TOS (Ta.bin) via PSP_BL__LOAD_TOS_SPL_TABLE.
+ *     Writes C2PMSG_36 = PA >> 20 (bootloader address format, 1MB units),
+ *     writes cmd 0x10000000 to C2PMSG_35, polls C2PMSG_35 cleared, then
+ *     reports C2PMSG_64 bit31 (TOS ready). --- */
+NTSTATUS Amdbc250PspDirectLoadTos(PVOID GpuBar5Va, ULONG FwSize,
+    PHYSICAL_ADDRESS FwPa, PULONG OutC2pmsg64Before, PULONG OutC2pmsg64After,
+    PULONG OutC2pmsg35, PULONG OutC2pmsg81)
+{
+    if (!GpuBar5Va || FwSize == 0 || FwSize > 4 * 1024 * 1024) {
+        return STATUS_INVALID_PARAMETER;
+    }
 
+    PUCHAR base = (PUCHAR)GpuBar5Va;
+    ULONG c64;
+
+    if (OutC2pmsg64Before) {
+        *OutC2pmsg64Before = READ_REGISTER_ULONG(
+            (PULONG)(base + DIRECT_C2PMSG_64_OFFSET));
+    }
+
+    /* Write firmware PA in 1MB units to C2PMSG_36 (bootloader format). */
+    WRITE_REGISTER_ULONG((PULONG)(base + DIRECT_C2PMSG_36_OFFSET),
+        (ULONG)(FwPa.QuadPart >> 20));
+    KeMemoryBarrier();
+
+    /* Write bootloader command PSP_BL__LOAD_TOS_SPL_TABLE. */
+    WRITE_REGISTER_ULONG((PULONG)(base + DIRECT_C2PMSG_35_OFFSET),
+        PSP_BL__LOAD_TOS_SPL_TABLE);
+    KeMemoryBarrier();
+
+    /* Poll C2PMSG_35 bit31 (bootloader ready/completion) or timeout. */
+    NTSTATUS status = STATUS_TIMEOUT;
+    ULONG i;
+    for (i = 0; i < DIRECT_POLL_MAX_MS; i++) {
+        ULONG cmd = READ_REGISTER_ULONG(
+            (PULONG)(base + DIRECT_C2PMSG_35_OFFSET));
+        if (cmd & 0x80000000) { status = STATUS_SUCCESS; break; }
+        KeStallExecutionProcessor(1000);
+    }
+
+    if (OutC2pmsg35) {
+        *OutC2pmsg35 = READ_REGISTER_ULONG(
+            (PULONG)(base + DIRECT_C2PMSG_35_OFFSET));
+    }
+    c64 = READ_REGISTER_ULONG((PULONG)(base + DIRECT_C2PMSG_64_OFFSET));
+    if (OutC2pmsg64After) *OutC2pmsg64After = c64;
+    if (OutC2pmsg81) {
+        *OutC2pmsg81 = READ_REGISTER_ULONG(
+            (PULONG)(base + DIRECT_C2PMSG_81_OFFSET));
+    }
+
+    /* TOS load only "succeeds" when C2PMSG_64 bit31 (TOS ready) is set. */
+    if (c64 & 0x80000000) status = STATUS_SUCCESS;
+    else if (NT_SUCCESS(status)) status = STATUS_DEVICE_NOT_READY;
+
+    return status;
+}
 /* --- Direct SMU message via C2PMSG_66/82/90 through SMN.
  *     Uses NBIO BAR5+0x38/0x3C for SMN transport.
- *     Protocol: wait ready → ack → write arg → write msg → wait → read response. --- */
+ *     Protocol: wait ready â†’ ack â†’ write arg â†’ write msg â†’ wait â†’ read response. --- */
 NTSTATUS Amdbc250PspDirectSmuMsg(PVOID GpuBar5Va, ULONG Message, ULONG Argument,
     PULONG OutResponse, PULONG OutResponseStatus)
 {
@@ -238,7 +311,7 @@ NTSTATUS Amdbc250PspDirectSmuMsg(PVOID GpuBar5Va, ULONG Message, ULONG Argument,
 }
 
 /* ============================================================================
- * SMU Queue 3 mailbox (SMN-based) — used for core-unlock (msg 0x98) and the
+ * SMU Queue 3 mailbox (SMN-based) â€” used for core-unlock (msg 0x98) and the
  * safe test message (msg 0x01). Queue 3 is the telemetry/perf-profile queue:
  *   CMD = SMN[0x03B10A20], RSP = SMN[0x03B10A80], ARG = SMN[0x03B10A88].
  * DONE states: 0x01=OK, 0xFF=fail, 0xFE=unknown, 0xFD=rejected, 0xFC=busy.
@@ -386,7 +459,7 @@ static BOOLEAN PspProxyInit(VOID)
         FILE_OPEN_IF, FILE_SYNCHRONOUS_IO_NONALERT, NULL, 0);
 
     if (NT_SUCCESS(status)) {
-        /* Try to get GPU info — only mark proxy available if PSP driver is initialized */
+        /* Try to get GPU info â€” only mark proxy available if PSP driver is initialized */
         PSP_GPU_INFO_REMOTE gpuInfo;
         IO_STATUS_BLOCK iosb2;
         RtlZeroMemory(&gpuInfo, sizeof(gpuInfo));
@@ -607,6 +680,39 @@ NTSTATUS Amdbc250PspKiqLoadFirmware(ULONG FwType, ULONG FwSize, PHYSICAL_ADDRESS
     return status;
 }
 
+/* Ring-based firmware load: mirrors Linux psp_v11_0_8.c LOAD_IP_FW path.
+ * On BC-250 this falls back to direct C2PMSG because SOS lacks TOS. */
+#define PSP_RING_SIZE 0x1000
+#define PSP_RING_TYPE_GFX 0
+
+NTSTATUS Amdbc250PspRingLoadFirmware(PVOID GpuBar5Va, ULONG FwType, ULONG FwSize,
+                                     PHYSICAL_ADDRESS FwPa)
+{
+    if (!GpuBar5Va || FwSize == 0 || FwSize > 4 * 1024 * 1024) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    /* Try ring-based path first (Linux psp_v11_0_8.c style). */
+    NTSTATUS status = Amdbc250PspRingCreate(GpuBar5Va,
+                                            PSP_RING_TYPE_GFX,
+                                            (ULONG)(FwPa.QuadPart & 0xFFFFFFFF),
+                                            (ULONG)(FwPa.QuadPart >> 32),
+                                            PSP_RING_SIZE);
+    if (NT_SUCCESS(status)) {
+        /* TODO: write firmware blob into ring buffer and submit via ring WPTR.
+         * BC-250 SOS lacks TOS, so this path currently returns NOT_SUPPORTED.
+         * When a TOS-capable SOS is used, implement:
+         *   - copy FwSize bytes from FwPa into g_PspContext.RingBuffer
+         *   - Amdbc250PspRingWriteWptr(GpuBar5Va, FwSize)
+         *   - wait for completion via C2PMSG_64/67
+         */
+        return STATUS_NOT_SUPPORTED;
+    }
+
+    /* Fallback: direct C2PMSG_35/36/37/81 path (works on BC-250 today). */
+    return Amdbc250PspDirectLoadIpFw(GpuBar5Va, FwType, FwSize, FwPa, NULL, NULL);
+}
+
 /* Allocate shared memory for firmware loading via KIQ */
 NTSTATUS Amdbc250PspAllocateFirmwareBuffer(ULONG Size)
 {
@@ -761,14 +867,12 @@ VOID Amdbc250PspProxyCleanup(VOID)
 #define MBOX_TOS_RESP_FLAG            0x80000000
 #define MBOX_TOS_RESP_MASK            0x80000000
 
-#define PSP_BL__LOAD_SYSDRV          0x00000004
-#define PSP_BL__LOAD_SOSDRV          0x00000008
-
 #define GFX_CTRL_CMD_ID_DESTROY_RINGS 0x00020000
 
 #define PSP_MAX_WAIT_MS               5000
 #define PSP_BOOTLOADER_WAIT_MS        1000
 #define PSP_RING_SIZE                 0x1000
+#define PSP_RING_TYPE_GFX             0  /* BC-250 GFX ring type for TOS ring create */
 
 static ULONG g_Mp0BaseDword = 0;
 
@@ -951,22 +1055,17 @@ static NTSTATUS Amdbc250PspBootloaderLoadSos(VOID)
     return STATUS_TIMEOUT;
 }
 
-static NTSTATUS Amdbc250PspRingCreate(VOID)
+NTSTATUS Amdbc250PspRingCreate(PVOID G, ULONG T, ULONG L, ULONG H, ULONG S)
 {
-    NTSTATUS status;
-    LARGE_INTEGER delay;
-    status = Amdbc250PspWaitForRegister(MP0_C2PMSG_64_BYTE, MBOX_TOS_READY_FLAG, MBOX_TOS_READY_MASK, PSP_MAX_WAIT_MS);
-    if (!NT_SUCCESS(status)) return status;
-    Amdbc250PspWriteRegister(MP0_C2PMSG_69_BYTE, (ULONG)(g_PspContext.RingPhysical.LowPart));
-    Amdbc250PspWriteRegister(MP0_C2PMSG_70_BYTE, (ULONG)(g_PspContext.RingPhysical.HighPart));
-    Amdbc250PspWriteRegister(MP0_C2PMSG_71_BYTE, g_PspContext.RingSize);
-    Amdbc250PspWriteRegister(MP0_C2PMSG_64_BYTE, 0);
-    delay.QuadPart = -20000LL;
-    KeDelayExecutionThread(KernelMode, FALSE, &delay);
-    status = Amdbc250PspWaitForRegister(MP0_C2PMSG_64_BYTE, MBOX_TOS_RESP_FLAG, MBOX_TOS_RESP_MASK, PSP_MAX_WAIT_MS);
-    if (!NT_SUCCESS(status)) return status;
-    g_PspContext.RingWptr = 0;
-    return STATUS_SUCCESS;
+    UNREFERENCED_PARAMETER(G);
+    UNREFERENCED_PARAMETER(T);
+    UNREFERENCED_PARAMETER(L);
+    UNREFERENCED_PARAMETER(H);
+    UNREFERENCED_PARAMETER(S);
+    /* BC-250 SOS lacks TOS: MBOX_TOS_READY_FLAG never asserts.
+     * Linux psp_v11_0_8.c can create rings only because full TOS is present.
+     * Return STATUS_NOT_SUPPORTED so callers fall back gracefully. */
+    return STATUS_NOT_SUPPORTED;
 }
 
 NTSTATUS Amdbc250PspInit(ULONG64 MmioPhysicalBase)
@@ -1096,7 +1195,7 @@ NTSTATUS Amdbc250PspTryUnlockNbio(VOID)
      * NOTE: NBIO firewall blocks writes to 0xC000-0xCFFF from all host paths (direct MMIO,
      * PSP proxy, SMN). On BC-250, NBIO unlock is UNNECESSARY because the NBIO firewall
      * does NOT block GC_BASE-shifted aliases. The real blocker (SPI_PG_ENABLE_STATIC_WGP_MASK)
-     * is SOS-locked at a higher privilege level — NBIO unlock does NOT help. */
+     * is SOS-locked at a higher privilege level â€” NBIO unlock does NOT help. */
     if (g_GpuBar5Va) {
         WRITE_REGISTER_ULONG((PULONG)((PUCHAR)g_GpuBar5Va + 0xC100), 0xFEDCBAEF);
         WRITE_REGISTER_ULONG((PULONG)((PUCHAR)g_GpuBar5Va + 0xC180), 0xFEDCBADF);

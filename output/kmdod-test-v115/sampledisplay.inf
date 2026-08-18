@@ -1,0 +1,120 @@
+;++
+;
+; Copyright (c) 2011 Microsoft Corporation
+;
+; Module Name:
+;
+;    SampleDisplay.inf
+;
+; Abstract:
+;
+;    Inf file for Kernel mode display only sample driver
+;
+;--
+
+[Version]
+Signature="$Windows NT$"
+Class=Display
+ClassGUID={4d36e968-e325-11ce-bfc1-08002be10318}
+Provider=%ProviderString%
+DriverVer=08/17/2026, 1.0.115.0
+CatalogFile=SampleDisplay.cat
+PnpLockdown=1
+
+[DestinationDirs]
+KDODSamp.Files = 12
+
+[SourceDisksNames]
+0=%SampleDisk%
+
+[SourceDisksFiles]
+SampleDisplay.sys=0
+
+[Manufacturer]
+%ManufacturerName%=Standard,NTamd64,NTarm,NTarm64
+
+;
+;    Allow the driver to be loaded on VGA and XGA exposed by PCI bus and ACPI
+;
+[Standard.NTamd64]
+%SampleDeviceName% = KDODSamp_Inst, PCI\CC_0300
+%BC250DeviceName% = KDODSamp_Inst, PCI\VEN_1002&DEV_13FE&SUBSYS_13FE1002&REV_C4
+%BC250DeviceName% = KDODSamp_Inst, PCI\VEN_1002&DEV_13FE
+%SampleDeviceName% = KDODSamp_Inst, PCI\CC_0301
+%SampleDeviceName% = KDODSamp_Inst, ACPI\CLS_0003&SUBCLS_0000
+%SampleDeviceName% = KDODSamp_Inst, ACPI\CLS_0003&SUBCLS_0001
+
+
+[Standard.NTarm]
+%SampleDeviceName% = KDODSamp_Inst, PCI\CC_0300
+%SampleDeviceName% = KDODSamp_Inst, PCI\CC_0301
+%SampleDeviceName% = KDODSamp_Inst, ACPI\CLS_0003&SUBCLS_0000
+%SampleDeviceName% = KDODSamp_Inst, ACPI\CLS_0003&SUBCLS_0001
+
+
+[Standard.NTarm64]
+%SampleDeviceName% = KDODSamp_Inst, PCI\CC_0300
+%SampleDeviceName% = KDODSamp_Inst, PCI\CC_0301
+%SampleDeviceName% = KDODSamp_Inst, ACPI\CLS_0003&SUBCLS_0000
+%SampleDeviceName% = KDODSamp_Inst, ACPI\CLS_0003&SUBCLS_0001
+
+
+[KDODSamp_Inst]
+FeatureScore=F0
+CopyFiles = KDODSamp.Files
+
+;
+;   Install driver service
+;
+[KDODSamp_Inst.Services]
+AddService = KDODSamp,0x00000002,KDODSamp_Service_Inst,KDODSamp_EventLog_Inst
+
+[KDODSamp_Service_Inst]
+ServiceType = %SERVICE_KERNEL_DRIVER%
+StartType = %SERVICE_DEMAND_START%
+ErrorControl = %SERVICE_ERROR_IGNORE%
+ServiceBinary = %12%\SampleDisplay.sys
+
+;
+;   Display Adapter Specific Settings
+;
+[KDODSamp.Files]
+SampleDisplay.sys
+
+[KDODSamp_EventLog_Inst]
+AddReg = KDODSamp_EventLog_Inst.AddReg
+
+[KDODSamp_EventLog_Inst.AddReg]
+HKR,,EventMessageFile,%REG_EXPAND_SZ%,"%%SystemRoot%%\System32\IoLogMsg.dll"
+HKR,,TypesSupported,%REG_DWORD%,7
+
+
+[Strings]
+
+;  *******Localizable Strings*******
+ProviderString="AMD BC-250 Driver Project"
+ManufacturerName="Advanced Micro Devices, Inc."
+SampleDisk = "Sample Disk"
+SampleDeviceName = "AMD BC-250 Display Only Driver"
+
+;  *******Non Localizable Strings*******
+
+SERVICE_BOOT_START = 0x0
+SERVICE_SYSTEM_START = 0x1
+SERVICE_AUTO_START = 0x2
+SERVICE_DEMAND_START = 0x3
+SERVICE_DISABLED = 0x4
+
+SERVICE_KERNEL_DRIVER = 0x1
+SERVICE_ERROR_IGNORE = 0x0
+SERVICE_ERROR_NORMAL = 0x1
+SERVICE_ERROR_SEVERE = 0x2
+SERVICE_ERROR_CRITICAL = 0x3
+
+REG_MULTI_SZ   = 0x00010000
+REG_EXPAND_SZ = 0x00020000
+REG_DWORD = 0x00010001
+
+; BC-250 specific hardware ID
+BC250DeviceName = "AMD BC-250 (Display Only Driver)"
+

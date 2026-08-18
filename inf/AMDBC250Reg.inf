@@ -1,0 +1,46 @@
+; AMDBC250Reg.inf - Simple WDM driver for BC-250 register access
+
+[Version]
+Signature="$Windows NT$"
+Class=System
+ClassGuid={4d36e97d-e325-11ce-bfc1-08002be10318}
+Provider=%ManufacturerName%
+CatalogFile=AMDBC250Reg.cat
+DriverVer=08/12/2026, 1.0.0.0
+PnpLockdown=1
+
+[DestinationDirs]
+DefaultDestDir = 12
+
+[SourceDisksNames]
+1 = %DiskName%
+
+[SourceDisksFiles]
+amdbc250_reg.sys = 1
+
+[Manufacturer]
+%ManufacturerName%=Standard,NTamd64
+
+[Standard.NTamd64]
+%DeviceDesc%=Install, AMDBC250Reg
+
+[Install]
+CopyFiles=DriversDir
+
+[DriversDir]
+amdbc250_reg.sys
+
+[Install.Services]
+AddService=AMDBC250Reg,0x00000002,Service_Inst
+
+[Service_Inst]
+DisplayName    = %DeviceDesc%
+ServiceType    = 1
+StartType      = 3
+ErrorControl   = 1
+ServiceBinary  = %12%\amdbc250_reg.sys
+
+[Strings]
+ManufacturerName = "AMD BC-250 Driver Project"
+DeviceDesc = "AMD BC-250 Register Access Driver"
+DiskName = "AMD BC-250 Driver Disk"

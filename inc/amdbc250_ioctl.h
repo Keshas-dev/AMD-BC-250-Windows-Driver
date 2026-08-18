@@ -122,6 +122,11 @@ Environment:
 /* Safe CPU core unlock via SMU Q3 msg 0x98 (whitelisted register only) */
 #define IOCTL_AMDBC250_CORE_UNLOCK          CTL_CODE_AMDBC250(0x78, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
+/* PSP KM (GPCOM) ring - correct MP0 base 0x58000.
+   Packed values: 0x80000C18 / 0x80000C1C (Function 0x96/0x97). */
+#define IOCTL_AMDBC250_PSP_RING_INIT        CTL_CODE_AMDBC250(0x96, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define IOCTL_AMDBC250_PSP_RING_SUBMIT      CTL_CODE_AMDBC250(0x97, METHOD_BUFFERED, FILE_ANY_ACCESS)
+
 typedef struct _AMDBC250_IOCTL_RESOURCE_BARS {
     UINT32 DeviceStarted;         /* 1=StartDevice was called */
     UINT32 MmioMapped;            /* 1=MMIO mapped */
@@ -480,6 +485,21 @@ typedef struct _AMDBC250_IOCTL_PSP_LOAD_IP_FW {
     UINT32 C2Pmsg81After;       /* OUT: C2PMSG_81 after command (0xF0000010 = OK) */
     /* Firmware data follows immediately after this struct */
 } AMDBC250_IOCTL_PSP_LOAD_IP_FW, *PAMDBC250_IOCTL_PSP_LOAD_IP_FW;
+
+/* --- PSP Mailbox: load Ta.bin as TOS via bootloader (PSP_BL__LOAD_TOS_SPL_TABLE) ---
+ * TOS test 2026-08-18: loads the blob with bootloader cmd 0x10000000 and
+ * reports C2PMSG_64 bit31 (TOS ready) + C2PMSG_81 (SOS status). */
+#define IOCTL_AMDBC250_PSP_LOAD_TOS          CTL_CODE(FILE_DEVICE_AMDBC250, 0x928, METHOD_BUFFERED, FILE_ANY_ACCESS)
+
+typedef struct _AMDBC250_IOCTL_PSP_LOAD_TOS {
+    UINT32 FwSize;              /* IN: Ta.bin blob size in bytes */
+    UINT32 Result;              /* OUT: 0=fail, 1=success (C2PMSG_64 bit31 set) */
+    UINT32 C2Pmsg64Before;      /* OUT: C2PMSG_64 before command */
+    UINT32 C2Pmsg64After;       /* OUT: C2PMSG_64 after command (bit31 = TOS ready) */
+    UINT32 C2Pmsg35After;       /* OUT: C2PMSG_35 after command */
+    UINT32 C2Pmsg81After;       /* OUT: C2PMSG_81 after command (0xF0000010 = SOS alive) */
+    /* Firmware data follows immediately after this struct */
+} AMDBC250_IOCTL_PSP_LOAD_TOS, *PAMDBC250_IOCTL_PSP_LOAD_TOS;
 
 /* --- PSP Mailbox: send SMU message via BAR5+0x38/0x3C (no PSP driver needed) --- */
 #define IOCTL_AMDBC250_PSP_SMU_MSG          CTL_CODE(FILE_DEVICE_AMDBC250, 0x924, METHOD_BUFFERED, FILE_ANY_ACCESS)

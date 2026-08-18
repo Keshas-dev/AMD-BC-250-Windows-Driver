@@ -1,164 +1,153 @@
 /* amdbc250_dream_psp_fw_load.c - PSP firmware load (SYSDRV/SOS/SMC) via C2PMSG
  * Loads PSP bootloader + Secure OS + SMU firmware before SOS is alive.
- * Uses GPU driver's SMN access (NBIO 0x38/0x3C) for C2PMSG registers. */
+ *
+ * REWORKED 2026-08-18: was using SMN addresses 0x03B10A08/48/68/44 which the
+ * psp-ring-probe proved are SMU C2PMSG_66/82/90 (NOT PSP). PSP C2PMSG live
+ * directly in GPU BAR5 at MP0 base 0x103D0:
+ *   C2PMSG_35 = 0x1055C, C2PMSG_36 = 0x10560, C2PMSG_37 = 0x10564,
+ *   C2PMSG_81 = 0x10614 (0xF0000010 = SOS alive, bit31 = alive). */
 
 #include "amdbc250_dream_kmd.h"
 #include "amdbc250_dream_hw.h"
+#include "amdbc250_psp.h"
 
-extern NTSTATUS Amdbc250PspSmnRead(PVOID GpuBar5Va, ULONG SmnAddress, PULONG OutValue);
-extern NTSTATUS Amdbc250PspSmnWrite(PVOID GpuBar5Va, ULONG SmnAddress, ULONG Value);
-extern NTSTATUS Amdbc250PspInit(ULONG64 MmioPhysicalBase);
 extern NTSTATUS DreamV3LoadFirmwareFromFile(_In_ PCWSTR FileName, _Out_ PUCHAR *OutData, _Out_ ULONG *OutSize);
 
-#define C2PMSG_35_SMN   0x03B10A08  /* PSP command */
-#define C2PMSG_36_SMN   0x03B10A48  /* PSP data (PA low) */
-#define C2PMSG_37_SMN   0x03B10A68  /* PSP data (PA high) */
-#define C2PMSG_81_SMN   0x03B10A44  /* PSP response / SOS status */
+/* Corrected BAR5 direct C2PMSG offsets (MP0 base 0x103D0). */
+#define C2PMSG_35_OFF   0x1055C  /* PSP command */
+#define C2PMSG_36_OFF   0x10560  /* PSP data (PA low, 1MB units for bootloader) */
+#define C2PMSG_81_OFF   0x10614  /* PSP response / SOS status */
 
-#define PSP_CMD_LOAD_SYSDRV  0x04
-#define PSP_CMD_LOAD_SOSDRV  0x08
-#define PSP_CMD_LOAD_SMC     0x0A
+/* Bootloader command codes (Linux amdgpu_psp.h psp_bootloader_cmd).
+ * NOTE: these are the REAL v11 bootloader values, NOT the older
+ * direct-mbox GFX_CMD values (0x04/0x08/0x0A) used previously. */
+#define PSP_CMD_LOAD_SYSDRV  0x10000
+#define PSP_CMD_LOAD_SOSDRV  0x20000
 
 #define FW_PATH_SYSDRV  L"\\SystemRoot\\System32\\drivers\\bc-250\\Sysdrv.bin"
 #define FW_PATH_SOS     L"\\SystemRoot\\System32\\drivers\\bc-250\\Sos.bin"
-#define FW_PATH_SMC     L"\\SystemRoot\\System32\\drivers\\bc-250\\Smu.bin"
+
+static ULONG PspFwRead(PVOID Bar5Va, ULONG Off)
+{
+    if (!Bar5Va) return 0xFFFFFFFF;
+    return READ_REGISTER_ULONG((PULONG)((PUCHAR)Bar5Va + Off));
+}
+
+static VOID PspFwWrite(PVOID Bar5Va, ULONG Off, ULONG Val)
+{
+    if (!Bar5Va) return;
+    WRITE_REGISTER_ULONG((PULONG)((PUCHAR)Bar5Va + Off), Val);
+}
 
 static NTSTATUS PspFwWaitReady(PVOID Bar5Va, ULONG timeoutMs)
 {
     for(ULONG i=0; i<timeoutMs; i++){
-        ULONG val=0;
-        Amdbc250PspSmnRead(Bar5Va, C2PMSG_81_SMN, &val);
-        if((val & 0x80000000) || val==0) return STATUS_SUCCESS;
+        ULONG val = PspFwRead(Bar5Va, C2PMSG_81_OFF);
+        if(val & 0x80000000) return STATUS_SUCCESS;
         KeStallExecutionProcessor(1000);
     }
     return STATUS_TIMEOUT;
 }
 
-static NTSTATUS PspFwSendCommand(PVOID Bar5Va, ULONG cmd, ULONG low, ULONG high)
+static NTSTATUS PspFwSendCommand(PVOID Bar5Va, ULONG cmd, ULONG paMb)
 {
-    Amdbc250PspSmnWrite(Bar5Va, C2PMSG_35_SMN, 0);
-    Amdbc250PspSmnWrite(Bar5Va, C2PMSG_36_SMN, low);
-    Amdbc250PspSmnWrite(Bar5Va, C2PMSG_37_SMN, high);
-    Amdbc250PspSmnWrite(Bar5Va, C2PMSG_35_SMN, cmd);
+    /* Bootloader protocol (Linux psp_v11_0_bootloader_load_*):
+     *   C2PMSG_36 = firmware PA in 1MB units (PA >> 20)
+     *   C2PMSG_35 = bootloader command (PSP_BL__LOAD_*)
+     * Bootloader signals ready/completion with C2PMSG_35 bit31 SET
+     * (psp_wait_for mask 0x80000000). */
+    PspFwWrite(Bar5Va, C2PMSG_36_OFF, paMb);
+    KeMemoryBarrier();
+    PspFwWrite(Bar5Va, C2PMSG_35_OFF, cmd);
+    KeMemoryBarrier();
     for(ULONG i=0; i<5000; i++){
-        ULONG val=0;
-        Amdbc250PspSmnRead(Bar5Va, C2PMSG_35_SMN, &val);
-        if(val==0) return STATUS_SUCCESS;
+        ULONG val = PspFwRead(Bar5Va, C2PMSG_35_OFF);
+        if(val & 0x80000000) return STATUS_SUCCESS;
         KeStallExecutionProcessor(1000);
     }
     return STATUS_TIMEOUT;
+}
+
+static NTSTATUS PspFwLoadBlob(PVOID Bar5Va, ULONG cmd, PCWSTR FwPath)
+{
+    NTSTATUS status;
+    PUCHAR fwData = NULL;
+    ULONG fwSize = 0;
+    status = DreamV3LoadFirmwareFromFile(FwPath, &fwData, &fwSize);
+    if (!NT_SUCCESS(status) || !fwData || fwSize == 0) {
+        KdPrint(("PSP-FW: read %ws failed 0x%08X\n", FwPath, status));
+        return status;
+    }
+
+    /* PSP DMA-reads the whole blob from the base PA, so it MUST live in a
+     * physically-contiguous buffer. Pool blobs are only virtually contiguous. */
+    status = Amdbc250PspAllocateFirmwareBuffer(fwSize);
+    if (NT_SUCCESS(status))
+        status = Amdbc250PspCopyFirmwareData(fwData, fwSize);
+
+    ExFreePoolWithTag(fwData, 'fw');
+    if (!NT_SUCCESS(status)) {
+        KdPrint(("PSP-FW: contiguous buffer for %ws failed 0x%08X\n", FwPath, status));
+        return status;
+    }
+
+    PHYSICAL_ADDRESS pa = Amdbc250PspFirmwarePa();
+    status = PspFwSendCommand(Bar5Va, cmd, (ULONG)(pa.QuadPart >> 20));
+    KdPrint(("PSP-FW: %ws cmd 0x%08X PA=0x%llX (MB=0x%X) -> 0x%08X\n",
+        FwPath, cmd, pa.QuadPart, (ULONG)(pa.QuadPart >> 20), status));
+    return status;
 }
 
 NTSTATUS DreamV3LoadPspFirmware(_In_ PDREAM_V3_DEVICE_EXTENSION DevExt)
 {
     NTSTATUS status;
-    PVOID bar5 = DevExt->MmioVirtualBase;
-    if(!bar5) return STATUS_DEVICE_NOT_READY;
+    PVOID bar5 = DevExt ? DevExt->MmioVirtualBase : NULL;
+    if(!bar5 || DevExt->MmioSize < 0x10618) return STATUS_DEVICE_NOT_READY;
 
-    /* Check SOS already alive (loaded by PSP driver) */
-    ULONG sol=0;
-    Amdbc250PspSmnRead(bar5, C2PMSG_81_SMN, &sol);
+    /* Check SOS already alive (loaded by BIOS/PSP driver). */
+    ULONG sol = PspFwRead(bar5, C2PMSG_81_OFF);
     if(sol & 0x80000000){
         KdPrint(("PSP-FW: SOS already alive (0x%08X), skip load\n", sol));
         return STATUS_SUCCESS;
     }
 
-    /* Load SYSDRV */
-    PUCHAR fwData=NULL; ULONG fwSize=0;
-    status = DreamV3LoadFirmwareFromFile(FW_PATH_SYSDRV, &fwData, &fwSize);
-    if(NT_SUCCESS(status) && fwData && fwSize>0){
-        PHYSICAL_ADDRESS pa = MmGetPhysicalAddress(fwData);
-        status = PspFwSendCommand(bar5, PSP_CMD_LOAD_SYSDRV,
-            (ULONG)(pa.QuadPart & 0xFFFFFFFF), (ULONG)(pa.QuadPart >> 32));
-        ExFreePoolWithTag(fwData, 'fw');
-        KdPrint(("PSP-FW: SYSDRV load 0x%08X\n", status));
+    /* SOS not alive: try PSP driver bootloader path first. */
+    if (Amdbc250PspProxyAvailable()) {
+        KdPrint(("PSP-FW: SOS not alive, trying PSP driver bootloader path\n"));
+        IO_STATUS_BLOCK iosb;
+        ULONG bootCmd = 0;
+        status = ZwDeviceIoControlFile(g_PspProxyHandle, NULL, NULL, NULL,
+            &iosb, PSP_IOCTL_BOOT_SEQ, &bootCmd, sizeof(bootCmd), NULL, 0);
+        /* Re-verify SOS alive even if the proxy reports success. */
+        sol = PspFwRead(bar5, C2PMSG_81_OFF);
+        if (NT_SUCCESS(status) && (sol & 0x80000000)) {
+            KdPrint(("PSP-FW: PSP driver bootloader OK\n"));
+            return STATUS_SUCCESS;
+        }
+        KdPrint(("PSP-FW: PSP driver bootloader failed 0x%08X (sol=0x%08X), fallback to direct BAR5\n",
+            status, sol));
     }
 
-    /* Load SOS */
-    fwData=NULL; fwSize=0;
-    status = DreamV3LoadFirmwareFromFile(FW_PATH_SOS, &fwData, &fwSize);
-    if(NT_SUCCESS(status) && fwData && fwSize>0){
-        PHYSICAL_ADDRESS pa = MmGetPhysicalAddress(fwData);
-        status = PspFwSendCommand(bar5, PSP_CMD_LOAD_SOSDRV,
-            (ULONG)(pa.QuadPart & 0xFFFFFFFF), (ULONG)(pa.QuadPart >> 32));
-        ExFreePoolWithTag(fwData, 'fw');
-        KdPrint(("PSP-FW: SOS load 0x%08X\n", status));
-        PspFwWaitReady(bar5, 5000);
-    }
+    /* Fallback: direct BAR5 C2PMSG_35/36/37 at corrected offsets.
+     * NOTE: Linux loads TOS (Ta.bin) as PSP_BL__LOAD_TOS_SPL_TABLE
+     * BEFORE SOS is alive; SMC is loaded later via the ring, not here. */
+    KdPrint(("PSP-FW: Using direct BAR5 C2PMSG fallback\n"));
 
-    /* Load SMC */
-    fwData=NULL; fwSize=0;
-    status = DreamV3LoadFirmwareFromFile(FW_PATH_SMC, &fwData, &fwSize);
-    if(NT_SUCCESS(status) && fwData && fwSize>0){
-        PHYSICAL_ADDRESS pa = MmGetPhysicalAddress(fwData);
-        status = PspFwSendCommand(bar5, PSP_CMD_LOAD_SMC,
-            (ULONG)(pa.QuadPart & 0xFFFFFFFF), (ULONG)(pa.QuadPart >> 32));
-        ExFreePoolWithTag(fwData, 'fw');
-        KdPrint(("PSP-FW: SMC load 0x%08X\n", status));
+    status = PspFwLoadBlob(bar5, PSP_CMD_LOAD_SYSDRV, FW_PATH_SYSDRV);
+    if (!NT_SUCCESS(status)) {
+        KdPrint(("PSP-FW: SYSDRV load failed 0x%08X, aborting bootloader path\n", status));
+        return status;
     }
+    status = PspFwLoadBlob(bar5, PSP_CMD_LOAD_SOSDRV, FW_PATH_SOS);
+    if (!NT_SUCCESS(status)) {
+        KdPrint(("PSP-FW: SOS load failed 0x%08X, aborting bootloader path\n", status));
+        return status;
+    }
+    PspFwWaitReady(bar5, 5000);
 
-    /* Check SOS alive */
-    sol=0;
-    Amdbc250PspSmnRead(bar5, C2PMSG_81_SMN, &sol);
+    sol = PspFwRead(bar5, C2PMSG_81_OFF);
     KdPrint(("PSP-FW: C2PMSG_81 = 0x%08X %s\n", sol,
         (sol & 0x80000000) ? "SOS ALIVE!" : "SOS NOT alive"));
-
-    /* WGP unlock — per-bank writes using CORRECT Linux gfx10 GRBM_GFX_INDEX layout
-     * Linux gfx_v10_0_select_se_sh() uses: SH_INDEX bits 15:8, SE_INDEX bits 23:16
-     * Previous research used WRONG layout (INSTANCE bits 25:24) — that's why it failed!
-     * Must write EACH bank individually (broadcast doesn't work for SPI_PG). */
-    {
-        /* CORRECT Linux gfx10 GRBM_GFX_INDEX per-bank values */
-        static const ULONG BankSelectsLinux[] = {
-            0x00000000,  /* SE0/SH0 */
-            0x00000100,  /* SE0/SH1 (SH_INDEX=1 at bits 15:8) */
-            0x00010000,  /* SE1/SH0 (SE_INDEX=1 at bits 23:16) */
-            0x00010100   /* SE1/SH1 */
-        };
-
-        ULONG spiBefore = READ_REGISTER_ULONG((PULONG)((PUCHAR)bar5 + 0x5C3C));
-        ULONG ccBefore  = READ_REGISTER_ULONG((PULONG)((PUCHAR)bar5 + 0x9C1C));
-        KdPrint(("PSP-FW: WGP unlock — Before: SPI=0x%08X CC=0x%08X\n", spiBefore, ccBefore));
-
-        /* Write each bank individually (Linux does this in gfx_v10_0_get_cu_info) */
-        for(int b=0; b<4; b++){
-            /* Select this SE/SH bank */
-            WRITE_REGISTER_ULONG((PULONG)((PUCHAR)bar5 + 0x34D0), BankSelectsLinux[b]);
-
-            /* Write unlock values per-bank */
-            WRITE_REGISTER_ULONG((PULONG)((PUCHAR)bar5 + 0x9C1C), 0xFFE00000);  /* CC: 40 CU */
-            WRITE_REGISTER_ULONG((PULONG)((PUCHAR)bar5 + 0x5C3C), 0x1F);        /* SPI: WGP0-4 */
-            WRITE_REGISTER_ULONG((PULONG)((PUCHAR)bar5 + 0x3D64), 0x1F);        /* RLC: WGP0-4 */
-        }
-
-        /* Restore broadcast select */
-        WRITE_REGISTER_ULONG((PULONG)((PUCHAR)bar5 + 0x34D0), 0x15000000);
-
-        /* Read back (broadcast reads last written bank) */
-        ULONG spiAfter = READ_REGISTER_ULONG((PULONG)((PUCHAR)bar5 + 0x5C3C));
-        ULONG ccAfter  = READ_REGISTER_ULONG((PULONG)((PUCHAR)bar5 + 0x9C1C));
-        KdPrint(("PSP-FW: WGP unlock — After: SPI=0x%08X CC=0x%08X\n", spiAfter, ccAfter));
-
-        if(spiAfter == 0x1F){
-            KdPrint(("PSP-FW: *** WGP UNLOCK SUCCESS! ***\n"));
-        } else {
-            KdPrint(("PSP-FW: WGP unlock FAILED (SPI=0x%08X, expected 0x1F) — trying alternate layout...\n", spiAfter));
-
-            /* Fallback: try alternate layout (instance index at bits 25:24, SE at bit 28) */
-            static const ULONG BankSelectsAlt[] = {
-                0x00000000, 0x01000000, 0x10000000, 0x11000000
-            };
-            for(int b=0; b<4; b++){
-                WRITE_REGISTER_ULONG((PULONG)((PUCHAR)bar5 + 0x34D0), BankSelectsAlt[b]);
-                WRITE_REGISTER_ULONG((PULONG)((PUCHAR)bar5 + 0x9C1C), 0xFFE00000);
-                WRITE_REGISTER_ULONG((PULONG)((PUCHAR)bar5 + 0x5C3C), 0x1F);
-                WRITE_REGISTER_ULONG((PULONG)((PUCHAR)bar5 + 0x3D64), 0x1F);
-            }
-            WRITE_REGISTER_ULONG((PULONG)((PUCHAR)bar5 + 0x34D0), 0x15000000);
-            spiAfter = READ_REGISTER_ULONG((PULONG)((PUCHAR)bar5 + 0x5C3C));
-            KdPrint(("PSP-FW: WGP unlock — After alt: SPI=0x%08X\n", spiAfter));
-        }
-    }
 
     return (sol & 0x80000000) ? STATUS_SUCCESS : STATUS_DEVICE_NOT_READY;
 }

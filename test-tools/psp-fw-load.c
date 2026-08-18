@@ -114,7 +114,7 @@ int main(int argc, char *argv[]) {
         {3, "cyan_skillfish2_ce.bin"},   {2, "cyan_skillfish2_pfp.bin"},
         {1, "cyan_skillfish2_me.bin"},   {4, "cyan_skillfish2_mec.bin"},
         {5, "cyan_skillfish2_mec2.bin"}, {8, "cyan_skillfish2_rlc.bin"},
-        {9, "cyan_skillfish2_sdma.bin"}, {10, "cyan_skillfish2_sdma1.bin"},
+        {9, "navi12_sdma.bin"},          {10, "navi12_sdma1.bin"},
     };
 
     int loaded = 0, n = sizeof(fw)/sizeof(fw[0]);

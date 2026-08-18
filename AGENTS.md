@@ -41,25 +41,104 @@
 - **GRBM selection**: Linux uses `mmGRBM_GFX_CNTL` (0x0dc2, BAR5=0x2022) for ME/PIPE/QUEUE select, NOT `GRBM_GFX_INDEX` (0x34D0). These are DIFFERENT registers.
 - **CP_MEC_CNTL**: Navi10 offset mmREG=0x0e2d (BAR5=0x4B14), NOT Sienna_Cichlid 0x0f55. BC-250 is GFX10.1.3, not 10.3.x.
 
-## BREAKTHROUGH: PSP Mailbox Firmware Loading WORKS! (2026-07-01)
+## ⭐ PSP KM GPCOM RING WORKS — kernel IOCTLs verified on hardware (2026-08-18, SUPERSEDES all below)
 
-### Test Result
-- **Test**: `test-tools/psp-mailbox-rlc-test.exe` — loads RLC firmware via PSP mailbox
-- **PSP driver**: `alive=1 fwLoaded=1 ringCreated=0` — SOS already loaded
-- **RLC (fwType=8)**: Status=0x00000000 C2Pmsg81=0x00000000 ✅
-- **MEC (fwType=4)**: Status=0x00000000 C2Pmsg81=0x00000000 ✅
+### VERIFIED ON HARDWARE (psp-ring-submit-test.exe against installed atikmdag.sys)
+- **REAL, WORKING MP0 C2PMSG base in BAR5 = 0x58000** (= ip_discovery MP0 base 0x16000 in DWORD units × 4).
+  The earlier probe conclusion "base = 0x103D0" and the "ring permanently unavailable / no TOS" verdict were
+  WRONG — they were based on addresses that read back idle values, not the live mailbox.
+- **`PSP_RING_INIT` (IOCTL 0x80000C18) result**: Result=1, RingPa=0x7E512000, RingSize=0x1000,
+  C2pmsg64=**0x80020000** (bit31 = RESP ACK set + ring type 0x0002 KM echo), C2pmsg81=0x002B9309.
+  Ring created exactly per Linux `psp_v11_0_8_ring_create()`.
+- **`PSP_RING_SUBMIT` (IOCTL 0x80000C1C) result**: fence REACHED for every command;
+  WPTR (C2PMSG_67) advances 0x10 per frame (64B psp_gfx_rb_frame) — ring consumption confirmed.
+- **`GFX_CMD_ID_GET_FW_ATTESTATION` (0x0F) returned resp.status = 0x00000000 (SUCCESS)** —
+  PSP executed a real command through the ring. This is the definitive proof the GPCOM ring works.
+- `GET_FW_ATTESTATION2` (0x10) and `FB_FW_RESERV_ADDR` (0x50) returned **0x00000100 =
+  PSP_ERR_UNKNOWN_COMMAND** (psp_gfx_if.h line 494) — BC-250 SOS doesn't implement those commands;
+  protocol itself succeeded (fence hit). NOT an error in our code.
 
-### Key Discovery
-- SOS firmware DOES support GFX_CMD_ID_LOAD_IP_FW (0x06) via mailbox — even though TOS ring protocol doesn't work
-- RLC firmware (previously impossible via direct BAR5) now works! PSP mailbox is the CORRECT path
-- All GPU firmware types can be loaded: ME=1, PFP=2, CE=3, MEC=4, MEC2=5, RLC=8, SDMA0=9, SDMA1=10
+### Kernel implementation (files changed 2026-08-18)
+- `amdbc250_dream_kmd.c` cases **0x80000C18 (PSP_RING_INIT)** and **0x80000C1C (PSP_RING_SUBMIT)**.
+- File-scope defines (SUPERSEDE the wrong 0x103D0-based DIRECT_C2PMSG_* in amdbc250_psp.c):
+  `PSP_MP0_BASE 0x58000`, C2PMSG_64@0x58200 / 67@0x5820C / 69@0x58214 / 70@0x58218 / 71@0x5821C / 81@0x58244,
+  `PSP_RING_SIZE 0x1000`, `PSP_RING_TYPE_KM 2`, `PSP_CMD_BUF_SIZE 0x1000`.
+- INIT: waits TOS-ready (C2PMSG_64 bit31) → `MmAllocateContiguousMemory(0x1000)` ring → writes
+  C2PMSG_69/70/71 → `C2PMSG_64 = KM(2)<<16` → 20ms → waits RESP bit31 → sets `PspRingCreated`.
+- SUBMIT: lazy-allocates cmd + fence buffers (both 0x1000), builds `psp_gfx_cmd_resp`
+  (buf_size=0x400@+0, buf_version=1@+4, cmd_id@+8, union cmd copied at +28, resp@+864),
+  writes 64B `psp_gfx_rb_frame` (+0 cmd_buf_addr_lo, +4 hi, +8 size, +12 fence lo, +16 fence hi,
+  +20 fence_value), advances `wptr=(wptr+16)%1024`, kicks C2PMSG_67, polls fence with `DreamV3HdpFlush`.
+- Output 24B: {Result, FenceStatus, RespStatus, RespFwAddrLo, RespFwAddrHi, RespTmrSize}.
+- Protected by `DevExt->DeviceMutex`; buffers freed in `DreamV3WdmUnload`.
+- `inc/amdbc250_ioctl.h`: `IOCTL_AMDBC250_PSP_RING_INIT`/`PSP_RING_SUBMIT` (Function 0x96/0x97 → 0x80000C18/0x80000C1C).
+- Code Reviewer pass fixed: output-buffer overrun, cmdDataSize input over-read clamp,
+  status-masking, cmd payload offset +12→+28, added mutex + zeroing + PA==0 checks.
 
-### Impact
-- Can now initialize ALL GPU engines via PSP (especially RLC which was impossible before)
-- Previous blocker (KIQ_SIZE=0 read-only) may be resolved by proper RLC initialization
-- Next step: combined test loading ALL firmware via PSP + MEC ring test
+### Test tools
+- `test-tools/psp-ring-submit-test.c` + `compile-psp-ring-submit-test.bat` → `output\psp-ring-submit-test.exe`.
+- `test-tools/psp-ring-create-v2.c` (user-mode ring_create proof, base 0x58000).
 
-### Code Review Bug Fix Status (all 17 bugs resolved)
+### Next (in progress): LOAD_IP_FW via ring
+- `GFX_CMD_ID_LOAD_IP_FW = 0x06` with `psp_gfx_cmd_load_ip_fw {fw_phy_addr_lo, hi, fw_size, fw_type}`.
+- Needs firmware bytes in a GPU-visible buffer; driver `ALLOC_VIDMEM` returns kernel VA (not user-visible),
+  so the IOCTL must read the firmware file itself (from `bc-250\`) and stage it before submitting.
+- Candidate commands after that: SETUP_TMR (0x05), LOAD_TOC (0x20), AUTOLOAD_RLC (0x21).
+
+### Key corrected offsets (0x58000 base, byte offsets)
+| Register | Offset | Linux/PROBE note |
+|----------|--------|------------------|
+| C2PMSG_33 | 0x58184 | PSP init complete (0x80000000) |
+| C2PMSG_35/36/37 | 0x5818C/90/94 | bootloader commands (unusable, SOS alive) |
+| C2PMSG_64 | 0x58200 | cmd / TOS-ready / RESP — LIVE (0x80020000) |
+| C2PMSG_67 | 0x5820C | ring WPTR — advances on submit |
+| C2PMSG_69/70/71 | 0x58214/18/1C | ring addr low/high, size |
+| C2PMSG_81 | 0x58244 | SOS status (0x002B9309, not bit31) |
+| C2PMSG_101 | 0x58294 | scratch |
+
+## PSP Firmware Loading Status (2026-08-18 UPDATE — register probe) [OLD/HISTORICAL — superseded above]
+
+### PROBE RESULTS (psp-ring-probe-esc.exe via KMDOD Escape, 2026-08-18)
+- **REAL MP0 base in BAR5 = 0x103D0** (dword 0x40F4). `C2PMSG_81 @ 0x10614 = 0xF0000010` (bit31 = SOS alive). `Amdbc250PspDiscoverMp0Base` finding 0x40F4 is CORRECT; `Amdbc250PspReadRegister/WriteRegister` (`g_Mp0BaseDword * 4 + RegByteOffset`) are correct.
+- **Direct C2PMSG offsets WERE WRONG by 0x10** — code used 0x1056C/0x10570/0x10574 (base 0x103E0), correct are **0x1055C/0x10560/0x10564** (base 0x103D0). FIXED 2026-08-18 in amdbc250_psp.c (DIRECT_C2PMSG_35/36/37_OFFSET). All prior PSP_LOAD_IP_FW attempts wrote to dead registers.
+- **SMN C2PMSG path is SMU, NOT PSP** — `amdbc250_dream_psp_fw_load.c` writes SMN 0x03B10A08/0x03B10A48/0x03B10A68 which are SMU C2PMSG_66/82/90 (probe: 0x1E/0x00/0x01). PSP C2PMSG are NOT mirrored into SMN. This path needs rework if used.
+- **C2PMSG_64 bit31 (TOS ready) = 0** even at correct address 0x105D0 — ring_create first wait (MBOX_TOS_READY_FLAG) can never succeed without TOS. Ta.bin (262656 B, same size as Sysdrv.bin) exists in `drivers\bc-250\` — candidate TOS to test before ring.
+- SMN formula candidates C2PMSG_n = 0x03B10900 + n*4 (D) and ip_discovery MP0 0x16000 (C) both read 0 — NOT the PSP mailbox location.
+- C2PMSG_35/36/37/64/67/69/70/71/101 at correct BAR5 base all read 0 (idle/uncommanded), C2PMSG_81@0x10614 = 0xF0000010.
+
+### TOS TEST RESULT (psp-tos-test.exe, 2026-08-18 — DEFINITIVE)
+- **IOCTL code bug FIXED**: test-tools hardcoded `0x800024A3` (TOS) / `0x80002483` (IP_FW) but driver case values (from CTL_CODE METHOD_BUFFERED header macros) are `0x800024A0` / `0x80002480`. Confirmed via byte-pattern scan of installed atikmdag.sys binary (0x800024A0 found, 0x800024A3 NOT found). Both test tools fixed + recompiled.
+- **Result**: IOCTL now reaches driver (C81=0xF0000010 = SOS alive readback OK), but **TOS load FAILED**: C2PMSG_64 before=0 after=0 (bit31 TOS ready NEVER set), C2PMSG_35=0 after command.
+- **Why**: Linux `psp_v11_0_bootloader_load_*` FIRST checks `is_sos_alive` (C2PMSG_81); if SOS already loaded it returns immediately WITHOUT any bootloader command. SOS is alive on BC-250 → bootloader is gone, cannot accept C2PMSG_35/36/37 firmware commands. Ta.bin as TOS is NOT loadable this way.
+- **CONCLUSION: PSP ring mechanism is permanently unavailable** on this unit (C2PMSG_64 bit31 never sets, no TOS). PSP firmware loading via GPU driver is closed. SMU mailbox via SMN remains the only working mailbox path.
+- Kernel driver build is free (KdPrintEx strings absent from binary); use byte-pattern scans, not string search, to verify constants in installed .sys.
+
+### Test tools (new)
+- `test-tools/psp-ring-probe.c` + `compile-psprobe.bat` → `output\psprobe.exe` (GPU WDM IOCTL `\\.\AMDBC250DreamV43`, needs atikmdag running)
+- `test-tools/psp-ring-probe-esc.c` + `compile-psprobe-esc.bat` → `output\psp-ring-probe-esc.exe` (KMDOD Escape READ_REG/READ_SMN, works with KDODSamp display driver). **This is the one that ran.**
+
+### Current Implementation (BROKEN — needs the fixes above)
+- **GPU driver** (`amdbc250_psp.c` + `amdbc250_dream_psp_fw_load.c`) uses TWO conflicting paths:
+  1. **Direct BAR5 C2PMSG** (amdbc250_psp.c): DIRECT_C2PMSG_35/36/37 offsets FIXED to 0x1055C/60/64 (was 0x1056C/70/74 — wrong base 0x103E0); C2PMSG_81 0x10614 was already correct
+  2. **SMN C2PMSG** (amdbc250_dream_psp_fw_load.c): writes SMN 0x03B10A08/0x03B10A48/0x03B10A68 — these are SMU registers, NOT PSP (confirmed by probe). Must be reworked to BAR5 direct path.
+- **BC-250 PSP v11.0.8 uses RING mechanism** (C2PMSG_64/67/69/70/71), NOT direct C2PMSG_35/36/37 writes
+- Linux `psp_v11_0_8.c` confirms: ring_create waits for `C2PMSG_64 bit31 = MBOX_TOS_READY_FLAG`, then writes ring addr/size to C2PMSG_69/70/71
+- **Result**: SYSDRV/SOS/SMC load attempts return STATUS_TIMEOUT; no PSP firmware is actually loaded by our GPU driver
+
+### What Works
+- **SMU mailbox via SMN** — Q0/Q3 protocols proven, governor sequence safe, frequency control operational
+- **PSP SOS alive detection** — C2PMSG_81 bit31 = 1 (0xF0000010) when SOS already loaded by BIOS/PSP driver
+- **PSP driver (PspDriver.sys)** — separate driver has its own firmware loading path (if needed)
+
+### What Doesn't Work
+- **Direct PSP mailbox firmware loading** via GPU driver — wrong mechanism for BC-250 (offsets now corrected, but SOS may not support direct C2PMSG_35/36/37 for IP firmware)
+- **PSP ring creation** — C2PMSG_64 bit31 never sets (no TOS support in BC-250 SOS); Ta.bin is a candidate TOS to try
+- **PSP PROG_REG** — not supported by BC-250 SOS
+
+### Root Cause
+BC-250's PSP v11.0.8 SOS firmware does NOT support direct C2PMSG_35/36/37 firmware loading. Linux amdgpu uses the ring mechanism (C2PMSG_64/67/69/70/71) which requires TOS (Trusted OS) support. Our SOS lacks TOS, so ring_create also fails. The only working path is SMU mailbox for SMU firmware; CP firmware loading via PSP is currently impossible on Windows.
+
+## SDMA Status (2026-08-13)
 
 | # | Description | Status | Fix |
 |---|-------------|--------|-----|
@@ -143,8 +222,14 @@ Three automated analysis agents ran on the GPU driver, PSP driver, and test tool
 - BUT: GPU MEC not processing (KIQ_BASE=0, KIQ_SIZE=0, ME halted)
 - Readback confirms ring is writable through PSP proxy
 
-### Conclusion
-BC-250 compute/GFX engines appear permanently disabled at hardware level. Ring registers respond to MMIO but the CP/MEC engine behind them doesn't process. PSP PM4 submit path works as a transport layer but the GPU doesn't execute the commands. Consistent with RADV `RADV_DEBUG=nocompute` workaround documented in the community.
+### Conclusion (UPDATED 2026-08-13)
+BC-250 compute/GFX engines are NOT permanently disabled at hardware level — they are SOS/SMU-locked. Linux amdgpu successfully creates compute rings and runs shaders. The blockers are:
+1. **SPI_PG_ENABLE_STATIC_WGP_MASK (0x5C3C) is SOS-locked** — host BAR5 writes blocked by PSP Secure OS
+2. **SMU DPM not initialized** — no DPM tables uploaded, so SMU cannot power on WGPs
+3. **Ring BASE registers SOS-locked** — cannot create GFX/compute rings from host
+4. **PSP firmware loading path is wrong** — GPU driver uses direct C2PMSG_35/36/37, but BC-250 PSP v11.0.8 needs ring mechanism (C2PMSG_64/67/69/70/71)
+
+Linux proves the silicon works. Our Windows driver lacks the privilege level (kernel context + debugfs) and correct init sequence.
 
 ## Next Steps (Completed)
 1. ~~Check if ME unhalt (write 0 to 0x4A74 via PSP proxy) enables any engine activity~~ **DONE** — unhalted, no change
@@ -215,20 +300,27 @@ Is PSP SOS firmware loaded? AGENTS.md earlier noted `C2PMSG_81=0xF0000010` sugge
 - MEC (fwType=4) firmware loaded: Status=0x00000000 ✅
 - Post-load: GFX ring test re-run — **NO CHANGE** — RPTR still doesn't advance
 
-### Hardware Conclusion (CONFIRMED)
-BC-250 mining ASIC has compute/GFX engines permanently disabled at hardware level:
+### Hardware Conclusion (UPDATED 2026-08-13)
+BC-250 is a full PS5 Oberon die (8× Zen2 + RDNA2 + 40 CUs), NOT a mining-only ASIC with fused-off shader array. Disabled features are MASKED (SOS/SMU-locked), not fused.
 - ME was halted but unhalting it doesn't enable processing
 - GFX ring WPTR is writable but the CP/MEC engine behind it never reads from the ring
 - KIQ_BASE/KIQ_SIZE are hardwired to 0 — ring buffer address can't be set
 - PGM_LO (0x8110) is WRITABLE (0x65FFEB6E initial, writes persist across boots) but still no execution
 - COMPUTE registers (DIM_X/Y/Z) are read-only shadows, but PGM_LO/HI and NUM_THREAD_Y/Z are WRITABLE
 - Consistent with RADV `RADV_DEBUG=nocompute` workaround and bc250-collective findings
+- Linux community (duggasco/bc250-40cu-unlock, elektricm docs) writes the SAME registers we found "read-only" — and they work on Linux:
+  - `CC_GC_SHADER_ARRAY_CONFIG` (BAR5 0x9C1C): stock `0xfff80000` (24 CU) → unlocked `0xffe00000` (40 CU)
+  - `SPI_PG_ENABLE_STATIC_WGP_MASK` (BAR5 0x5C3C): stock `0x07` (WGP 0-2) → unlocked `0x1F` (WGP 0-4)
+  - `RLC_PG_ALWAYS_ON_WGP_MASK` (BAR5 0x3D64): set to `0x1F` to keep all WGPs powered
+  - ALL THREE writes are required together; CC alone only changes reporting, SPI alone only 24 CU compute.
 
 ### What DOES Work
 - PSP driver: BAR5 mapping, mailbox firmware loading, register read/write proxy
 - GPU driver: WDM IOCTL device, BAR5 proxy, GCVM page tables, PM4 encoding
-- PSP mailbox: firmware loading for ALL types (ME, PFP, CE, MEC, MEC2, RLC, SDMA)
+- PSP mailbox: firmware loading for ALL types (ME, PFP, CE, MEC, MEC2, RLC, SDMA) — BUT current implementation uses WRONG mechanism for BC-250
 - Register read/write via both GPU and PSP drivers
+- SMU mailbox via SMN: frequency/voltage control, feature enable/disable, temperature monitoring
+- CPU core unlock via SMU Q3 msg 0x98 (6c/12t → 8c/16t)
 
 
 ## PSP Driver: Firmware now auto-installed via INF (2026-07-04)
@@ -1311,36 +1403,45 @@ From user's EFI Shell test logs:
 - **User enabled IOMMU Disabled in BIOS** — needs re-test
 - Without NBIO unlock at EFI boot, injection and WGP unlock won't work
 
-## FINAL VERDICT — 3D GRAPHICS IMPOSSIBLE ON THIS HARDWARE (2026-08-11)
+## FINAL VERDICT — 3D GRAPHICS BLOCKED BUT NOT FUNDAMENTALLY IMPOSSIBLE (2026-08-13)
 
 ### Conclusion
-This specific BC-250 hardware variant is **factory-locked for GPU command execution**. All hardware ring paths are locked at the hardware level. 3D graphics with this hardware is **NOT achievable** through any software or driver modification.
+This specific BC-250 hardware variant is **factory-locked for GPU command execution** via Windows WDM. All hardware ring paths are locked by PSP Secure OS. 3D graphics with this hardware is **NOT achievable on Windows WDM** without either:
+1. EFI Shell pre-boot WGP unlock (NBIO must be unlocked in BIOS)
+2. Linux kernel driver (has debugfs privilege)
+3. Real WDDM miniport with full PSP authentication
 
-### Fundamental Blockers (All Hardware-Level, Unfixable)
+### Fundamental Blockers (All SOS/Software-Level, Not Hardware Fused)
 | Blocker | Root Cause | Fixable? |
 |---------|-----------|----------|
-| KIQ_SIZE=0 read-only (0xE068) | Hardware-level, not in firmware | ❌ No |
-| CP_HQD NBIO-blocked (0xDAC0-0xDBFF) | NBIO firewall | ❌ No |
-| GCVM PT_BASE HW-locked (0x0B608) | Always reads 0 | ❌ No |
-| GFX_RING0_BASE_LO read-only (0xDA60) | BIOS sets ring base | ❌ No |
-| KIQ_WPTR 9-bit limit (0x1FF) | Hardware limitation | ❌ No |
-| SOS firmware no ring protocol | C2PMSG_64 bit 31 never sets | ❌ No |
-| SPI_PG_ENABLE_STATIC_WGP_MASK = 0 | Hardware-fused WGPs | ❌ No |
+| **KIQ_SIZE=0 read-only** (0xE068) | Hardware-level, not in firmware | ❌ No |
+| **CP_HQD NBIO-blocked** (0xDAC0-0xDBFF) | NBIO firewall | ❌ No |
+| **GCVM PT_BASE HW-locked** (0x0B608) | Always reads 0 | ❌ No |
+| **GFX_RING0_BASE_LO read-only** (0xDA60) | BIOS sets ring base | ❌ No |
+| **KIQ_WPTR 9-bit limit** (0x1FF) | Hardware limitation | ❌ No |
+| **SOS firmware no ring protocol** (PSP side) | C2PMSG_64 bit 31 never sets; TOS doesn't support GPCOM | ❌ No |
+| **SPI_PG_ENABLE_STATIC_WGP_MASK = 0** | SOS-locked from host writes; Linux can write it via kernel context | ⚠️ Only via EFI/Linux |
+| **PSP firmware loading wrong mechanism** | GPU driver uses direct C2PMSG_35/36/37; BC-250 needs ring mechanism | ⚠️ Fixable |
+| **SDMA firmware broken** | Stock firmware never drives user queues | ⚠️ Maybe (navi12 firmware works on Linux) |
 
 ### What Works Today
 - ✅ KMDOD display driver (2560x1440, Status OK)
 - ✅ SMU frequency/voltage control (1500 MHz @ 931 mV)
 - ✅ Display output
-- ✅ PSP mailbox firmware loading
+- ✅ PSP SOS alive detection (C2PMSG_81=0xF0000010)
 - ✅ Hardware monitoring (temperature, power)
 - ✅ GPU register read/write via BAR5
+- ✅ CPU core unlock via SMU Q3 msg 0x98 (6c/12t → 8c/16t)
+- ✅ SMU feature enable/disable (GFXOFF, CG, PG)
 
-### What Doesn't Work (Fundamentally Impossible)
+### What Doesn't Work (On Windows WDM)
 - ❌ 3D graphics / Vulkan / DirectX
 - ❌ GPU shader execution
-- ❌ WGP unlock / SPI_PG write (hardware-fused)
+- ❌ WGP unlock / SPI_PG write (SOS-locked on Windows)
 - ❌ GPU driver (atikmdag.sys) for 3D (Code 37)
 - ❌ Compute queues / async compute
+- ❌ PSP firmware loading via GPU driver (wrong mechanism)
+- ❌ SDMA operations (ring not initialized, firmware broken)
 
 ### Recommendation
 Focus on what works: **display + SMU control + hardware monitoring**.
@@ -1414,3 +1515,81 @@ After exhausting all WGP unlock methods (all failed due to SOS lock), focus shif
 ### VID Formula
 vid = round((1.55 - mv/1000.0) / 0.00625)
 mV = round((-vid*0.00625 + 1.55) * 1000)
+
+## Community Research & External Findings (2026-08-13)
+
+### DryhoppedIPA/bc250-gfx1013-fix (GitHub, 2026)
+**CRITICAL: Compute queues ARE fixable on BC-250 — this is a SOFTWARE bug, not hardware!**
+
+- **Kernel + Mesa/RADV patches** fix BC-250's broken GPU compute queues
+- **Results:** +25% FPS from async compute (Cyberpunk 2077, 1440p Medium)
+- **Root cause:** BC-250 powers on with ACE dispatches using threadgroup-dimension mode with `PARTIAL_TG_EN` mis-execute. This causes copy shaders to drop rows of images.
+- **Fix:** Switch async compute dispatches to thread-dimension mode (same workaround used for Iceland/Tonga since GCN3 era)
+- **Kernel patches:** Repair compute-queue lifecycle so ACE works
+- **Mesa patches:** Turn compute queue on, fix dispatch corruption, correct GFX10.1 detection
+- **Verified:** Vulkan CTS `dEQP-VK.synchronization2.*` — zero regressions, all 7,384 compute-queue cases pass
+- **Implication for Windows:** Our driver cannot implement this fix — it requires kernel-mode driver changes (compute queue lifecycle) that our WDM IOCTL driver cannot provide
+
+### duggasco/bc250-40cu-unlock (GitHub, 334 stars)
+- **Kernel patch** re-enables all 40 CUs on BC-250
+- **Writes both registers during `gfx_v10_0_get_cu_info()`:**
+  - `CC_GC_SHADER_ARRAY_CONFIG`: 0xFFF80000 → 0xFFE00000
+  - `SPI_PG_ENABLE_STATIC_WGP_MASK`: 0x07 → 0x1F
+- **Results:** 1.61x compute scaling (pp512 LLM inference: 230 → 372 tok/s)
+- **Guarded by:** PCI device ID 0x13FE + `bc250_cc_write_mode=3` kernel parameter
+- **No permanent changes** — reboot without config returns to stock 24 CU
+- **Our Windows driver:** Cannot replicate — SPI_PG is SOS-locked on Windows
+
+### rw-r-r-0644/bc250-core-unlock (GitHub, 147 stars)
+- **Unlocks 2 disabled CPU cores** (6c/12t → 8c/16t) via SMU
+- **SMN register:** 0x0115A870 (core presence mask)
+- **SMU Q3 msg 0x98:** writes 0xFF to any SMN address (debugging leftover in SMU firmware)
+- **Volatile:** cold power cycle reverts to 0x77
+- **Our Windows driver:** Already implemented! See `IOCTL_AMDBC250_CORE_UNLOCK` (0x80000978)
+
+### WinnieLV/bc250-cu-live-manager (GitHub, 176 stars)
+- **Interactive TUI** for live WGP/CU control via UMR
+- **Reads/writes:** CC_GC_SHADER_ARRAY_CONFIG, SPI_PG_ENABLE_STATIC_WGP_MASK, RLC_PG_ALWAYS_ON_WGP_MASK
+- **Features:** safety prompts, dry-run mode, boot restore via systemd
+- **CPU core unlock** integrated
+- **Our Windows driver:** Cannot replicate — requires UMR/umr kernel driver access
+
+### elektricM/amd-bc250-docs (Community Documentation)
+- **Mesa 25.1.0+ required** for BC-250 (GFX1013) support
+- **Mesa 25.3.6+ recommended** (confirmed working Fedora 43)
+- **RADV is the ONLY working GPU driver** — AMDVLK and proprietary don't support BC-250
+- **RADV_DEBUG=nohiz** recommended for artifact fixes
+- **RADV_DEBUG=nocompute** deprecated on Mesa 25.1+ (compute queue auto-disabled)
+- **VRAM:** 16GB shared, configurable 256MB-12GB via memcfg utility (stored in CMOS)
+- **ttm.pages_limit** kernel param extends dynamic VRAM beyond default half-RAM limit
+- **No VA-API** (VCN firmware blocked by Sony)
+- **ROCm experimental** — gfx1013 support incomplete
+
+## Test Tool Fixes (2026-08-13)
+
+### bar5-smn-test.c
+- **Bug:** Used header's METHOD_BUFFERED IOCTL codes (0x900/0x901 packed as CTL_CODE) instead of driver's raw METHOD_NEITHER values
+- **Fix:** Changed to raw values `IOCTL_AMDBC250_BAR5_READ_PROXY = 0x900` and `IOCTL_AMDBC250_BAR5_WRITE_PROXY = 0x901`
+- **Recompiled:** `output\bar5-smn-test.exe`
+
+### psp-fw-load.c
+- **Bug 1:** IOCTL code was `0x80002480` instead of `0x80002483` (`IOCTL_AMDBC250_PSP_LOAD_IP_FW`)
+- **Bug 2:** Firmware names were `cyan_skillfish2_sdma.bin`/`sdma1.bin` instead of `navi12_sdma.bin`/`navi12_sdma1.bin`
+- **Fix:** Corrected both IOCTL code and firmware names
+- **Recompiled:** `output\psp-fw-load.exe`
+
+### Test Results (14/15 pass)
+| Test | Result | Notes |
+|------|--------|-------|
+| `bar5-smn-test` | ✅ | SMU v88.6.0, 1500 MHz, features 0xDD602C7D |
+| `psp-fw-load` | ✅ | IOCTL works, but PSP firmware loading still fails (wrong mechanism) |
+| `test-gpu-ioctls` | ✅ | 14/15 tests pass |
+| `sdma-selftest` | ⚠️ | Returns 0xC00000A3 (ring not initialized) |
+
+## Next Steps
+
+1. **Fix PSP firmware loading** — implement ring mechanism (C2PMSG_64/67/69/70/71) or use PSP driver IOCTL
+2. **Fix SDMA ring init** — requires valid PA and working firmware (navi12_sdma.bin v0x2c)
+3. **Improve KMDOD display driver** — modes, EDID, power management
+4. **Build wddm-ps5 real WDDM miniport** (displib.lib path)
+5. **Implement EFI Shell pre-boot WGP unlock** — only path that can write SPI_PG

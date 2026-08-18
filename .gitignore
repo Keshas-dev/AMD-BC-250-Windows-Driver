@@ -51,6 +51,11 @@ sign*.txt
 third-party/
 !third-party/linuxinfo/
 
+# Large archives / raw dumps (keep out of git)
+*.7z
+*.zst
+bc250-vbios.rom
+
 # Diagnostic output in output/
 output/*.log
 output/*.txt

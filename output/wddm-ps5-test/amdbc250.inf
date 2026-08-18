@@ -1,0 +1,67 @@
+;++
+;
+; AMD BC-250 WDDM display-only miniport INF
+;
+; This is a KMDDOD (kernel mode display-only driver). It has NO user-mode
+; component - registering InstalledDisplayDrivers/UserModeDriverName makes
+; dxgkrnl expect a full render UMD and the desktop freezes. Matches the
+; proven-working KMDOD sample (sampledisplay.inf).
+;
+;--
+
+[Version]
+Signature="$Windows NT$"
+Class=Display
+ClassGUID={4d36e968-e325-11ce-bfc1-08002be10318}
+Provider=%ProviderString%
+DriverVer=08/17/2026, 1.0.109.0
+CatalogFile=amdbc250.cat
+PnpLockdown=1
+
+[DestinationDirs]
+amdbc250_Files_KM = 12
+
+[SourceDisksNames]
+1=%DiskDescription%,,,.
+
+[SourceDisksFiles]
+amdbc250kmd.sys = 1
+
+[Manufacturer]
+%ManufacturerName%=AMD,NTamd64
+
+[AMD.NTamd64]
+%BC250DeviceName% = amdbc250_Inst, PCI\VEN_1002&DEV_13FE&SUBSYS_13FE1002&REV_C4
+%BC250DeviceName% = amdbc250_Inst, PCI\VEN_1002&DEV_13FE&SUBSYS_00001022
+%BC250DeviceName% = amdbc250_Inst, PCI\VEN_1002&DEV_13FE
+%BC250DeviceName% = amdbc250_Inst, PCI\VEN_1002&DEV_13DB
+%BC250DeviceName% = amdbc250_Inst, PCI\VEN_1002&DEV_13F9
+%BC250DeviceName% = amdbc250_Inst, PCI\VEN_1002&DEV_13FA
+%BC250DeviceName% = amdbc250_Inst, PCI\VEN_1002&DEV_13FB
+%BC250DeviceName% = amdbc250_Inst, PCI\VEN_1002&DEV_13FC
+%BC250DeviceName% = amdbc250_Inst, PCI\VEN_1002&DEV_143F
+
+[amdbc250_Inst]
+FeatureScore=F0
+CopyFiles = amdbc250_Files_KM
+
+;
+;   Install driver service
+;
+[amdbc250_Inst.Services]
+AddService = amdbc250kmd,0x00000002,amdbc250_Service_Inst
+
+[amdbc250_Service_Inst]
+ServiceType = 0x1
+StartType = 0x3
+ErrorControl = 0x0
+ServiceBinary = %12%\amdbc250kmd.sys
+
+[amdbc250_Files_KM]
+amdbc250kmd.sys
+
+[Strings]
+ProviderString="AMD BC-250 Driver Project"
+ManufacturerName="Advanced Micro Devices, Inc."
+DiskDescription="AMD BC-250 Driver Installation Disk"
+BC250DeviceName="AMD BC-250 Graphics Adapter"

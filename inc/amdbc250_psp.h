@@ -2,6 +2,7 @@
 #define AMDBC250_PSP_V11_H
 
 #include <ntddk.h>
+#include "amdbc250_dream_kmd.h"
 
 /* MP0 C2PMSG register byte offsets within the PSP mailbox block */
 #define MP0_C2PMSG_35_BYTE            0x018C
@@ -17,6 +18,7 @@
 /* PSP driver IOCTL to load GPU IP firmware via the SOS secure mailbox
  * (C2PMSG_35/36/37/81). This is the working path on BC-250. */
 #define PSP_IOCTL_LOAD_IP_FW_DIRECT  CTL_CODE(FILE_DEVICE_UNKNOWN, 0x824, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define PSP_IOCTL_BOOT_SEQ           CTL_CODE(FILE_DEVICE_UNKNOWN, 0x810, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
 typedef struct _PSP_LOAD_IP_FW_REQUEST {
     ULONG FwType;
@@ -47,8 +49,14 @@ typedef struct _AMDBC250_PSP_CONTEXT {
 } AMDBC250_PSP_CONTEXT, *PAMDBC250_PSP_CONTEXT;
 
 /* Direct PSP mailbox via GPU BAR5 (no separate PSP driver needed) */
+#define PSP_RING_SIZE 0x1000
+#define PSP_RING_TYPE_GFX 0
+
 NTSTATUS Amdbc250PspDirectLoadIpFw(PVOID GpuBar5Va, ULONG FwType, ULONG FwSize,
     PHYSICAL_ADDRESS FwPa, PULONG OutC2pmsg35, PULONG OutC2pmsg81);
+NTSTATUS Amdbc250PspDirectLoadTos(PVOID GpuBar5Va, ULONG FwSize,
+    PHYSICAL_ADDRESS FwPa, PULONG OutC2pmsg64Before, PULONG OutC2pmsg64After,
+    PULONG OutC2pmsg35, PULONG OutC2pmsg81);
 NTSTATUS Amdbc250PspDirectSmuMsg(PVOID GpuBar5Va, ULONG Message, ULONG Argument,
     PULONG OutResponse, PULONG OutResponseStatus);
 NTSTATUS Amdbc250PspSmuQ3Msg(PVOID GpuBar5Va, ULONG Message, ULONG Argument,
@@ -69,6 +77,7 @@ ULONG Amdbc250PspReadRegister(ULONG RegisterOffset);
 VOID Amdbc250PspWriteRegister(ULONG RegisterOffset, ULONG Value);
 VOID Amdbc250PspUnmapRegisters(VOID);
 NTSTATUS Amdbc250PspTryUnlockNbio(VOID);
+NTSTATUS Amdbc250PspRingCreate(PVOID G, ULONG T, ULONG L, ULONG H, ULONG S);  /* Ring create (TOS protocol) */
 BOOLEAN Amdbc250PspValidateFirmware(PUCHAR FirmwareData, ULONG FirmwareSize, ULONG FirmwareType);
 
 /* PSP Proxy - GPU register access via PSP driver (bypasses NBIO firewall) */
@@ -86,5 +95,7 @@ NTSTATUS Amdbc250PspCopyFirmwareData(PUCHAR FirmwareData, ULONG Size);
 PHYSICAL_ADDRESS Amdbc250PspFirmwarePa(VOID);
 VOID Amdbc250PspKiqCleanup(VOID);
 VOID Amdbc250PspProxyCleanup(VOID);
+
+extern HANDLE g_PspProxyHandle;
 
 #endif

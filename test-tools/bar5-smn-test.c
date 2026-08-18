@@ -1,19 +1,24 @@
 #include <windows.h>
 #include <stdio.h>
 #include <stdint.h>
-#include "..\inc\amdbc250_ioctl.h"
 
 static HANDLE g_hDev = INVALID_HANDLE_VALUE;
 
+#define IOCTL_GPU_READ     0x80000B88
+#define IOCTL_GPU_WRITE    0x80000B8C
+#define IOCTL_GPU_INIT     0x80000B80
+
+typedef struct { UINT32 RegisterOffset; UINT32 Value; } REG_IO;
+
 static BOOL WriteReg(uint32_t offset, uint32_t value) {
-    AMDBC250_IOCTL_REG_ACCESS r; DWORD returned = 0;
+    REG_IO r; DWORD returned = 0;
     r.RegisterOffset = offset; r.Value = value;
-    return DeviceIoControl(g_hDev, IOCTL_AMDBC250_WRITE_REG, &r, sizeof(r), &r, sizeof(r), &returned, NULL);
+    return DeviceIoControl(g_hDev, IOCTL_GPU_WRITE, &r, sizeof(r), &r, sizeof(r), &returned, NULL);
 }
 static uint32_t ReadReg(uint32_t offset) {
-    AMDBC250_IOCTL_REG_ACCESS r; DWORD returned = 0;
+    REG_IO r; DWORD returned = 0;
     r.RegisterOffset = offset; r.Value = 0;
-    if (DeviceIoControl(g_hDev, IOCTL_AMDBC250_READ_REG, &r, sizeof(r), &r, sizeof(r), &returned, NULL)) return r.Value;
+    if (DeviceIoControl(g_hDev, IOCTL_GPU_READ, &r, sizeof(r), &r, sizeof(r), &returned, NULL)) return r.Value;
     return 0xFFFFFFFF;
 }
 static uint32_t SmnRead(uint32_t smnAddr) {
@@ -62,12 +67,13 @@ int main() {
     printf("CreateFile OK\n");
 
     /* Step 1: INIT_HARDWARE to map BAR5 (required on Win11 26100 WDM fallback) */
-    AMDBC250_IOCTL_INIT_HARDWARE ih; DWORD ret = 0;
+    typedef struct { UINT64 MmioPhysicalBase; UINT32 MmioSize; UINT32 Flags; } INIT_HW;
+    INIT_HW ih; DWORD ret = 0;
     ZeroMemory(&ih, sizeof(ih));
     ih.MmioPhysicalBase = 0xFE800000ULL;
     ih.MmioSize = 0x80000;
-    ih.Flags = AMDBC250_INIT_FLAG_NBIO_MAP;
-    BOOL ok = DeviceIoControl(g_hDev, IOCTL_AMDBC250_INIT_HARDWARE, &ih, sizeof(ih), &ih, sizeof(ih), &ret, NULL);
+    ih.Flags = 1; /* AMDBC250_INIT_FLAG_NBIO_MAP */
+    BOOL ok = DeviceIoControl(g_hDev, IOCTL_GPU_INIT, &ih, sizeof(ih), &ih, sizeof(ih), &ret, NULL);
     printf("INIT_HW(0xFE800000/0x80000): ok=%d gle=%lu\n", ok, GetLastError());
 
     /* Step 2: Read GPU basic registers */

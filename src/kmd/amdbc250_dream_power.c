@@ -262,7 +262,7 @@ DreamV3SmuInitialize(_In_ PDREAM_V3_DEVICE_EXTENSION DevExt)
     }
 
     /* Step 7: Try safe cleanup — unforce any stale clock/voltage override */
-    DreamV3SmuSendMessage(DevExt, SMU_MSG_UnForceGfxFreq, 0, NULL);
+    DreamV3SmuSendMessage(DevExt, SMU_MSG_UnforceGfxFreq, 0, NULL);
     DreamV3SmuSendMessage(DevExt, SMU_MSG_UnforceGfxVid, 0, NULL);
 
     DevExt->PowerState.SmuInitialized = TRUE;
