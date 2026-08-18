@@ -343,13 +343,16 @@ Proof (`psp-ring-submit-test.exe` against installed atikmdag.sys):
 | **GCVM PT_BASE HW-locked** | Always reads 0; cannot configure page tables | ❌ No |
 | **GFX_RING0_BASE_LO read-only** | BIOS sets ring base; writes ignored | ❌ No |
 | **KIQ_WPTR 9-bit limit** | Max ring 2048 bytes; HW limitation | ❌ No |
-| **SPI_PG SOS-locked** | Host BAR5 writes blocked by PSP Secure OS | ❌ No |
+| **SPI_PG SOS-locked** | Host BAR5 writes blocked by PSP Secure OS | ⚠️ Only via EFI/Linux (Linux amdgpu writes it; EFI Shell scripts in `third-party/EFI_Boot/`, but NBIO is locked at EFI boot on this unit) |
 | **SDMA firmware broken** | Stock firmware never drives user queues | ⚠️ Maybe (navi12 firmware works on Linux) |
 
-**Conclusion:** This BC-250 variant is factory-locked for GPU command execution. All
-hardware ring paths are locked. **3D graphics with this specific hardware is not
-achievable on Windows.** (PSP firmware loading was thought to be a blocker too, but
-the **PSP GPCOM ring works** — see "PSP Firmware Loading Status" above.)
+**Conclusion:** This BC-250 is **not factory-locked** — it is a full PS5 Oberon die
+(8× Zen2 + RDNA2 + 40 CUs) and **Linux amdgpu runs shaders on it** (compute rings,
+CachyOS dmesg). The GFX/compute/SDMA **hardware ring paths are SOS-locked from host
+BAR5 writes**, so **3D graphics is not achievable on Windows WDM as-is** — it would
+require EFI pre-boot WGP unlock, Linux kernel context, or a real WDDM miniport with
+full PSP authentication. Note: the **PSP GPCOM ring works** on Windows (see "PSP
+Firmware Loading Status" above) — not every ring path is locked.
 
 ---
 
