@@ -79,11 +79,25 @@
 - `test-tools/psp-ring-submit-test.c` + `compile-psp-ring-submit-test.bat` → `output\psp-ring-submit-test.exe`.
 - `test-tools/psp-ring-create-v2.c` (user-mode ring_create proof, base 0x58000).
 
-### Next (in progress): LOAD_IP_FW via ring
-- `GFX_CMD_ID_LOAD_IP_FW = 0x06` with `psp_gfx_cmd_load_ip_fw {fw_phy_addr_lo, hi, fw_size, fw_type}`.
-- Needs firmware bytes in a GPU-visible buffer; driver `ALLOC_VIDMEM` returns kernel VA (not user-visible),
-  so the IOCTL must read the firmware file itself (from `bc-250\`) and stage it before submitting.
+### LOAD_IP_FW via ring — VERIFIED ON HARDWARE (2026-08-18, second run)
+- `PSP_RING_LOAD_IP_FW` (IOCTL 0x80000C20) works — driver reads the firmware file itself
+  (must pass NT path `\SystemRoot\System32\drivers\bc-250\xxx.bin`, NOT Win32 `C:\...`;
+  `ZwCreateFile` in the driver rejects Win32 paths with STATUS_OBJECT_NAME_NOT_FOUND).
+- **SMU (fw_type=18, `Smu.bin`) → RespStatus=0x00000000 = TEE_SUCCESS — firmware LOADED through the ring.** 🎉
+  This is the first genuine PSP firmware load via GPCOM ring on our hardware.
+- RLC_G (8, `cyan_skillfish2_rlc.bin`), SDMA0 (9, `navi12_sdma.bin`), SDMA1 (10, `navi12_sdma1.bin`)
+  → **0xFFFF0008 = TEE_ERROR_ITEM_NOT_FOUND** (GlobalPlatform TEE error). BC-250 SOS does not have
+  firmware "items" for these types — consistent with Linux (psp_v11_0_8.c has no load_ip_fw at all;
+  those FW are loaded by bootloader/VBIOS at boot, not via PSP ring).
+- CP ME/PFP/CE/MEC (1-4) → **0x80000203** (bit31 = GFX_CMD_RESPONSE_MASK + status 0x203). Likely
+  "already loaded" or unsupported-by-SOS; not a protocol failure (fence hit, response read clean).
+- RespFwAddrLo/Hi=0 and RespTmrSize=0 for all — SOS reports no TMR placement (TMR not set up).
+- Test tool: `test-tools/psp-ring-load-ip-fw-test.c` + `compile-psp-ring-load-ip-fw-test.bat`
+  → `output\psp-ring-load-ip-fw-test.exe`. All 8 types attempted; `exe <type>` to run just one.
+- SMU file name is `Smu.bin` (NOT `cyan_skillfish2_smc.bin` which does not exist in bc-250\ dir).
 - Candidate commands after that: SETUP_TMR (0x05), LOAD_TOC (0x20), AUTOLOAD_RLC (0x21).
+- If we want SMU firmware actually applied, verify SMU version changed after load (Q0 msg 0x02),
+  or run SETUP_TMR next so SOS has a TMR region to place firmware into.
 
 ### Key corrected offsets (0x58000 base, byte offsets)
 | Register | Offset | Linux/PROBE note |

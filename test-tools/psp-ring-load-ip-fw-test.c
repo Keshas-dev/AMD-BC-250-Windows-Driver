@@ -42,13 +42,20 @@ static HANDLE g_hDev = INVALID_HANDLE_VALUE;
 #define GFX_FW_TYPE_SDMA1   10
 #define GFX_FW_TYPE_SMU     18
 
-#define FW_DIR  L"C:\\Windows\\System32\\drivers\\bc-250\\"
+/* NT kernel path (ZwCreateFile in the driver does NOT accept Win32 "C:\...").
+   \SystemRoot = C:\Windows in kernel mode. */
+#define FW_DIR  L"\\SystemRoot\\System32\\drivers\\bc-250\\"
 
 typedef struct { UINT32 RegisterOffset; UINT32 Value; } REG_IO;
 
+/* Must mirror the driver's byte layout exactly (Out is a PULONG array):
+   driver writes {Result@0, RingPaLo@4, RingPaHi@8, RingSize@12,
+                  C2pmsg64@16, C2pmsg81@20} — no UINT64 member here to avoid
+   MSVC padding between Result and RingPa. */
 typedef struct {
     UINT32 Result;
-    UINT64 RingPa;
+    UINT32 RingPaLo;
+    UINT32 RingPaHi;
     UINT32 RingSize;
     UINT32 C2pmsg64;
     UINT32 C2pmsg81;
@@ -81,7 +88,7 @@ static const FW_ENTRY g_FwTable[] = {
     { GFX_FW_TYPE_RLC_G,   L"cyan_skillfish2_rlc.bin"   },
     { GFX_FW_TYPE_SDMA0,   L"navi12_sdma.bin"           },
     { GFX_FW_TYPE_SDMA1,   L"navi12_sdma1.bin"          },
-    { GFX_FW_TYPE_SMU,     L"cyan_skillfish2_smc.bin"   },
+    { GFX_FW_TYPE_SMU,     L"Smu.bin"                   },
 };
 
 static const char* FwTypeName(uint32_t t) {
@@ -167,12 +174,15 @@ int main(int argc, char* argv[]) {
                          &ri, sizeof(ri), &returned, NULL);
     printf("  ok=%d gle=%lu\n", ok, GetLastError());
     if (!ok) { CloseHandle(g_hDev); return 1; }
-    printf("  Result=0x%08X RingPa=0x%llX RingSize=0x%X\n", ri.Result, ri.RingPa, ri.RingSize);
-    printf("  C2pmsg64=0x%08X C2pmsg81=0x%08X\n", ri.C2pmsg64, ri.C2pmsg81);
-    if (ri.Result != 1 || ri.RingPa == 0) {
-        printf("  FAIL: ring not created\n");
-        CloseHandle(g_hDev);
-        return 1;
+    {
+        UINT64 ringPa = ((UINT64)ri.RingPaHi << 32) | ri.RingPaLo;
+        printf("  Result=0x%08X RingPa=0x%llX RingSize=0x%X\n", ri.Result, ringPa, ri.RingSize);
+        printf("  C2pmsg64=0x%08X C2pmsg81=0x%08X\n", ri.C2pmsg64, ri.C2pmsg81);
+        if (ri.Result != 1 || ringPa == 0) {
+            printf("  FAIL: ring not created\n");
+            CloseHandle(g_hDev);
+            return 1;
+        }
     }
 
     printf("\n--- PSP_RING_LOAD_IP_FW (0x80000C20) ---\n");
