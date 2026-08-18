@@ -969,6 +969,15 @@ DreamV3LoadAllFirmware(
     _In_ PDREAM_V3_DEVICE_EXTENSION DevExt
     );
 
+/* Read a firmware file from disk into a pooled buffer.
+   Caller frees *OutData with ExFreePoolWithTag(*OutData, 'fw'). */
+NTSTATUS
+DreamV3LoadFirmwareFromFile(
+    _In_ PCWSTR FileName,
+    _Out_ PUCHAR *OutData,
+    _Out_ ULONG *OutSize
+    );
+
 
 /* Halt/unhalt all CP engines */
 VOID

@@ -127,6 +127,28 @@ Environment:
 #define IOCTL_AMDBC250_PSP_RING_INIT        CTL_CODE_AMDBC250(0x96, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #define IOCTL_AMDBC250_PSP_RING_SUBMIT      CTL_CODE_AMDBC250(0x97, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
+/* PSP LOAD_IP_FW via KM ring - driver reads the firmware file itself and
+   stages it into a GPU-visible contiguous buffer, then submits GFX_CMD_ID
+   LOAD_IP_FW (0x06). Packed value: 0x80000C20 (Function 0x98).
+   NOTE: distinct from IOCTL_AMDBC250_PSP_LOAD_IP_FW (direct C2PMSG path,
+   CTL_CODE 0x920) which shares the "LOAD_IP_FW" name. */
+#define IOCTL_AMDBC250_PSP_RING_LOAD_IP_FW  CTL_CODE_AMDBC250(0x98, METHOD_BUFFERED, FILE_ANY_ACCESS)
+
+typedef struct _AMDBC250_PSP_LOAD_IP_FW_IN {
+    UINT32 FwType;              /* GFX_FW_TYPE_*: 1=CP_ME 2=CP_PFP 3=CP_CE 4=CP_MEC 8=RLC_G 9=SDMA0 10=SDMA1 18=SMU */
+    WCHAR  FileName[260];       /* Absolute path to firmware blob, e.g.
+                                   L"\\SystemRoot\\System32\\drivers\\bc-250\\cyan_skillfish2_me.bin" */
+} AMDBC250_PSP_LOAD_IP_FW_IN, *PAMDBC250_PSP_LOAD_IP_FW_IN;
+
+typedef struct _AMDBC250_PSP_LOAD_IP_FW_OUT {
+    UINT32 Result;              /* 1 = submitted, 0 = rejected */
+    UINT32 FenceStatus;         /* 1 = fence reached */
+    UINT32 RespStatus;          /* PSP response status (0=SUCCESS, 0x100=UNKNOWN_CMD) */
+    UINT32 RespFwAddrLo;        /* PSP-reported FW address (low) */
+    UINT32 RespFwAddrHi;        /* PSP-reported FW address (high) */
+    UINT32 RespTmrSize;         /* PSP-reported TMR size */
+} AMDBC250_PSP_LOAD_IP_FW_OUT, *PAMDBC250_PSP_LOAD_IP_FW_OUT;
+
 typedef struct _AMDBC250_IOCTL_RESOURCE_BARS {
     UINT32 DeviceStarted;         /* 1=StartDevice was called */
     UINT32 MmioMapped;            /* 1=MMIO mapped */

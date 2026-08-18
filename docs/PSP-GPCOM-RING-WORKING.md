@@ -100,30 +100,48 @@ PspFencePa, PspFenceVa, PspFenceValue, PspRingWptr`.
 
 ### `inc/amdbc250_ioctl.h`
 ```
-IOCTL_AMDBC250_PSP_RING_INIT   CTL_CODE_AMDBC250(0x96, ...)  // 0x80000C18
-IOCTL_AMDBC250_PSP_RING_SUBMIT CTL_CODE_AMDBC250(0x97, ...)  // 0x80000C1C
+IOCTL_AMDBC250_PSP_RING_INIT        CTL_CODE_AMDBC250(0x96, ...)  // 0x80000C18
+IOCTL_AMDBC250_PSP_RING_SUBMIT      CTL_CODE_AMDBC250(0x97, ...)  // 0x80000C1C
+IOCTL_AMDBC250_PSP_RING_LOAD_IP_FW  CTL_CODE_AMDBC250(0x98, ...)  // 0x80000C20
 ```
 
-### `src/kmd/amdbc250_dream_kmd.c` — DreamV3WdmUnload
+### `src/kmd/amdbc250_dream_kmd.c` -- DreamV3WdmUnload
 Frees `PspRingVa`, `PspCmdVa`, `PspFenceVa` via `MmFreeContiguousMemory` and
 clears `PspRingCreated`.
 
+## LOAD_IP_FW via ring (case 0x80000C20, implemented 2026-08-18)
+
+Driver reads the firmware file itself (user cannot pass a GPU-visible buffer:
+`ALLOC_VIDMEM` returns a kernel VA), stages it into a contiguous
+`MmAllocateContiguousMemory` buffer, and submits `GFX_CMD_ID_LOAD_IP_FW (0x06)`
+through the KM ring.
+
+- Input  `AMDBC250_PSP_LOAD_IP_FW_IN`  = `{FwType ULONG, FileName WCHAR[260]}`
+  (absolute NT path, e.g. `\SystemRoot\System32\drivers\bc-250\cyan_skillfish2_me.bin`).
+- Output `AMDBC250_PSP_LOAD_IP_FW_OUT` = same 24 bytes as PSP_RING_SUBMIT
+  `{Result, FenceStatus, RespStatus, RespFwAddrLo, RespFwAddrHi, RespTmrSize}`.
+- `fw_type` union field is the GFX_FW_TYPE value passed by the caller
+  (1=CP_ME 2=CP_PFP 3=CP_CE 4=CP_MEC 8=RLC_G 9=SDMA0 10=SDMA1 18=SMU);
+  an invalid type is rejected with `STATUS_INVALID_PARAMETER`.
+- File I/O + staging run **before** `ExAcquireFastMutex` (file I/O is illegal at
+  APC_LEVEL); only frame build/kick/poll run under the mutex.
+- The staging buffer is freed only when the fence is reached; on timeout it is
+  kept (PSP may still be DMA-reading it) to avoid a use-after-free.
+- Test tool: `test-tools/psp-ring-load-ip-fw-test.c` ->
+  `output/psp-ring-load-ip-fw-test.exe` (loads all fw types or a single one,
+  e.g. `psp-ring-load-ip-fw-test.exe 4` for MEC).
+
 ## Ring protocol references (Linux)
 
-- `psp_v11_0_8_ring_create` — the exact 7-step sequence implemented in INIT.
-- `psp_ring_cmd_submit` / `psp_cmd_submit_buf` (amdgpu_psp.c) — frame/fence flow.
-- `psp_gfx_if.h` — structs `psp_gfx_cmd_resp`, `psp_gfx_rb_frame`,
+- `psp_v11_0_8_ring_create` -- the exact 7-step sequence implemented in INIT.
+- `psp_ring_cmd_submit` / `psp_cmd_submit_buf` (amdgpu_psp.c) -- frame/fence flow.
+- `psp_gfx_if.h` -- structs `psp_gfx_cmd_resp`, `psp_gfx_rb_frame`,
   `psp_gfx_resp`, `psp_gfx_cmd_load_ip_fw`, and `GFX_CMD_ID_*` / `GFX_FW_TYPE_*`
   enums; `PSP_ERR_UNKNOWN_COMMAND = 0x00000100`.
 
-## Next: LOAD_IP_FW via ring
+## Next after LOAD_IP_FW
 
-- `GFX_CMD_ID_LOAD_IP_FW = 0x06`, union = `psp_gfx_cmd_load_ip_fw`
-  `{fw_phy_addr_lo, fw_phy_addr_hi, fw_size, fw_type}`.
-- Firmware must sit at a GPU-visible address. `ALLOC_VIDMEM` returns a kernel
-  VA (not user-mappable), so the load IOCTL should read the firmware file itself
-  from `bc-250\` (e.g. `C:\Windows\System32\drivers\bc-250\`) and stage the
-  bytes into the cmd/fence-style contiguous buffer before submitting.
-- fw_type values for BC-250: `GFX_FW_TYPE_CP_ME=1`, `CP_PFP=2`, `CP_CE=3`,
-  `CP_MEC=4`, `RLC_G=8`, `SDMA0=9`, `SDMA1=10`, `SMU=18`.
-- After LOAD_IP_FW: `SETUP_TMR (0x05)`, `LOAD_TOC (0x20)`, `AUTOLOAD_RLC (0x21)`.
+- Verify on hardware with `psp-ring-load-ip-fw-test.exe` (expect `RespStatus=0`
+  SUCCESS for firmware types the SOS implements; `0x100` UNKNOWN_COMMAND for
+  unsupported ones -- same as the ring commands).
+- `SETUP_TMR (0x05)`, `LOAD_TOC (0x20)`, `AUTOLOAD_RLC (0x21)`.

@@ -7839,6 +7839,227 @@ DreamV3DeviceControl(
         break;
     }
 
+    /* ==========================================================================
+       IOCTL_AMDBC250_PSP_RING_LOAD_IP_FW (0x80000C20) — GFX_CMD_ID_LOAD_IP_FW (0x06)
+       via the KM GPCOM ring.
+
+       The driver reads the firmware file itself (user cannot pass a GPU-visible
+       buffer: ALLOC_VIDMEM returns a kernel VA, not a user-visible one), stages
+       it into a contiguous GPU-visible buffer, and submits LOAD_IP_FW through
+       the ring. Output mirrors PSP_RING_SUBMIT (24 bytes).
+       ========================================================================== */
+    case 0x80000C20:
+    {
+        if (inputLen >= sizeof(AMDBC250_PSP_LOAD_IP_FW_IN) &&
+            outputLen >= sizeof(AMDBC250_PSP_LOAD_IP_FW_OUT)) {
+            PAMDBC250_PSP_LOAD_IP_FW_IN In = (PAMDBC250_PSP_LOAD_IP_FW_IN)inputBuffer;
+            PAMDBC250_PSP_LOAD_IP_FW_OUT Out = (PAMDBC250_PSP_LOAD_IP_FW_OUT)outputBuffer;
+
+            /* Read inputs BEFORE writing output (METHOD_BUFFERED shares buffer) */
+            UINT32 fwType = In->FwType;
+            WCHAR fileName[260];
+            RtlCopyMemory(fileName, In->FileName, sizeof(fileName));
+            fileName[259] = L'\0';
+
+            if (!DevExt->PspRingCreated || DevExt->PspRingVa == NULL) {
+                status = STATUS_DEVICE_NOT_READY;  /* call PSP_RING_INIT first */
+                break;
+            }
+
+            /* Whitelist GFX_FW_TYPE values (Linux psp_gfx_if.h). */
+            if (fwType != 1 && fwType != 2 && fwType != 3 && fwType != 4 &&
+                fwType != 8 && fwType != 9 && fwType != 10 && fwType != 18) {
+                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+                    "AMDBC250-DREAM-V4.3: PSP LOAD_IP_FW invalid fw_type=%u\n", fwType));
+                status = STATUS_INVALID_PARAMETER;
+                break;
+            }
+
+            /* File I/O and staging allocation must run at PASSIVE_LEVEL, so
+               do them BEFORE acquiring the fast mutex (ExAcquireFastMutex
+               raises IRQL to APC_LEVEL — ZwCreateFile/ReadFile are illegal
+               there). Only ring build/kick/poll runs under the mutex. */
+            PUCHAR fwData = NULL;
+            ULONG fwSize = 0;
+            PVOID fwStageVa = NULL;
+            PHYSICAL_ADDRESS fwStagePa;
+            fwStagePa.QuadPart = 0;
+
+            /* 1. Read firmware blob from disk into a pooled buffer. */
+            NTSTATUS readStatus = DreamV3LoadFirmwareFromFile(fileName, &fwData, &fwSize);
+            if (!NT_SUCCESS(readStatus) || fwData == NULL || fwSize == 0) {
+                if (fwData != NULL) ExFreePoolWithTag(fwData, 'fw');
+                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+                    "AMDBC250-DREAM-V4.3: PSP LOAD_IP_FW file read failed 0x%08X (%u B)\n",
+                    readStatus, fwSize));
+                status = STATUS_OBJECT_NAME_NOT_FOUND;
+                break;
+            }
+
+            /* 2. Stage firmware into a contiguous GPU-visible buffer. */
+            {
+                PHYSICAL_ADDRESS high;
+                high.QuadPart = 0xFFFFFFFFULL;
+                fwStageVa = MmAllocateContiguousMemory(fwSize, high);
+                if (fwStageVa == NULL) {
+                    ExFreePoolWithTag(fwData, 'fw');
+                    status = STATUS_INSUFFICIENT_RESOURCES;
+                    break;
+                }
+                RtlCopyMemory(fwStageVa, fwData, fwSize);
+                ExFreePoolWithTag(fwData, 'fw');
+                fwStagePa = MmGetPhysicalAddress(fwStageVa);
+                if (fwStagePa.QuadPart == 0) {
+                    MmFreeContiguousMemory(fwStageVa);
+                    status = STATUS_INSUFFICIENT_RESOURCES;
+                    break;
+                }
+            }
+
+            ExAcquireFastMutex(&DevExt->DeviceMutex);
+
+            /* 3. Fence buffer: PSP writes the index here when done. */
+            if (DevExt->PspFenceVa == NULL) {
+                PHYSICAL_ADDRESS fhigh;
+                fhigh.QuadPart = 0xFFFFFFFFULL;
+                PVOID fenceVa = MmAllocateContiguousMemory(PSP_CMD_BUF_SIZE, fhigh);
+                if (fenceVa == NULL) {
+                    MmFreeContiguousMemory(fwStageVa);
+                    ExReleaseFastMutex(&DevExt->DeviceMutex);
+                    status = STATUS_INSUFFICIENT_RESOURCES;
+                    break;
+                }
+                RtlZeroMemory(fenceVa, 4);
+                DevExt->PspFenceVa = fenceVa;
+                DevExt->PspFencePa = MmGetPhysicalAddress(fenceVa);
+                if (DevExt->PspFencePa.QuadPart == 0) {
+                    MmFreeContiguousMemory(fenceVa);
+                    DevExt->PspFenceVa = NULL;
+                    MmFreeContiguousMemory(fwStageVa);
+                    ExReleaseFastMutex(&DevExt->DeviceMutex);
+                    status = STATUS_INSUFFICIENT_RESOURCES;
+                    break;
+                }
+            }
+
+            /* 4. Build cmd buffer: psp_gfx_cmd_resp with union cmd at +28.
+               LOAD_IP_FW union = psp_gfx_cmd_load_ip_fw (16 bytes):
+               +28 fw_phy_addr_lo, +32 fw_phy_addr_hi, +36 fw_size, +40 fw_type */
+            PULONG cmdBuf = (PULONG)DevExt->PspCmdVa;
+            if (cmdBuf == NULL) {
+                PHYSICAL_ADDRESS chigh;
+                chigh.QuadPart = 0xFFFFFFFFULL;
+                PVOID cmdVa = MmAllocateContiguousMemory(PSP_CMD_BUF_SIZE, chigh);
+                if (cmdVa == NULL) {
+                    MmFreeContiguousMemory(fwStageVa);
+                    ExReleaseFastMutex(&DevExt->DeviceMutex);
+                    status = STATUS_INSUFFICIENT_RESOURCES;
+                    break;
+                }
+                RtlZeroMemory(cmdVa, PSP_CMD_BUF_SIZE);
+                DevExt->PspCmdVa = cmdVa;
+                DevExt->PspCmdPa = MmGetPhysicalAddress(cmdVa);
+                if (DevExt->PspCmdPa.QuadPart == 0) {
+                    MmFreeContiguousMemory(cmdVa);
+                    DevExt->PspCmdVa = NULL;
+                    MmFreeContiguousMemory(fwStageVa);
+                    ExReleaseFastMutex(&DevExt->DeviceMutex);
+                    status = STATUS_INSUFFICIENT_RESOURCES;
+                    break;
+                }
+                cmdBuf = (PULONG)cmdVa;
+            }
+            RtlZeroMemory(cmdBuf, PSP_CMD_BUF_SIZE);
+            cmdBuf[0] = 0x400;                 /* buf_size */
+            cmdBuf[1] = 0x00000001;            /* buf_version */
+            cmdBuf[2] = 0x06;                  /* cmd_id = GFX_CMD_ID_LOAD_IP_FW */
+            {
+                PULONG ucmd = cmdBuf + (28 / 4);
+                ucmd[0] = (ULONG)(fwStagePa.QuadPart & 0xFFFFFFFF);  /* fw_phy_addr_lo */
+                ucmd[1] = (ULONG)(fwStagePa.QuadPart >> 32);         /* fw_phy_addr_hi */
+                ucmd[2] = fwSize;                                     /* fw_size */
+                ucmd[3] = fwType;                                     /* fw_type */
+            }
+
+            /* 5. Ring frame + kick + poll (same as PSP_RING_SUBMIT). */
+            ULONG index = DevExt->PspFenceValue + 1;
+            DevExt->PspFenceValue = index;
+            *(volatile ULONG*)DevExt->PspFenceVa = 0;
+            {
+                PUCHAR ring = (PUCHAR)DevExt->PspRingVa;
+                ULONG ringSizeDw = DevExt->PspRingSize / 4;
+                ULONG rbFrameSizeDw = 64 / 4;
+                ULONG wptr = DevExt->PspRingWptr;
+                PUCHAR frame = ring + (wptr * 4);
+                RtlZeroMemory(frame, 64);
+                *(volatile ULONG*)(frame + 0)  = (ULONG)(DevExt->PspCmdPa.QuadPart & 0xFFFFFFFF);
+                *(volatile ULONG*)(frame + 4)  = (ULONG)(DevExt->PspCmdPa.QuadPart >> 32);
+                *(volatile ULONG*)(frame + 8)  = 0x400;  /* cmd_buf_size */
+                *(volatile ULONG*)(frame + 12) = (ULONG)(DevExt->PspFencePa.QuadPart & 0xFFFFFFFF);
+                *(volatile ULONG*)(frame + 16) = (ULONG)(DevExt->PspFencePa.QuadPart >> 32);
+                *(volatile ULONG*)(frame + 20) = index;  /* fence_value */
+                KeMemoryBarrier();
+                wptr = (wptr + rbFrameSizeDw) % ringSizeDw;
+                DevExt->PspRingWptr = wptr;
+                DreamV3WriteRegister(DevExt, PSP_C2PMSG_67, wptr);
+            }
+
+            /* 6. Poll fence. */
+            ULONG fenceStatus = 0;
+            {
+                int waited = 0;
+                while (waited < 500) {
+                    DreamV3HdpFlush(DevExt);
+                    if (*(volatile ULONG*)DevExt->PspFenceVa == index) {
+                        fenceStatus = 1;
+                        break;
+                    }
+                    KeStallExecutionProcessor(1000);
+                    waited++;
+                }
+            }
+
+            /* 7. Response at cmdBuf + 864. */
+            Out->Result = 1;
+            Out->FenceStatus = fenceStatus;
+            if (fenceStatus) {
+                PULONG resp = (PULONG)DevExt->PspCmdVa + (864 / 4);
+                KeStallExecutionProcessor(1000);
+                Out->RespStatus = resp[0];
+                Out->RespFwAddrLo = resp[2];
+                Out->RespFwAddrHi = resp[3];
+                Out->RespTmrSize = resp[4];
+            } else {
+                Out->RespStatus = 0xFFFFFFFF;
+                Out->RespFwAddrLo = 0;
+                Out->RespFwAddrHi = 0;
+                Out->RespTmrSize = 0;
+                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+                    "AMDBC250-DREAM-V4.3: PSP LOAD_IP_FW type=%u fence TIMEOUT (500ms)\n",
+                    fwType));
+            }
+
+            /* Only free the staging buffer once the fence confirms the PSP is
+               done reading it. On timeout the PSP may still be DMA-reading the
+               blob — freeing now could hand those pages to another allocator
+               and corrupt the load (or leak data). A one-shot leak per failed
+               load is preferable. */
+            if (fenceStatus) {
+                MmFreeContiguousMemory(fwStageVa);
+            }
+
+            bytesReturned = sizeof(AMDBC250_PSP_LOAD_IP_FW_OUT);
+            status = STATUS_SUCCESS;
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                "AMDBC250-DREAM-V4.3: PSP LOAD_IP_FW type=%u size=%u fence=%u resp=0x%08X\n",
+                fwType, fwSize, fenceStatus, Out->RespStatus));
+            ExReleaseFastMutex(&DevExt->DeviceMutex);
+        } else {
+            status = STATUS_BUFFER_TOO_SMALL;
+        }
+        break;
+    }
+
     default:
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
                    "AMDBC250-DREAM-V4.3: Unknown IOCTL 0x%08X\n", ioctlCode));
