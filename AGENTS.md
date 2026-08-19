@@ -95,9 +95,49 @@
 - Test tool: `test-tools/psp-ring-load-ip-fw-test.c` + `compile-psp-ring-load-ip-fw-test.bat`
   → `output\psp-ring-load-ip-fw-test.exe`. All 8 types attempted; `exe <type>` to run just one.
 - SMU file name is `Smu.bin` (NOT `cyan_skillfish2_smc.bin` which does not exist in bc-250\ dir).
-- Candidate commands after that: SETUP_TMR (0x05), LOAD_TOC (0x20), AUTOLOAD_RLC (0x21).
-- If we want SMU firmware actually applied, verify SMU version changed after load (Q0 msg 0x02),
-  or run SETUP_TMR next so SOS has a TMR region to place firmware into.
+- Candidate commands after that: LOAD_TOC (0x20), AUTOLOAD_RLC (0x21).
+
+### PSP ring command surface — FULLY MAPPED (2026-08-19, psp-ring-generic-cmd-test.exe)
+Generic GFX_CMD_ID probes via IOCTL 0x80000C1C (PSP_RING_SUBMIT), after SETUP_TMR succeeded:
+| Command | ID | RespStatus | Meaning |
+|---------|----|------------|---------|
+| GET_FW_ATTESTATION | 0x0F | 0x00000000 | SUCCESS (control) |
+| BOOT_CFG GET | 0x24 | 0x00000000 | SUCCESS (boot cfg supported) |
+| DESTROY_TMR | 0x07 | 0x00000000 | SUCCESS (TMR fully manageable) |
+| SETUP_VMR / DESTROY_VMR | 0x09 / 0x0A | 0xFFFF000A | TEE_ERROR_NOT_SUPPORTED (SRIOV only) |
+| PROG_REG | 0x0B | 0xFFFF0009 | TEE_ERROR_NOT_IMPLEMENTED |
+| LOAD_TOC | 0x20 | 0xFFFF0009 | TEE_ERROR_NOT_IMPLEMENTED |
+| AUTOLOAD_RLC | 0x21 | 0xFFFF0009 | TEE_ERROR_NOT_IMPLEMENTED |
+| FB_FW_RESERV_ADDR / EXT | 0x50 / 0x51 | 0x00000100 | PSP_ERR_UNKNOWN_COMMAND |
+- **Conclusion:** the BC-250 SOS knows PROG_REG/LOAD_TOC/AUTOLOAD_RLC but does NOT implement them.
+  The PSP ring CANNOT write SPI_PG (PROG_REG = NOT_IMPLEMENTED) and has no TOC/RLC autoload path.
+  The PSP ring mechanism is now fully explored: INIT/SUBMIT/GET_FW_ATTESTATION/SETUP_TMR/DESTROY_TMR/
+  BOOT_CFG/LOAD_IP_FW(SMU only) all verified. 3D remains blocked by SPI_PG SOS-lock (EFI route only).
+- Test tool: `test-tools/psp-ring-generic-cmd-test.c` + `compile-psp-ring-generic-cmd-test.bat`
+  → `output\psp-ring-generic-cmd-test.exe`.
+
+### SETUP_TMR via ring — VERIFIED SUCCESS ON HARDWARE (2026-08-19): VRAM MC + aper_base works
+- `PSP_RING_SETUP_TMR` (IOCTL 0x80000C24, CTL_CODE_AMDBC250(0x99)) = `GFX_CMD_ID_SETUP_TMR` (0x05).
+- **HARDWARE RESULT: `RespStatus=0x00000000` (SUCCESS)** with buf_phy_addr=0xF40F800000 (MC) +
+  system_phy_addr=0xCF800000. **aper_base = 0xC0000000 (BAR0) CONFIRMED** — the SOS accepted the
+  MC/physical pairing, so the VRAM physical base is now hardware-verified (not just hardcoded).
+  RespTmrSize=0 and RespFwAddrLo/Hi=0 (SOS doesn't populate those for SETUP_TMR on BC-250; fine).
+- **Earlier host-RAM failures (0xFFFF0006 = TEE_ERROR_BAD_PARAMETERS):** root cause was NOT "SOS
+  requires VRAM". Linux allocates the TMR BO as `AMDGPU_GEM_DOMAIN_GTT | AMDGPU_GEM_DOMAIN_VRAM`
+  (psp_tmr_init). The real requirement: `buf_phy_addr` = **GPU address** (MC for VRAM, GART VA for
+  GTT), `system_phy_addr` = **CPU physical** — they must be CORRECT and DIFFERENT. Our host-RAM test
+  passed the same CPU PA (0x7D800000) for both, and 0x7D800000 is NOT a valid GPU address on this
+  device (VRAM MC is 0xF400000000+; GTT GPU addr ≈ 0xF410000000+ needs working GART, which we don't
+  have). We use VRAM because a VRAM MC address needs no page tables; Linux also placed the TMR in VRAM
+  (dmesg "PSP TMR: 4MB reserved at 0xF40F800000").
+- **Current driver code (2026-08-19):** no host allocation. Passes buf_phy_addr = 0xF40F800000 (MC),
+  system_phy_addr = BAR0 physical + 0x0F800000 (aper_base = FbPhysicalBase from PCI resource scan,
+  fallback 0xC0000000). Validates offset+tmrSize ≤ 256MB VRAM. Output includes TmrPaLo/Hi (system) +
+  TmrMcLo/Hi (MC). DevExt stores PspTmrPa/PspTmrMc/PspTmrSize (no host mem).
+- `PSP_TMR_SIZE` = 0x400000 (4MB, non-ALDEBARAN), `PSP_TMR_ALIGNMENT` = 0x100000. psp_skip_tmr() = false on
+  BC-250 (boot_time_tmr=false, autoload_supported=false) → Linux really sends SETUP_TMR.
+- **Next candidates:** retry LOAD_IP_FW (see if RLC/SDMA now behave differently with a TMR present),
+  then LOAD_TOC (0x20) which computes tmr_size from the TOC, then AUTOLOAD_RLC (0x21).
 
 ### Key corrected offsets (0x58000 base, byte offsets)
 | Register | Offset | Linux/PROBE note |

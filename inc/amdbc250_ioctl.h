@@ -134,6 +134,10 @@ Environment:
    CTL_CODE 0x920) which shares the "LOAD_IP_FW" name. */
 #define IOCTL_AMDBC250_PSP_RING_LOAD_IP_FW  CTL_CODE_AMDBC250(0x98, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
+/* PSP SETUP_TMR via KM ring - driver allocates a contiguous TMR buffer and
+   submits GFX_CMD_ID_SETUP_TMR (0x05). Packed value: 0x80000C24 (Function 0x99). */
+#define IOCTL_AMDBC250_PSP_RING_SETUP_TMR   CTL_CODE_AMDBC250(0x99, METHOD_BUFFERED, FILE_ANY_ACCESS)
+
 typedef struct _AMDBC250_PSP_LOAD_IP_FW_IN {
     UINT32 FwType;              /* GFX_FW_TYPE_*: 1=CP_ME 2=CP_PFP 3=CP_CE 4=CP_MEC 8=RLC_G 9=SDMA0 10=SDMA1 18=SMU */
     WCHAR  FileName[260];       /* Absolute path to firmware blob, e.g.
@@ -148,6 +152,24 @@ typedef struct _AMDBC250_PSP_LOAD_IP_FW_OUT {
     UINT32 RespFwAddrHi;        /* PSP-reported FW address (high) */
     UINT32 RespTmrSize;         /* PSP-reported TMR size */
 } AMDBC250_PSP_LOAD_IP_FW_OUT, *PAMDBC250_PSP_LOAD_IP_FW_OUT;
+
+typedef struct _AMDBC250_PSP_SETUP_TMR_IN {
+    UINT32 TmrSize;             /* TMR buffer size in bytes (4KB-64MB); 0 = default 4MB */
+    UINT64 TmrPhysicalBase;     /* MUST be 0 (driver uses fixed VRAM region); non-zero rejected */
+} AMDBC250_PSP_SETUP_TMR_IN, *PAMDBC250_PSP_SETUP_TMR_IN;
+
+typedef struct _AMDBC250_PSP_SETUP_TMR_OUT {
+    UINT32 Result;              /* 1 = submitted, 0 = rejected */
+    UINT32 FenceStatus;         /* 1 = fence reached */
+    UINT32 RespStatus;          /* PSP response status (0=SUCCESS) */
+    UINT32 RespFwAddrLo;        /* PSP-reported FW address (low) */
+    UINT32 RespFwAddrHi;        /* PSP-reported FW address (high) */
+    UINT32 RespTmrSize;         /* PSP-reported TMR size */
+    UINT32 TmrPaLo;             /* system_phy_addr (CPU physical, low) */
+    UINT32 TmrPaHi;             /* system_phy_addr (CPU physical, high) */
+    UINT32 TmrMcLo;             /* buf_phy_addr (GPU MC, low) */
+    UINT32 TmrMcHi;             /* buf_phy_addr (GPU MC, high) */
+} AMDBC250_PSP_SETUP_TMR_OUT, *PAMDBC250_PSP_SETUP_TMR_OUT;
 
 typedef struct _AMDBC250_IOCTL_RESOURCE_BARS {
     UINT32 DeviceStarted;         /* 1=StartDevice was called */

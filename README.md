@@ -26,6 +26,7 @@ AMD BC-250 Windows driver project by Keshas. Goal: fully working GPU driver for 
 - ✅ **PSP KM GPCOM ring WORKS on hardware** — ring created at correct MP0 base `0x58000`, commands executed by the PSP through the ring, fences reached. **This reopens PSP firmware loading on Windows.**
 - ✅ **PSP_RING_INIT / PSP_RING_SUBMIT kernel IOCTLs** (`0x80000C18`/`0x80000C1C`) — `GET_FW_ATTESTATION` returned SUCCESS (status 0)
 - ✅ **PSP_RING_LOAD_IP_FW kernel IOCTL** (`0x80000C20`) — driver reads the firmware file itself, stages it GPU-visible, submits `GFX_CMD_ID_LOAD_IP_FW` (0x06) via the ring
+- ✅ **PSP_RING_SETUP_TMR kernel IOCTL** (`0x80000C24`) — TMR set up in VRAM (MC 0xF40F800000 / BAR0 physical) via `GFX_CMD_ID_SETUP_TMR` (0x05); VERIFIED SUCCESS on hardware (2026-08-19), aper_base 0xC0000000 confirmed
 - ✅ **KMDOD display driver** (2560x1440, Status OK, CM_ERR=0)
 - ✅ **GPU driver loads** — WDM IOCTL mode on Win11 26100
 - ✅ **BAR5 MMIO mapping** — `DreamV3WriteRegister`/`ReadRegister` via `WRITE_REGISTER_ULONG`

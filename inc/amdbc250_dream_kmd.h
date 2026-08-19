@@ -465,6 +465,9 @@ typedef struct _DREAM_V3_DEVICE_EXTENSION {
     PVOID               PspFenceVa;          /* fence buffer kernel VA */
     ULONG               PspFenceValue;       /* next fence index */
     ULONG               PspRingWptr;         /* last written wptr (dwords) */
+    PHYSICAL_ADDRESS    PspTmrPa;            /* SETUP_TMR physical address (system_phy_addr, kept alive) */
+    PHYSICAL_ADDRESS    PspTmrMc;            /* SETUP_TMR MC address (buf_phy_addr, GPU VA) */
+    ULONG               PspTmrSize;          /* SETUP_TMR buffer size */
 
     /* KIQ ring support (primary path on BC-250) */
     BOOLEAN             KiqAvailable;        /* TRUE = KIQ ring initialized and usable */

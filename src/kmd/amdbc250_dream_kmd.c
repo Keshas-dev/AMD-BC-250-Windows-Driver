@@ -1124,6 +1124,10 @@ static VOID DreamV3WdmUnload(_In_ PDRIVER_OBJECT DriverObject)
                 MmFreeContiguousMemory(devExt->PspFenceVa);
                 devExt->PspFenceVa = NULL;
             }
+            /* PspTmr is a VRAM region (no host allocation to free). */
+            devExt->PspTmrMc.QuadPart = 0;
+            devExt->PspTmrPa.QuadPart = 0;
+            devExt->PspTmrSize = 0;
         }
     }
 
@@ -8053,6 +8057,216 @@ DreamV3DeviceControl(
             KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                 "AMDBC250-DREAM-V4.3: PSP LOAD_IP_FW type=%u size=%u fence=%u resp=0x%08X\n",
                 fwType, fwSize, fenceStatus, Out->RespStatus));
+            ExReleaseFastMutex(&DevExt->DeviceMutex);
+        } else {
+            status = STATUS_BUFFER_TOO_SMALL;
+        }
+        break;
+    }
+
+    /* ==========================================================================
+       IOCTL_AMDBC250_PSP_RING_SETUP_TMR (0x80000C24) — GFX_CMD_ID_SETUP_TMR (0x05)
+       via the KM GPCOM ring.
+
+       Gives the SOS a TMR region for trusted-app runtime data. buf_phy_addr is
+       a GPU address (MC for VRAM, GART VA for GTT); system_phy_addr is the CPU
+       physical address — they differ. We cannot provide a GART VA (GART/VM path
+       broken), so we use the VRAM aperture like Linux does on this board:
+       buf_phy_addr = MC 0xF40F800000, system_phy_addr = BAR0 physical + same
+       offset. No host allocation needed.
+       ========================================================================== */
+    case 0x80000C24:
+    {
+        if (inputLen >= sizeof(AMDBC250_PSP_SETUP_TMR_IN) &&
+            outputLen >= sizeof(AMDBC250_PSP_SETUP_TMR_OUT)) {
+            PAMDBC250_PSP_SETUP_TMR_IN In = (PAMDBC250_PSP_SETUP_TMR_IN)inputBuffer;
+            PAMDBC250_PSP_SETUP_TMR_OUT Out = (PAMDBC250_PSP_SETUP_TMR_OUT)outputBuffer;
+
+            /* Read inputs BEFORE writing output (METHOD_BUFFERED shares buffer) */
+            UINT32 tmrSize = In->TmrSize;
+            UINT64 tmrBase = In->TmrPhysicalBase;
+
+            if (!DevExt->PspRingCreated || DevExt->PspRingVa == NULL) {
+                status = STATUS_DEVICE_NOT_READY;  /* call PSP_RING_INIT first */
+                break;
+            }
+
+            /* Only driver-allocated TMR buffers are supported (user PA would
+               need a secure/VRAM region we don't expose). */
+            if (tmrBase != 0) {
+                status = STATUS_INVALID_PARAMETER;
+                break;
+            }
+
+            /* SETUP_TMR must point at a GPU-addressable buffer. The PSP's
+               buf_phy_addr is a GPU address (MC for VRAM, GART VA for GTT);
+               passing a CPU physical address there fails with
+               TEE_ERROR_BAD_PARAMETERS. We cannot provide a GART VA (GART/VM
+               path is broken on this driver), so use the VRAM aperture:
+               buf_phy_addr = GPU MC (0xF400000000+off), system_phy_addr = CPU
+               physical (aper_base = BAR0 + off). Offsets mirror Linux dmesg
+               on this board ("PSP TMR: 4MB reserved at 0xF40F800000"). */
+            PHYSICAL_ADDRESS tmrPa;   /* system_phy_addr (CPU physical) */
+            PHYSICAL_ADDRESS tmrMc;   /* buf_phy_addr (GPU MC) */
+            tmrPa.QuadPart = 0;
+            tmrMc.QuadPart = 0;
+
+            if (tmrSize == 0) tmrSize = 0x400000;  /* 4MB default */
+            if (tmrSize < 0x1000 || tmrSize > 64 * 1024 * 1024) {
+                status = STATUS_INVALID_PARAMETER;  /* sane cap */
+                break;
+            }
+            tmrSize = (UINT32)(((UINT64)tmrSize + 0xFFF) & ~0xFFFull);  /* round up to 4KB */
+
+            {
+                UINT64 mcBase = 0xF400000000ULL;      /* vram_start (Linux dmesg) */
+                UINT64 phyBase = DevExt->FbPhysicalBase.QuadPart;
+                if (phyBase == 0) phyBase = 0xC0000000ULL;  /* aper_base = BAR0 */
+                UINT64 offset = 0x0F800000ULL;         /* Linux TMR offset in 256MB VRAM */
+                if (offset + tmrSize > 0x10000000ULL) {
+                    status = STATUS_INVALID_PARAMETER;  /* would exceed 256MB VRAM */
+                    break;
+                }
+                tmrMc.QuadPart = mcBase + offset;
+                tmrPa.QuadPart = phyBase + offset;
+            }
+
+            ExAcquireFastMutex(&DevExt->DeviceMutex);
+
+            /* Fence buffer: PSP writes the index here when done. */
+            if (DevExt->PspFenceVa == NULL) {
+                PHYSICAL_ADDRESS fhigh;
+                fhigh.QuadPart = 0xFFFFFFFFULL;
+                PVOID fenceVa = MmAllocateContiguousMemory(PSP_CMD_BUF_SIZE, fhigh);
+                if (fenceVa == NULL) {
+                    ExReleaseFastMutex(&DevExt->DeviceMutex);
+                    status = STATUS_INSUFFICIENT_RESOURCES;
+                    break;
+                }
+                RtlZeroMemory(fenceVa, 4);
+                DevExt->PspFenceVa = fenceVa;
+                DevExt->PspFencePa = MmGetPhysicalAddress(fenceVa);
+                if (DevExt->PspFencePa.QuadPart == 0) {
+                    MmFreeContiguousMemory(fenceVa);
+                    DevExt->PspFenceVa = NULL;
+                    ExReleaseFastMutex(&DevExt->DeviceMutex);
+                    status = STATUS_INSUFFICIENT_RESOURCES;
+                    break;
+                }
+            }
+
+            /* Build cmd buffer: psp_gfx_cmd_resp with union cmd at +28.
+               SETUP_TMR union = psp_gfx_cmd_setup_tmr (24 bytes):
+               +28 buf_phy_addr_lo, +32 buf_phy_addr_hi, +36 buf_size,
+               +40 tmr_flags, +44 system_phy_addr_lo, +48 system_phy_addr_hi */
+            PULONG cmdBuf = (PULONG)DevExt->PspCmdVa;
+            if (cmdBuf == NULL) {
+                PHYSICAL_ADDRESS chigh;
+                chigh.QuadPart = 0xFFFFFFFFULL;
+                PVOID cmdVa = MmAllocateContiguousMemory(PSP_CMD_BUF_SIZE, chigh);
+                if (cmdVa == NULL) {
+                    ExReleaseFastMutex(&DevExt->DeviceMutex);
+                    status = STATUS_INSUFFICIENT_RESOURCES;
+                    break;
+                }
+                RtlZeroMemory(cmdVa, PSP_CMD_BUF_SIZE);
+                DevExt->PspCmdVa = cmdVa;
+                DevExt->PspCmdPa = MmGetPhysicalAddress(cmdVa);
+                if (DevExt->PspCmdPa.QuadPart == 0) {
+                    MmFreeContiguousMemory(cmdVa);
+                    DevExt->PspCmdVa = NULL;
+                    ExReleaseFastMutex(&DevExt->DeviceMutex);
+                    status = STATUS_INSUFFICIENT_RESOURCES;
+                    break;
+                }
+                cmdBuf = (PULONG)cmdVa;
+            }
+            RtlZeroMemory(cmdBuf, PSP_CMD_BUF_SIZE);
+            cmdBuf[0] = 0x400;                 /* buf_size */
+            cmdBuf[1] = 0x00000001;            /* buf_version */
+            cmdBuf[2] = 0x05;                  /* cmd_id = GFX_CMD_ID_SETUP_TMR */
+            {
+                PULONG ucmd = cmdBuf + (28 / 4);
+                ucmd[0] = (ULONG)(tmrMc.QuadPart & 0xFFFFFFFF);  /* buf_phy_addr_lo (GPU VA / MC) */
+                ucmd[1] = (ULONG)(tmrMc.QuadPart >> 32);         /* buf_phy_addr_hi */
+                ucmd[2] = tmrSize;                               /* buf_size */
+                ucmd[3] = 0x2;                                   /* tmr_flags: virt_phy_addr=1 */
+                ucmd[4] = (ULONG)(tmrPa.QuadPart & 0xFFFFFFFF);  /* system_phy_addr_lo (CPU physical) */
+                ucmd[5] = (ULONG)(tmrPa.QuadPart >> 32);         /* system_phy_addr_hi */
+            }
+
+            /* 5. Ring frame + kick + poll (same as PSP_RING_SUBMIT). */
+            ULONG index = DevExt->PspFenceValue + 1;
+            DevExt->PspFenceValue = index;
+            *(volatile ULONG*)DevExt->PspFenceVa = 0;
+            {
+                PUCHAR ring = (PUCHAR)DevExt->PspRingVa;
+                ULONG ringSizeDw = DevExt->PspRingSize / 4;
+                ULONG rbFrameSizeDw = 64 / 4;
+                ULONG wptr = DevExt->PspRingWptr;
+                PUCHAR frame = ring + (wptr * 4);
+                RtlZeroMemory(frame, 64);
+                *(volatile ULONG*)(frame + 0)  = (ULONG)(DevExt->PspCmdPa.QuadPart & 0xFFFFFFFF);
+                *(volatile ULONG*)(frame + 4)  = (ULONG)(DevExt->PspCmdPa.QuadPart >> 32);
+                *(volatile ULONG*)(frame + 8)  = 0x400;  /* cmd_buf_size */
+                *(volatile ULONG*)(frame + 12) = (ULONG)(DevExt->PspFencePa.QuadPart & 0xFFFFFFFF);
+                *(volatile ULONG*)(frame + 16) = (ULONG)(DevExt->PspFencePa.QuadPart >> 32);
+                *(volatile ULONG*)(frame + 20) = index;  /* fence_value */
+                KeMemoryBarrier();
+                wptr = (wptr + rbFrameSizeDw) % ringSizeDw;
+                DevExt->PspRingWptr = wptr;
+                DreamV3WriteRegister(DevExt, PSP_C2PMSG_67, wptr);
+            }
+
+            /* 6. Poll fence. */
+            ULONG fenceStatus = 0;
+            {
+                int waited = 0;
+                while (waited < 500) {
+                    DreamV3HdpFlush(DevExt);
+                    if (*(volatile ULONG*)DevExt->PspFenceVa == index) {
+                        fenceStatus = 1;
+                        break;
+                    }
+                    KeStallExecutionProcessor(1000);
+                    waited++;
+                }
+            }
+
+            /* 7. Response at cmdBuf + 864. */
+            Out->Result = 1;
+            Out->FenceStatus = fenceStatus;
+            if (fenceStatus) {
+                PULONG resp = (PULONG)DevExt->PspCmdVa + (864 / 4);
+                KeStallExecutionProcessor(1000);
+                Out->RespStatus = resp[0];
+                Out->RespFwAddrLo = resp[2];
+                Out->RespFwAddrHi = resp[3];
+                Out->RespTmrSize = resp[4];
+            } else {
+                Out->RespStatus = 0xFFFFFFFF;
+                Out->RespFwAddrLo = 0;
+                Out->RespFwAddrHi = 0;
+                Out->RespTmrSize = 0;
+                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+                    "AMDBC250-DREAM-V4.3: PSP SETUP_TMR fence TIMEOUT (500ms)\n"));
+            }
+            Out->TmrPaLo = (ULONG)(tmrPa.QuadPart & 0xFFFFFFFF);
+            Out->TmrPaHi = (ULONG)(tmrPa.QuadPart >> 32);
+            Out->TmrMcLo = (ULONG)(tmrMc.QuadPart & 0xFFFFFFFF);
+            Out->TmrMcHi = (ULONG)(tmrMc.QuadPart >> 32);
+
+            /* Keep the TMR addresses alive for the session (SOS references it).
+               No host allocation to free — it's a fixed VRAM region. */
+            DevExt->PspTmrMc = tmrMc;
+            DevExt->PspTmrPa = tmrPa;
+            DevExt->PspTmrSize = tmrSize;
+
+            bytesReturned = sizeof(AMDBC250_PSP_SETUP_TMR_OUT);
+            status = STATUS_SUCCESS;
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                "AMDBC250-DREAM-V4.3: PSP SETUP_TMR size=0x%X pa=0x%llX fence=%u resp=0x%08X\n",
+                tmrSize, tmrPa.QuadPart, fenceStatus, Out->RespStatus));
             ExReleaseFastMutex(&DevExt->DeviceMutex);
         } else {
             status = STATUS_BUFFER_TOO_SMALL;
