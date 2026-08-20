@@ -1640,9 +1640,186 @@ mV = round((-vid*0.00625 + 1.55) * 1000)
 | `test-gpu-ioctls` | ✅ | 14/15 tests pass |
 | `sdma-selftest` | ⚠️ | Returns 0xC00000A3 (ring not initialized) |
 
+## bc250-toolkit + Linux components analysis — FULL MAP for Windows port (2026-08-20)
+
+### bc250-toolkit ecosystem (redbeard1083/bc250-toolkit)
+Setup script for BC250 on CachyOS (Limine bootloader). Wraps all community tools. Performance profiles: Stock CPU 3.5GHz/GPU 1500MHz, Mild 1600, Moderate 1750, Strong 1850, Aggressive 2000, Extreme I 2100, II CPU 3.85GHz/GPU 2100, III CPU 4GHz/GPU 2350 @ 90°C. All standard profiles CPU 3.5GHz @ 80°C. Components:
+1. CPU governor: `bc250-collective/bc250_smu_oc` (SMU via PCI config 0xB8/0xBC)
+2. GPU governor: `filippor/cyan-skillfish-governor` (smu branch)
+3. CU unlock: `WinnieLV/bc250-cu-live-manager` (UMR) — boot service via `/etc/bc250-cu-live-manager.conf` `BC250_WGP_MASKS=<csv of 4 per-bank masks>`; applies with `umr -w <asic>.<reg> <val> -b <SE> <SH> 0xffffffff`
+4. VRAM split: `fanoush/bc250_memcfg` (CMOS RAM write, no BIOS mod)
+5. CPU core unlock: `rw-r-r-0644/bc250-core-unlock` (SMU Q3 0x98 → SMN 0x0115A870, volatile) + `Hexxeh/bc250-efi-core-unlock` (UEFI boot entry COREUNLOCK.EFI, permanent)
+6. ACPI fix: `mendesrr/bc250-acpi-fix-updated-8c` (SSDT-CST.aml + SSDT-PST.aml via initramfs acpi_override)
+7. Kernel: `MastaG/linux-cachyos-bc250` (repo `bc250-cachyos`, SigLevel=Optional TrustAll) — patches CPU/GPU telemetry for 6- and 8-core + display audio quirk
+8. 5.1 AC3 audio over DP/HDMI: `rpf16rj/bc250-steamos-real-toolkit` extras
+
+### SMU transport (all Linux tools use SAME protocol we already have)
+- **Linux transport = PCI config space 0xB8/0xBC** on `/sys/bus/pci/devices/0000:00:00.0/config` (`Bc250PciTransport`: write 0xB8=SMN addr, read/write 0xBC=data). bc250_smu_oc uses this path.
+- **Our Windows path = BAR5+0x38/0x3C (NBIO SMN window)** — functionally identical SMN transport; already works in our driver. PCI config 0xB8/0xBC on Windows was found read-only (2026-07-05) → do NOT switch.
+- **Mailbox protocol** (Bc250Mailbox.send): write RSP=0 → write ARG → write ARG+4=arg_high(0) → write CMD → poll RSP for {0x01 OK, 0xFF failed, 0xFE unknown, 0xFD rejected-prereq, 0xFC busy}. Timeout poll loop.
+- **Queue addresses** (DEFAULT_QUEUE_ADDRS, confirmed identical to ours): Q0 cmd=0x03B10A08 rsp=0x03B10A68 arg=0x03B10A48; Q1 0x03B10A00/60/40; Q2 0x03B10528/564/998; Q3 0x03B10A20/80/88; Q4 0x03B10A24/84/8C.
+- **VID codec**: `vid_to_mv(vid) = round((vid*-0.00625 + 1.55)*1000)`; `mv_to_vid(mv) = round((1.55 - mv/1000)/0.00625)`. Same formulas as ours.
+
+### CPU governor = bc250_smu_oc (PER-CORE SMU messages, queue 0 + queue 3)
+**IMPORTANT: CPU clock/voltage control is done via SMU Q0/Q3 — NOT Q2. Q2 is feature enable/disable only.**
+- **Apply sequence** (bc250_apply.py apply_config, PROVEN): `q3_0x8b_set_cpu_max_temperature(max_temp)` → `q3_0x8c_set_gpu_max_temperature(max_temp)` → `disable_extra_cpu_gpu_voltage(True)` (msg 0x9A) → `q3_0x50_scale_f_vid_curve(scale)` → `q3_0x8f_set_max_cpu_boost_clk(frequency)`. Store in config: frequency, scale, max_temperature (overclock.conf). systemd service bc250-smu-oc runs `bc250-apply --apply <conf>`.
+- **Revert defaults**: `q3_0x8f(3500)` → `q3_0x50(0)` → `disable_extra_cpu_gpu_voltage(False)` → `q3_0x8b(100)` → `q3_0x8c(100)`.
+- **Core frequency readback** (detect_active_cores): apply 3500MHz scale 0, stress, then `q3_0x43_get_core_freq(core_id)` per core 0-7; active if > 3000 MHz. Throttling detect: core freq < (target - 50MHz).
+- **VID prediction** (bc250_detect.py): `vid_predict(clock,scale) = 0.0003*clock^2 + (-1.519+scale*0.004325)*clock + (2800 - scale*10)` for clock ≥ 3000 MHz. Relative: `vid_cur + delta*0.75`. Undervolt step: `scale -= max((v_meas-v_max)/6, 1)`.
+- **Limits** (bc250_limits.py): freq 3500–5000 MHz, scale -1000..+1000 (VID curve scale, signed 16-bit, limit 0x3FFF), temp 30–100°C. **CRITICAL: never let CPU VID exceed 1.325V** (brick risk; creator permanently bricked one board).
+- Stock: 3.5GHz @ ~1180mV. OC example: 4GHz @ 1275mV → scale via VID curve.
+
+**bc250_smu api_q3.py message map (QUEUE 3 = CPU/GFX voltage + CPU freq):**
+| msg | Name | Arg encoding | Notes |
+|-----|------|-------------|-------|
+| 0x0F | set_cpu_gpu_vid | `(kind&0xFFFF)<<16 \| vid&0xFFFF`, kind=0 CPU, 1 GFX, vid from mV | force VID |
+| 0x10 | unforce_cpu_gpu_vid | `(kind&0xFFFF)<<16` | |
+| 0x1D | set_soc_clock_for_index | u32 | |
+| 0x1E | set_perfprofileindex | profile 0-3 | MUST call before force GPU freq |
+| 0x20 | set_max_temperature_cpu_gpu | temp_c 0-100 | |
+| 0x25 | set_oc_clk | `(core_id&0xFF)<<16 \| freq&0xFFFF`, 0xFF=all cores | per-core OC |
+| 0x26 | unset_oc_clk | `(core_id&0xFF)<<16` | |
+| 0x30 | return_cpu_vid_float_or | selector 0=CPU 1=GFX | dynamic VID offset |
+| 0x36 | get_current_cpu_voltage | 0 | returns mV |
+| 0x37 | get_current_gpu_voltage | 0 | returns mV |
+| 0x3B | get_clk_assigned_to_p_state | pstate 0-7 | MHz |
+| 0x3C/0x3D | enable/disable_smu_features | mask | Q3 variant |
+| 0x40 | get_cpu_temp_max | 0 | often 100 |
+| 0x42 | return_vddcrsoc_dpm_value | `(index&0xFFFF)<<16` | index 0-19 |
+| 0x43 | get_core_freq | core_id 0-7 | **MHz per core** |
+| 0x49 | set_cpu_vid_offset | offset -5..+5 | |
+| 0x4A | set_gfx_vid_offset1 | offset -5..+5 | |
+| 0x4C | gfx_droop_calibration | `(margin&0xFFFF)<<16 \| test_mv&0xFFFF` | |
+| 0x4D | set_cpu_vid_offset_large | f32 volts ±0.2 | |
+| 0x4E | set_gpu_vid_offset_large | f32 volts ±0.2 | |
+| 0x50 | scale_f_vid_curve | signed 16-bit, limit 0x3FFF | **CPU undervolt main knob** |
+| 0x52 | set_cpu_clock_stretch_coeff | 0-1000 | |
+| 0x53 | set_ccx_clock_stretch_coeff | 0-1000 | |
+| 0x6D | force_clock_stretching_vid | `(ccx&0xFFFF)<<16 \| cpu&0xFFFF` mV | |
+| 0x77 | set_cpu_max_current | mA | |
+| 0x7F | get_current_perf_sample | 0 | us avg |
+| 0x8B | set_cpu_max_temperature | 0-100°C | |
+| 0x8C | set_gpu_max_temperature | 0-100°C | |
+| 0x8E | set_vid_main_2_limit | mV | |
+| 0x8F | set_max_cpu_boost_clk | freq MHz | **CPU boost freq main knob** |
+| 0x98 | ungated SMN write | SMN addr | writes 0x00FF; core unlock |
+| 0x9A | disable_extra_cpu_gpu_voltage | 1/0 | call before VID curve |
+| 0x99 | modify_p_state_0_parameter | u32 | |
+
+**bc250_smu api_q0.py message map (QUEUE 0 = CPU pstate/cclk + GFX freq/voltage):**
+| msg | Name | Arg | Notes |
+|-----|------|-----|-------|
+| 0x02 | get_smu_version | 0 | version |
+| 0x03 | get_driver_if_version | 0 | 8 |
+| 0x0B | request_core_pstate | `(pstate&0xF)<<16 \| core_mask&0xFF` | |
+| 0x0C | query_core_pstate | core_id | status 0xFF if >7 |
+| 0x0E | request_gfxclk | 0 | DANGER |
+| 0x0F | query_gfxclk | 0 | MHz |
+| 0x11 | query_vddcr_soc_clock | `(index&0xFFFF)<<16` | |
+| 0x18 | request_active_wgp | 0 | returns 0 on our HW |
+| 0x1E | query_active_wgp | 0 | 0 = GFXOFF |
+| 0x2C | set_core_enable_mask | mask & 0xFF | CPU core enable |
+| 0x35 | set_soft_min_cclk | `(core_id&0xFF)<<20 \| freq&0xFFFF` | returns clamped MHz |
+| 0x36 | set_soft_max_cclk | `(core_id&0xFF)<<20 \| freq&0xFFFF` | returns clamped MHz |
+| 0x37 | get_gfx_frequency | 0 | MHz |
+| 0x38 | get_gfx_vid | 0 | vid → mV |
+| 0x39 | force_gfx_freq | freq MHz | needs voltage+profile first |
+| 0x3A | unforce_gfx_freq | 0 | |
+| 0x3B | force_gfx_vid | vid from mV | |
+| 0x3C | unforce_gfx_vid | 0 | check_status=false |
+| 0x3D | get_enabled_smu_features | 0 | bitmask |
+| 0x19/0x1A | set_min_deep_sleep_gfxclk_freq / set_max_deep_sleep_dfll_gfx_div | u32 | |
+| 0x2F/0x30/0x31 | gfx/l3/pack_core_cac_weight | u32 | unknown (AMD patent) |
+
+### GPU governor = cyan-skillfish-governor (smu branch)
+- **Now uses SMU backend** (`gpu.set-method = "smu"`, AUR pkg `cyan-skillfish-governor-smu`) — same SMU mailbox protocol as above. Two set-methods: `smu` (default) or `kernel` (patched kernel).
+- **Load sampling**: `gpu-usage.method` = `busy-flag` (default, samples a single busy bit), `kernel`, or `process`. `fix-metrics` patches gpu_metrics; **`fix-freq` patches `current_gfxclk_frequency` in gpu_metrics with real SMU value (fixes wrong freq reporting on 8-core)**.
+- **Control loop**: sample every 2000µs, adjust every sample*10, burst after 48 consecutive busy samples (ramp 200 MHz/ms vs normal 1 MHz/ms), down-events=10 low-load samples before stepping down, adjust threshold 10 MHz, finetune 10 MHz, load-target upper 0.95/lower 0.70, temp throttling at 85°C default.
+- **Apply** = safe-point lookup → governor sequence (Q3 0x8C max temp → Q0 0x3A unforce → Q0 0x3C unforce vid → Q3 0x1E profile → Q0 0x3B force vid → Q0 0x39 force freq) — same PROVEN sequence we already documented 2026-07-08.
+- **D-Bus interface** (PerformanceMode): SetFixedFrequency, SetRange, SetLoadTarget, SetTemperatureThresholds; TestMode (root-only): SetTestMode(freq, voltage). On Windows we'd replace D-Bus with IOCTL/registry.
+- **safe-points**: array of {frequency MHz, voltage mV}; voltage must be non-decreasing with frequency. default-config.toml safe-points: 350MHz@700mV → 2000MHz@1000mV (interpolates 30 points). Community table: 500@700, 800@750, 1000@800, 1175@850, 1400@900, 1600@950, 1800@1000, 2000@1050.
+
+### VRAM/CMOS config = bc250_memcfg (fanoush) — NEW: how VRAM size is set
+- **Writes battery-backed CMOS RAM via I/O ports 0x72 (index) / 0x73 (data)**, Linux `inb/outb` with `iopl(3)`. On Windows: use READ_PORT_UCHAR/WRITE_PORT_UCHAR in kernel driver, or HwReadPortUchar/HwWritePortUchar.
+- **MemConf_t layout at CMOS offset 0x90** (config_space_offset_start=0x90, page_size 0x100):
+  | Offset | Field | Size | Range |
+  |--------|-------|------|-------|
+  | 0x90 | Signature | DWORD | 0x42435041 = LINUX_TOOL_SIGNATURE |
+  | 0x94 | Checksum | WORD | 16-bit sum of bytes 0x96..0xAB |
+  | 0x96 | ClockSpeed | WORD | [0x01C2:0x06D6] (450–1750MHz) |
+  | 0x98 | tCL | BYTE | [8:33] |
+  | 0x99 | tRAS | BYTE | [21:58] |
+  | 0x9A | tRCDRD | BYTE | [8:27] |
+  | 0x9B | tRCDWR | BYTE | [8:27] |
+  | 0x9C | tRCAb | BYTE | [40:90] |
+  | 0x9D | tRCPb | BYTE | [0:11] |
+  | 0x9E | tRPAb | BYTE | [8:27] |
+  | 0x9F | tRPPb | BYTE | [0:11] |
+  | 0xA0 | tRRDS | BYTE | [4:12] |
+  | 0xA1 | tRRDL | BYTE | [4:12] |
+  | 0xA2 | tRTP | BYTE | [0:14] |
+  | 0xA3 | tFAW | BYTE | [4:34] |
+  | 0xA4 | tREF | WORD | [0:0xFFFF] |
+  | 0xA6 | RFCPb | WORD | [0:0xFFFF] |
+  | 0xA8 | tRFC | WORD | [0:0xFFFF] |
+  | 0xAA | UMA_SIZE | WORD | VRAM MB, ≥256, 16MB aligned (`val &= 0xFFF0`) |
+- **Write flow**: read 256 bytes from CMOS via index port 0x72 → modify field → set Signature=0x42435041, Checksum=sum(bytes 0x96..0xAB) → write back offset 0x90..0xAB. **Must reboot to apply.**
+- **Crash fix / CLI (fanoush main.cpp)**: original Discord "Mem Timing Utility" hardcoded a demo tREF write → segfault. fanoush fixed it with `#pragma pack(1)` on `MemConf_t` (28 bytes, 0x90–0xAB) + per-field range validation + CLI arg parsing: `bc250memcfg UMA_SIZE 512` sets ONE field, no args = dump all. Invalid range → silently skipped (no OOB write). Port must replicate: packed struct, checksum recompute, field range checks before each byte write.
+- **Revert**: clear CMOS via jumper or battery removal (no software revert).
+- Works on stock P3.00 and P5.00 BIOS, no modded BIOS needed. Use case: `bc250memcfg UMA_SIZE 512`. Signature error codes (read from CMOS): 0x42534D43 CMOS_BAD, 0x46544457 WATCH_DOG_TIMER_FIRED, 0x454B4843 CHECKSUM_ERROR, 0x45474953 SIGNATURE_ERROR.
+
+### Memory timings analysis (NexGen-3D-Printing/SteamMachine, Memory-Timings-Explained.txt + 1750/1875-Best.ini)
+GDDR6 tuning results on BC-250. **Only UMA_SIZE change is low-risk; timings tuning gives no confirmed gains** (fanoush's README says the same) — list for completeness:
+| Field | Best | Max/limits | Notes |
+|-------|------|-----------|-------|
+| ClockSpeed | 1750/1875 | **1875 max safe — won't post above** | 1750+ requires tCL=26 |
+| tCL | 24 @1750 / 26 @1875 | — | 1750 and lower requires 24 |
+| tRAS | 44/46 | = tCL + tRCD + 1 | can use WR value to lower it |
+| tRCDRD | 27 | — | changing to 25 hurts perf, leave 27 |
+| tRCDWR | 19 | — | any change hurts perf |
+| tRCAb | 71 | **won't post below 70**, best 71-72 | |
+| tRCPb | 0 | — | synced/locked to tRCAb |
+| tRPAb | 26 | — | manufacturer specific |
+| tRPPb | 0 | — | synced/locked to tRPAb |
+| tRRDS/tRRDL | 8/8 | — | manufacturer specific |
+| tRTP | 2 | — | manufacturer specific |
+| tFAW | 32 | — | manufacturer specific |
+| tREF | 12800 | **won't post at 13000**; 12000 = RX6600 stock | higher = better (less power/heat) |
+| RFCPb | 210 | **won't post at 214, fails at 213 → 212 max** | higher = better |
+| tRFC | 230 | — | lower = better; tied to tREF |
+| UMA_SIZE | 512 | ≥256, 16MB aligned | best left at 512 for most use |
+- Proven full profiles: `1750-Best.ini` {ClockSpeed 1750, tCL 24, tRAS 44, tRCAb 71, tREF 12800, RFCPb 210, tRFC 230, UMA 512} and `1875-Best.ini` {1875, tCL 26, tRAS 46, same rest}.
+- **Windows port**: expose all fields through CMOS IOCTL; safe defaults = current CMOS values, only touch UMA_SIZE unless user explicitly wants timings. Verify with memory benchmark before/after; expect no perf gain from timings.
+
+### ACPI fix = bc250-acpi-fix-updated-8c (mendesrr) — CPU idle/p-state tables
+- Two ACPI tables injected via initramfs acpi_override hook: **SSDT-CST.aml** (C-states/CPU idle) and **SSDT-PST.aml** (P-states). These give Linux correct CPU power management (Windows has its own ACPI CPU PM — NOT needed for our driver; listed for completeness).
+- **SSDT-CST.dsl**: adds `_CST` to all 16 processors (`\_PR.P000`–`P00F`): C1 = FFixedHW/MWAIT (1µs), C2 = SystemIO @0x414 (350µs), C3 = SystemIO @0x415 (400µs), plus `C000..C00F` aliases. Purpose: BC-250 mining BIOS ACPI lacks processor idle objects → Linux cpuidle can't sleep cores.
+- **SSDT-PST.dsl**: adds `_PCT`/`_PSS`/`_PSD` to all 16 processors: `_PCT` PerfCtl = FFixedHW MSR **0xC0010062**, `_PSS` = 8 P-states {3200,2550,2325,1960,1820,1600,1271,800 MHz}, `_PSD` = 5-DWORD package. Purpose: Linux `acpi-cpufreq` enumerates P-states from ACPI, without it CPU stuck at fixed freq.
+- **Why not Windows**: Windows 10/11 uses its own CPU PM stack — MSR-based P-states via HAL/PoFx/PEP + CPPC2 (`_CPC`) and built-in MWAIT idle; does NOT read `_CST`/`_PSS` AML. Our project is a GPU driver, CPU PM is out of scope. Linux-only fix.
+- Installation: copy .aml into /etc/initcpio/acpi_override/, add `acpi_override` to mkinitcpio HOOKS, rebuild initramfs. Verify with `cpupower idle-info` / `cpupower frequency-info`. Scale governor: schedutil default, `performance` optional.
+
+### CU unlock in bc250-toolkit (service mode — the "official" apply method)
+- Boot service reads `/etc/bc250-cu-live-manager.conf` → `BC250_WGP_MASKS=<csv of 4 per-bank masks>`, applies with UMR: `umr -w cyan_skillfish.gfx1013.mm<REG> <val> -b <SE> <SH> 0xffffffff`.
+- **Sequence**: global CC write `0x0` → for each of 4 banks (SE0/SH0, SE0/SH1, SE1/SH0, SE1/SH1): CC=0x0 + SPI=per-bank mask → global RLC=union of all bank masks. WGP→CU count: each set bit = 2 CUs (mask 0x1F = 40 CU).
+- **CONFIRMS our duggasco values**: CC_GC_SHADER_ARRAY_CONFIG=**0x0** (NOT 0xFFE00000), SPI_PG_ENABLE_STATIC_WGP_MASK=0x1F, RLC_PG_ALWAYS_ON_WGP_MASK=0x1F. Retry-with-backoff on boot (GPU not ready on attempt 1, up to 60 retries).
+
+### Windows port mapping (what we CAN implement in our driver)
+| Linux tool | Windows equivalent | Effort |
+|-----------|-------------------|--------|
+| bc250_smu_oc CPU OC | New SMU IOCTLs: Q3 msgs 0x50/0x8F/0x8B/0x8C/0x9A/0x36/0x43 + Q0 0x2C/0x35/0x36 → **separate user-mode utility later** (user said: CPU utilite vėliau) | Medium |
+| cyan-skillfish-governor GPU | Already have: SMU mailbox Q0/Q3 + governor sequence (governor-sequence test). Could add a background governor service/thread + safe-point table | Medium |
+| bc250_memcfg VRAM | New IOCTL writing CMOS 0x72/0x73 (kernel `WRITE_PORT_UCHAR`) — READ BEFORE WRITE, checksum, reboot | Low |
+| bc250-acpi-fix | N/A on Windows (ACPI handled by Windows itself) | Skip |
+| CU unlock | Still SOS-locked on Windows; EFI route only (third-party/EFI_Boot) | Blocked |
+| CPU core unlock | Already implemented: IOCTL_AMDBC250_CORE_UNLOCK (0x80000978) = SMU Q3 0x98 → SMN 0x0115A870 | Done |
+| CPU cores permanent | Hexxeh EFI boot entry = UEFI app; could mirror in third-party/EFI_Boot | Later |
+
 ## Next Steps
 
-1. **Fix PSP firmware loading** — implement ring mechanism (C2PMSG_64/67/69/70/71) or use PSP driver IOCTL
+1. **Port VRAM config (bc250_memcfg)** — new IOCTL `IOCTL_AMDBC250_CMOS_READ/WRITE` (or single config IOCTL) writing CMOS 0x72/0x73, UMA_SIZE field; verify with VRAM detection. Optional: memory-timings fields (tCL/tRAS/etc.) from SteamMachine profiles — low priority, no confirmed gains
+2. **Add CPU SMU messages to driver** — Q3 0x50/0x8F/0x8B/0x8C/0x9A/0x36/0x43 + Q0 0x2C/0x35/0x36 as IOCTLs (or expose raw send); user-mode CPU OC utility comes later
+3. **GPU governor service** — background thread with safe-point table + Q0/Q3 governor sequence (reuse governor-sequence test logic)
+4. **Fix PSP firmware loading** — implement ring mechanism (C2PMSG_64/67/69/70/71) or use PSP driver IOCTL
 2. **Fix SDMA ring init** — requires valid PA and working firmware (navi12_sdma.bin v0x2c)
 3. **Improve KMDOD display driver** — modes, EDID, power management
 4. **Build wddm-ps5 real WDDM miniport** (displib.lib path)

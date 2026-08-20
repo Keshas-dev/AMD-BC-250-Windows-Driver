@@ -563,7 +563,6 @@ reg add "HKLM\SYSTEM\CurrentControlSet\Services\atikmdag" /v DisplayWritesEnable
 | [docs/RING-INIT-STATUS.md](docs/RING-INIT-STATUS.md) | Ring init blockers and KIQ path |
 | [docs/PSP-PROXY-BYPASS.md](docs/PSP-PROXY-BYPASS.md) | PSP proxy architecture |
 | [docs/PSP-GPCOM-RING-WORKING.md](docs/PSP-GPCOM-RING-WORKING.md) | **PSP GPCOM ring — verified working, offsets + IOCTLs** |
-| [docs/GCVM-ANALYSIS.md](docs/GCVM-ANALYSIS.md) | GCVM page table investigation |
 | [third-party/EFI_Boot/](third-party/EFI_Boot/) | EFI Shell WGP unlock scripts (pre-boot) |
 | [third-party/linuxinfo/](third-party/linuxinfo/) | Linux firmware blobs and dmesg logs |
 

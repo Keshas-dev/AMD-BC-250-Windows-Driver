@@ -14,10 +14,13 @@
 *.iobj
 
 # Binary outputs (not tracked in git - build from source)
-output/*.sys
-output/*.dll
-output/*.exe
-output/*.bin
+output/
+src/amdbc250_reg/*.sys
+src/kmdod-sample/*.sys
+src/kmdod-sample/*.cat
+src/kmdod-sample/build/
+wddm-ps5/src/kmd/build/
+wddm-ps5/src/umd/build/
 uefi/output/*.bin
 
 # Test executables (built locally, not tracked)
