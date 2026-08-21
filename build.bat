@@ -8,6 +8,9 @@ set "INC_DIR=%PROJECT_DIR%inc"
 set "OUTPUT_DIR=%PROJECT_DIR%output"
 set "CERT_FILE=%PROJECT_DIR%testcert.pfx"
 set "CERT_NAME=AMD-BC250-Signer"
+rem --- Only AMD-BC250-Signer with this SHA1 is installed in Root+TrustedPublisher.
+rem     Multiple same-name certs exist in My store; /a auto-select is ambiguous. ---
+set "CERT_SHA1=34AFF96C57E9ADE68B23B4828859CF9B7F4EF442"
 
 rem --- Detect Visual Studio on D:, E:, or C: drive ---
 set "VSWHERE="
@@ -253,7 +256,7 @@ echo ==========================================
 rem --- Sign kernel driver FIRST (most important) ---
 :SignKmd
 echo Signing atikmdag.sys...
-"%SIGNTOOLS%\signtool.exe" sign /fd SHA256 /a /s My /n "%CERT_NAME%" /v ^
+"%SIGNTOOLS%\signtool.exe" sign /fd SHA256 /sha1 %CERT_SHA1% /v ^
   "%OUTPUT_DIR%\atikmdag.sys" > "%OUTPUT_DIR%\sign-kmd.log" 2>&1
 if errorlevel 1 (
     type "%OUTPUT_DIR%\sign-kmd.log"
@@ -271,21 +274,38 @@ rem --- Verify KMD signature ---
 "%SIGNTOOLS%\signtool.exe" verify /pa /v "%OUTPUT_DIR%\atikmdag.sys" > "%OUTPUT_DIR%\verify-kmd.log" 2>&1
 echo KMD signature verification: OK
 
-rem --- Generate catalog file (optional) ---
-if not "%INF2CAT%"=="" (
+rem --- Generate catalog file (REQUIRED: stale/missing CAT = package treated as Unsigned) ---
+if "%INF2CAT%"=="" (
+    echo WARNING: Inf2Cat not found - catalog NOT generated, package will be Unsigned!
+) else (
+    rem Remove stale CAT so a failed Inf2Cat cannot leave a mismatched one behind.
+    if exist "%OUTPUT_DIR%\amdbc250_dream.cat" del /q "%OUTPUT_DIR%\amdbc250_dream.cat"
     echo Generating catalog file...
-    "%INF2CAT%" /driver:"%OUTPUT_DIR%" /os:10_x64 /verbose >nul 2>&1
+    "%INF2CAT%" /driver:"%OUTPUT_DIR%" /os:10_x64 /verbose > "%OUTPUT_DIR%\inf2cat.log" 2>&1
+    if errorlevel 1 (
+        echo FATAL: Inf2Cat FAILED - package would be unsigned. See output\inf2cat.log
+        type "%OUTPUT_DIR%\inf2cat.log"
+        pause
+        exit /b 1
+    )
+    echo   Catalog generated OK
 )
 
-rem --- Sign catalog (optional) ---
+rem --- Sign catalog (REQUIRED: unsigned CAT = package treated as Unsigned) ---
 if exist "%OUTPUT_DIR%\amdbc250_dream.cat" (
-    "%SIGNTOOLS%\signtool.exe" sign /fd SHA256 /a /s My /n "%CERT_NAME%" ^
-      "%OUTPUT_DIR%\amdbc250_dream.cat" >nul 2>&1 && echo   Catalog signed OK
+    "%SIGNTOOLS%\signtool.exe" sign /fd SHA256 /sha1 %CERT_SHA1% ^
+      "%OUTPUT_DIR%\amdbc250_dream.cat" >nul 2>&1
+    if errorlevel 1 (
+        echo FATAL: CAT signing FAILED - package would be unsigned.
+        pause
+        exit /b 1
+    )
+    echo   Catalog signed OK
 )
 
 rem --- Sign UMD ---
 echo Signing amdbc250umd64.dll...
-"%SIGNTOOLS%\signtool.exe" sign /fd SHA256 /a /s My /n "%CERT_NAME%" ^
+"%SIGNTOOLS%\signtool.exe" sign /fd SHA256 /sha1 %CERT_SHA1% ^
   "%OUTPUT_DIR%\amdbc250umd64.dll" >nul 2>&1
 if errorlevel 1 (
     echo WARNING: UMD signing failed (non-fatal)

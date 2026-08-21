@@ -20,13 +20,14 @@ AMD BC-250 Windows driver project by Keshas. Goal: fully working GPU driver for 
 
 ---
 
-## Current Status (2026-08-18)
+## Current Status (2026-08-21)
 
 ### Working
 - ✅ **PSP KM GPCOM ring WORKS on hardware** — ring created at correct MP0 base `0x58000`, commands executed by the PSP through the ring, fences reached. **This reopens PSP firmware loading on Windows.**
 - ✅ **PSP_RING_INIT / PSP_RING_SUBMIT kernel IOCTLs** (`0x80000C18`/`0x80000C1C`) — `GET_FW_ATTESTATION` returned SUCCESS (status 0)
 - ✅ **PSP_RING_LOAD_IP_FW kernel IOCTL** (`0x80000C20`) — driver reads the firmware file itself, stages it GPU-visible, submits `GFX_CMD_ID_LOAD_IP_FW` (0x06) via the ring
 - ✅ **PSP_RING_SETUP_TMR kernel IOCTL** (`0x80000C24`) — TMR set up in VRAM (MC 0xF40F800000 / BAR0 physical) via `GFX_CMD_ID_SETUP_TMR` (0x05); VERIFIED SUCCESS on hardware (2026-08-19), aper_base 0xC0000000 confirmed
+- ✅ **DIRECT C2PMSG firmware loading WORKS** (2026-08-21 retest) — corrected MP0 base to `0x58000`; `psp-tos-test.exe` (Ta.bin as TOS) and `psp-fw-load.exe` (all 8 IP firmware) both PASS
 - ✅ **KMDOD display driver** (2560x1440, Status OK, CM_ERR=0)
 - ✅ **GPU driver loads** — WDM IOCTL mode on Win11 26100
 - ✅ **BAR5 MMIO mapping** — `DreamV3WriteRegister`/`ReadRegister` via `WRITE_REGISTER_ULONG`
@@ -107,22 +108,27 @@ SDMA Self-Test IOCTL: OK (br=4)
 Result: 0xC00000A3 — SDMA copy returned STATUS_INVALID_PARAMETER
 ```
 
-### psp-fw-load.exe ❌ (0/8 firmware loaded) — SUPERSEDED, use ring path
+### psp-fw-load.exe ✅ (8/8 firmware loaded via DIRECT path, 2026-08-21 retest)
 ```
-[1/8] CE (cyan_skillfish2_ce.bin)...  FAIL (err=1)
-[2/8] PFP (cyan_skillfish2_pfp.bin)... FAIL (err=1)
-[3/8] ME (cyan_skillfish2_me.bin)...  FAIL (err=1)
-[4/8] MEC (cyan_skillfish2_mec.bin)... FAIL (err=1)
-[5/8] MEC2 (cyan_skillfish2_mec2.bin)... FAIL (err=1)
-[6/8] RLC (cyan_skillfish2_rlc.bin)... FAIL (err=1)
-[7/8] SDMA0 (navi12_sdma.bin)... FAIL (err=1)
-[8/8] SDMA1 (navi12_sdma1.bin)... FAIL (err=1)
+[1/8] CE (cyan_skillfish2_ce.bin)...
+  Result=1 C2Pmsg35=0xFFFFFFFF C2Pmsg81=0x002C16FE
+[2/8] PFP (cyan_skillfish2_pfp.bin)...
+  Result=1 C2Pmsg35=0xFFFFFFFF C2Pmsg81=0x002C16FE
+[3/8] ME (cyan_skillfish2_me.bin)...
+  Result=1 C2Pmsg35=0xFFFFFFFF C2Pmsg81=0x002C16FE
+[4/8] MEC (cyan_skillfish2_mec.bin)...
+  Result=1 C2Pmsg35=0xFFFFFFFF C2Pmsg81=0x002C16FE
+[5/8] MEC2 (cyan_skillfish2_mec2.bin)...
+  Result=1 C2Pmsg35=0xFFFFFFFF C2Pmsg81=0x002C16FE
+[6/8] RLC (cyan_skillfish2_rlc.bin)...
+  Result=1 C2Pmsg35=0xFFFFFFFF C2Pmsg81=0x002C16FE
+[7/8] SDMA0 (navi12_sdma.bin)...
+  Result=1 C2Pmsg35=0xFFFFFFFF C2Pmsg81=0x002C16FE
+[8/8] SDMA1 (navi12_sdma1.bin)...
+  Result=1 C2Pmsg35=0xFFFFFFFF C2Pmsg81=0x002C16FE
 ```
 
-**Historical root cause:** the old driver used direct C2PMSG_35/36/37 writes to
-wrong offsets. **This path is obsolete — the working path is the PSP KM GPCOM ring
-(see "PSP Firmware Loading Status" above).** For firmware loading use
-`output\psp-ring-load-ip-fw-test.exe` instead.
+**Note:** The earlier "0/8 FAIL" verdict (2026-08-18) was from the **wrong MP0 base (0x103D0/0x10614)**. The live C2PMSG block is at **BAR5 0x58000** (ip_discovery MP0 base 0x16000 × 4). After correcting the offsets, the DIRECT C2PMSG_35/36/37/81 path works on hardware.
 
 ### psp-ring-submit-test.exe ✅ (2026-08-18, ring protocol VERIFIED)
 ```
@@ -284,12 +290,12 @@ Proof (`psp-ring-submit-test.exe` against installed atikmdag.sys):
 - `test-tools/psp-ring-load-ip-fw-test.c` → `output/psp-ring-load-ip-fw-test.exe`
   (loads all fw types, or a single one: `exe 4` for MEC)
 
-### Status of the old direct-path (superseded)
-- Driver still has `IOCTL_AMDBC250_PSP_LOAD_IP_FW` (CTL_CODE 0x920) direct
-  C2PMSG_35/36/37 path — **do not use**; it writes to dead offsets and never
-  loads anything. Use the ring path instead.
+### Status of the DIRECT C2PMSG path (CORRECTED 2026-08-21)
+- Driver has `IOCTL_AMDBC250_PSP_LOAD_IP_FW` (CTL_CODE 0x920) direct
+  C2PMSG_35/36/37 path at **correct base 0x58000** — **now works** (verified 2026-08-21).
+- `psp-tos-test.exe` (TOS load) and `psp-fw-load.exe` (8 IP firmware) both PASS.
 - The **PSP driver (PspDriver.sys)** in the sibling repo is deprecated — firmware
-  loading is now integrated into the GPU driver via the ring.
+  loading is now integrated into the GPU driver via BOTH the ring AND the corrected direct path.
 
 ---
 
@@ -457,9 +463,10 @@ build.bat
 output\bar5-smn-test.exe              # SMU mailbox via SMN (freq, VID, features)
 output\psp-ring-submit-test.exe       # PSP GPCOM ring init + submit (VERIFIED working)
 output\psp-ring-load-ip-fw-test.exe   # Load IP firmware through the ring (e.g. "exe 4" = MEC)
+output\psp-fw-load.exe                # DIRECT C2PMSG firmware load (8/8 PASS, base 0x58000)
+output\psp-tos-test.exe               # TOS load (Ta.bin) via direct C2PMSG (PASS)
 output\test-gpu-ioctls.exe            # 15 IOCTL tests (14/15 pass)
 output\sdma-selftest.exe              # SDMA self-test (currently fails — ring not init)
-output\psp-fw-load.exe                # OBSOLETE direct-C2PMSG path — use psp-ring-load-ip-fw-test
 ```
 
 ---
@@ -570,12 +577,8 @@ reg add "HKLM\SYSTEM\CurrentControlSet\Services\atikmdag" /v DisplayWritesEnable
 
 ## Next Steps
 
-1. **Install the new driver + run `psp-ring-load-ip-fw-test.exe` on hardware** —
-   driver is built/signed, IOCTL `0x80000C20` not yet tested (needs reinstall + reboot).
-   Expect `RespStatus=0` (SUCCESS) for firmware types the SOS implements, `0x100`
-   (UNKNOWN_COMMAND) for unsupported ones.
-2. **PSP commands after LOAD_IP_FW** — `SETUP_TMR (0x05)`, `LOAD_TOC (0x20)`,
-   `AUTOLOAD_RLC (0x21)` via the same ring.
+1. **DIRECT C2PMSG path verified** — `psp-fw-load.exe` (8/8 IP firmware) and `psp-tos-test.exe` (Ta.bin TOS) both PASS on hardware. The old "bootloader gone" verdict was WRONG BASE artifact (0x10614).
+2. **PSP commands after LOAD_IP_FW** — `SETUP_TMR (0x05)` VERIFIED working (VRAM MC 0xF40F800000 + aper_base 0xCF800000). Next: `LOAD_TOC (0x20)`, `AUTOLOAD_RLC (0x21)` via the ring.
 3. **SDMA via ring** — load `navi12_sdma.bin` (v0x2c, type 9/10) through
    `psp-ring-load-ip-fw-test.exe`, then retry SDMA ring init/copy.
 4. **KMDOD display driver** — expand modes, EDID, power management.

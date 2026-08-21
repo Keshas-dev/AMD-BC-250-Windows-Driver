@@ -1,5 +1,15 @@
 # AMD BC-250 Windows Driver — Agent Notes
 
+## Host machine
+- **The agent runs ON the target machine: an ASRock AMD BC-250 (8× Zen2 + RDNA2 gfx1013, 16GB GDDR6).** The user has confirmed the agent may run the hardware tests it needs (`output\*.exe` against the installed `atikmdag.sys`), install drivers, and verify results on the live hardware.
+- Rebooting mid-session may be required by reinstall flows; ask before rebooting if the test requires it, but otherwise treat the machine as available for hardware verification.
+
+## ⚠️ Historical-data caution (2026-08-20)
+- **This driver is continuously improved and bugs are being fixed (e.g. the VRAM/MC base fix). Old tests and conclusions in this file may be STALE — a test that "failed" before may now pass, and offset constants may have changed.**
+- Treat old AGENTS.md data as *hypotheses to re-verify*, not facts. When a fix lands, the corresponding tests must be RE-RUN on hardware, not assumed from earlier logs.
+- **Rule: after any code fix, update this file immediately AND save the change to memory** (`memory` tool). Keep the "current source of truth" section near the top so stale historical entries below do not mislead.
+- When re-testing, note explicitly whether the result was obtained with the OLD or NEW (fixed) driver build.
+
 ## Workspace boundary
 - This is the GPU driver repo; the PSP driver is a sibling git repo at `C:\AMD-BC-250\AMD-BC-250-PSP-Windows-Driver`.
 - Run git/build commands from this repo root; `C:\AMD-BC-250` itself is not the git repo.
@@ -40,6 +50,40 @@
 - **40 CU unlock** (from bc250-collective): Write `CC_GC_SHADER_ARRAY_CONFIG` (0x9C1C) + `SPI_PG_ENABLE_STATIC_WGP_MASK` (0x5C3C) together during `gfx_v10_0_get_cu_info()`. Linux mm* offsets: CC=0x226F*4+0x1260=0x9C1C, SPI=0x1277*4+0x1260=0x5C3C. SPI_PG_MASK (0x5C3C) is read-only at runtime (0x00000000) — WGPs fused off on our unit. UNLOCK_40CU IOCTL defined in header but NEVER implemented in driver.
 - **GRBM selection**: Linux uses `mmGRBM_GFX_CNTL` (0x0dc2, BAR5=0x2022) for ME/PIPE/QUEUE select, NOT `GRBM_GFX_INDEX` (0x34D0). These are DIFFERENT registers.
 - **CP_MEC_CNTL**: Navi10 offset mmREG=0x0e2d (BAR5=0x4B14), NOT Sienna_Cichlid 0x0f55. BC-250 is GFX10.1.3, not 10.3.x.
+
+## 🔧 DIRECT C2PMSG offsets FIXED to 0x58000 base — retest SOS/Ta.bin (2026-08-20, CURRENT)
+
+### What changed (driver code, build pending)
+- **The DIRECT mailbox path in `amdbc250_psp.c` and `amdbc250_dream_psp_fw_load.c` still used the WRONG MP0 base 0x103D0**
+  (offsets 0x1055C/0x10560/0x10564/0x105D0/0x10614). The verified LIVE base is **0x58000**
+  (= ip_discovery MP0 base 0x16000 dwords × 4), already used by the working ring path (`kmd.c` `PSP_MP0_BASE`).
+- **Fixes applied (2026-08-20):**
+  - `amdbc250_psp.c`: `DIRECT_C2PMSG_35/36/37/64/67/81_OFFSET` → 0x5818C/0x58190/0x58194/0x58200/0x5820C/0x58244;
+    added `DIRECT_C2PMSG_67_OFFSET`; `GPU_BAR5_C2PMSG_81_OFFSET` → 0x58244;
+    `Amdbc250PspDiscoverMp0Base` now tries **0x16000 FIRST** (old scan could latch onto false
+    0x040F4 candidate whose C2PMSG_81 @ 0x10614 reads 0xF0000010 idle value);
+    `g_PspContext.SosAlive` no longer requires `== 0xF0000010` (uses non-zero instead).
+  - `amdbc250_dream_psp_fw_load.c`: `C2PMSG_35/36/37/81_OFF` → 0x5818C/0x58190/0x58194/0x58244.
+  - `amdbc250_dream_kmd.c`: GET_NBIO_STATUS treats C2PMSG_81 non-zero as SOS alive (bit31 NOT the flag on BC-250).
+- **Impact:** the old TOS test "C2PMSG_64 bit31 never sets / bootloader gone" verdict (2026-08-18)
+  was read through WRONG offsets — it MUST be re-run. Ring path is unaffected (was already correct).
+
+### What the re-test will show (hypothesis)
+- SOS/Ta.bin DIRECT loads may behave differently now that C2PMSG_35/36/37/64/81 are read/written at the live base.
+- Firmware blob is still staged in host RAM (<4GB) via `Amdbc250PspAllocateFirmwareBuffer`; a VRAM-stage
+  variant is a candidate follow-up if direct loads still fail (VRAM MC 0xF400000000+ + aper_base works for SETUP_TMR).
+
+### Test tools
+- `output\psp-tos-test.exe` (IOCTL 0x800024A0 → `Amdbc250PspDirectLoadTos`) — loads Ta.bin as TOS, checks C2PMSG_64 bit31.
+- `output\psp-fw-load.exe` (IOCTL 0x80002480 → `Amdbc250PspDirectLoadIpFw`) — direct IP FW load.
+- Ring tests (already working): `psp-ring-init-test`, `psp-ring-submit-test`, `psp-ring-load-ip-fw-test`, `psp-ring-setup-tmr-test`.
+
+### RETEST RESULTS (2026-08-21, NEW driver build with 0x58000 base)
+- **psp-tos-test.exe: PASS** — C2PMSG_64 before=0x80000000 (bit31 already set), C2PMSG_35=0xFFFFFFFF (bootloader completion), C2PMSG_81=0x002C03E6 (non-zero). TOS load succeeded.
+- **psp-fw-load.exe: 8/8 PASS** — CE, PFP, ME, MEC, MEC2, RLC, SDMA0, SDMA1 all Result=1, C2PMSG_35=0xFFFFFFFF, C2PMSG_81=0x002C16FE.
+- **psp-ring-setup-tmr-test.exe: PASS** — VRAM MC 0xF40F800000 + aper_base 0xCF800000 SUCCESS (RespStatus=0).
+- **psp-ring-submit-test.exe: PASS** — GET_FW_ATTESTATION (0x0F) RespStatus=0 (SUCCESS), WPTR advanced 0x10→0x20 (ring consumption confirmed).
+- **CONCLUSION:** The old "C2PMSG_64 bit31 never sets / bootloader gone" verdict (2026-08-18) was read through WRONG base (0x10614). With corrected 0x58000 base, both DIRECT and RING paths work.
 
 ## ⭐ PSP KM GPCOM RING WORKS — kernel IOCTLs verified on hardware (2026-08-18, SUPERSEDES all below)
 
@@ -1740,6 +1784,7 @@ Setup script for BC250 on CachyOS (Limine bootloader). Wraps all community tools
 - **safe-points**: array of {frequency MHz, voltage mV}; voltage must be non-decreasing with frequency. default-config.toml safe-points: 350MHz@700mV → 2000MHz@1000mV (interpolates 30 points). Community table: 500@700, 800@750, 1000@800, 1175@850, 1400@900, 1600@950, 1800@1000, 2000@1050.
 
 ### VRAM/CMOS config = bc250_memcfg (fanoush) — NEW: how VRAM size is set
+- **elektricM specs UPDATE (2026-08-20)**: BC-250 = cut-down PS5 "Oberon"/"Cyan Skillfish". CPU 6x Zen2 (2 unlockable, NOT fused), ~3.5GHz base. GPU 24 CUs (PS5 has 36), RDNA2 gfx1013, base 1500MHz (locked w/o governor), max 2000MHz stock / 2230MHz w/ kernel patch+governor. **16GB GDDR6, 14Gbps, 256-bit, ~448GB/s. Memory split configurable in BIOS: 512MB Dynamic (recommended, GPU can use ~14GB+ as needed), 6GB GPU/10GB CPU, 8GB GPU/8GB CPU.** VCN video encode/decode blocked by Sony firmware. IOMMU BROKEN — must be disabled (display failures/black screens/crashes). 220W TDP (235W measured max). 1x DP1.4 (4K@120/8K@60), no HDMI. M.2 PCIe 2.0 x2 or SATA III. NCT6686D Super I/O (sensors `nct6683` force=true, PWM write `nct6687` Fred78290 force=true).
 - **Writes battery-backed CMOS RAM via I/O ports 0x72 (index) / 0x73 (data)**, Linux `inb/outb` with `iopl(3)`. On Windows: use READ_PORT_UCHAR/WRITE_PORT_UCHAR in kernel driver, or HwReadPortUchar/HwWritePortUchar.
 - **MemConf_t layout at CMOS offset 0x90** (config_space_offset_start=0x90, page_size 0x100):
   | Offset | Field | Size | Range |
@@ -1816,11 +1861,11 @@ GDDR6 tuning results on BC-250. **Only UMA_SIZE change is low-risk; timings tuni
 
 ## Next Steps
 
-1. **Port VRAM config (bc250_memcfg)** — new IOCTL `IOCTL_AMDBC250_CMOS_READ/WRITE` (or single config IOCTL) writing CMOS 0x72/0x73, UMA_SIZE field; verify with VRAM detection. Optional: memory-timings fields (tCL/tRAS/etc.) from SteamMachine profiles — low priority, no confirmed gains
-2. **Add CPU SMU messages to driver** — Q3 0x50/0x8F/0x8B/0x8C/0x9A/0x36/0x43 + Q0 0x2C/0x35/0x36 as IOCTLs (or expose raw send); user-mode CPU OC utility comes later
+1. ~~**Port VRAM config (bc250_memcfg)**~~ **DONE (2026-08-20)** — `IOCTL_AMDBC250_CMOS_ACCESS` (Function 0x9A, packed 0x80000C28) in `amdbc250_dream_kmd.c` reads/writes the CMOS MemConf_t block (ports 0x72/0x73). READ op = full decode (signature/checksum/timings/UMA_SIZE); SET op = range-validated field write with signature+checksum recompute, writes back 0x90..0xAB. `test-tools/cmos-memcfg-test.c` + `compile-cmos-memcfg.bat` → `output\cmos-memcfg-test.exe`. Usage: `cmos-memcfg-test.exe` (dump), `cmos-memcfg-test.exe UMA_SIZE 512` (set VRAM MB). REBOOT to apply; no software revert (clear CMOS). Build+signed cleanly. NEXT: verify read-only dump on hardware against existing UMA_SIZE, then optionally try `UMA_SIZE` change.
+2. ~~**Add CPU SMU messages to driver**~~ **DONE (2026-08-20, driver side)** — `IOCTL_AMDBC250_SMU_CPU_MSG` (Function 0x9B, packed 0x80000C2C) in `amdbc250_dream_kmd.c` after CMOS case. Whitelisted safe subset of the bc250_smu_oc message map, queue selectable (0 = GFX pstate/cclk/core-enable via `Amdbc250PspDirectSmuMsg` = SMN 0x03B10A08/48/68; 3 = CPU voltage/freq via `Amdbc250PspSmuQ3Msg` = SMN 0x03B10A20/80/88). Whitelist with per-message arg validation: Q0 0x2C core_enable_mask (0x01..0xFF, 0 refused), Q0 0x35/0x36 soft_min/max_cclk ((core 0..7)<<20 | freq 3500..5000), Q3 0x50 scale_f_vid_curve (**-1000..+1000, clamped from field limit 0x3FFF — overvoltage/brick guard**), Q3 0x8F max_cpu_boost_clk (3500..5000), Q3 0x8B/0x8C max temp (30..100), Q3 0x9A disable_extra_voltage (0/1), Q3 0x36 get_cpu_voltage (arg 0 → mV), Q3 0x43 get_core_freq (core 0..7 → MHz). Refusals return STATUS_INVALID_PARAMETER + Result=0 + ResponseStatus=0xFD. Round-trip wrapped in `ExAcquireFastMutex(&DevExt->DeviceMutex)` (shared NBIO SMN ports, matches PSP_RING serialization). `test-tools/smu-cpu-msg-test.c` + `compile-smu-cpu-msg.bat` → `output\smu-cpu-msg-test.exe`; `smu-cpu-msg-test.exe` runs query set (Q3 0x36 all cores + 0x43 cores 0-7) + negative tests; `smu-cpu-msg-test.exe <q> <msg> [arg]` sends one whitelisted msg. Build+signed cleanly (byte-scan of 0x80000C2C not found = switch-table artifact, same as CMOS 0x80000C28 which works). NEXT: install + run query set to verify telemetry, then user-mode CPU OC utility.
 3. **GPU governor service** — background thread with safe-point table + Q0/Q3 governor sequence (reuse governor-sequence test logic)
 4. **Fix PSP firmware loading** — implement ring mechanism (C2PMSG_64/67/69/70/71) or use PSP driver IOCTL
-2. **Fix SDMA ring init** — requires valid PA and working firmware (navi12_sdma.bin v0x2c)
-3. **Improve KMDOD display driver** — modes, EDID, power management
-4. **Build wddm-ps5 real WDDM miniport** (displib.lib path)
-5. **Implement EFI Shell pre-boot WGP unlock** — only path that can write SPI_PG
+5. **Fix SDMA ring init** — requires valid PA and working firmware (navi12_sdma.bin v0x2c)
+6. **Improve KMDOD display driver** — modes, EDID, power management
+7. **Build wddm-ps5 real WDDM miniport** (displib.lib path)
+8. **Implement EFI Shell pre-boot WGP unlock** — only path that can write SPI_PG

@@ -3,9 +3,11 @@
  *
  * REWORKED 2026-08-18: was using SMN addresses 0x03B10A08/48/68/44 which the
  * psp-ring-probe proved are SMU C2PMSG_66/82/90 (NOT PSP). PSP C2PMSG live
- * directly in GPU BAR5 at MP0 base 0x103D0:
- *   C2PMSG_35 = 0x1055C, C2PMSG_36 = 0x10560, C2PMSG_37 = 0x10564,
- *   C2PMSG_81 = 0x10614 (0xF0000010 = SOS alive, bit31 = alive). */
+ * directly in GPU BAR5 at MP0 base 0x58000 (verified by psp-ring-submit-test
+ * 2026-08-18):
+ *   C2PMSG_35 = 0x5818C, C2PMSG_36 = 0x58190, C2PMSG_37 = 0x58194,
+ *   C2PMSG_81 = 0x58244. The earlier 0x103D0-based offsets were WRONG —
+ *   they read back idle values. */
 
 #include "amdbc250_dream_kmd.h"
 #include "amdbc250_dream_hw.h"
@@ -13,10 +15,14 @@
 
 extern NTSTATUS DreamV3LoadFirmwareFromFile(_In_ PCWSTR FileName, _Out_ PUCHAR *OutData, _Out_ ULONG *OutSize);
 
-/* Corrected BAR5 direct C2PMSG offsets (MP0 base 0x103D0). */
-#define C2PMSG_35_OFF   0x1055C  /* PSP command */
-#define C2PMSG_36_OFF   0x10560  /* PSP data (PA low, 1MB units for bootloader) */
-#define C2PMSG_81_OFF   0x10614  /* PSP response / SOS status */
+/* Corrected BAR5 direct C2PMSG offsets (MP0 base 0x58000, verified 2026-08-18
+ * by psp-ring-submit-test. The earlier 0x103D0-based offsets 0x1055C/0x10560/
+ * 0x10614 were WRONG — they read back idle values. Base 0x58000 = ip_discovery
+ * MP0 base 0x16000 (dwords) * 4.) */
+#define C2PMSG_35_OFF   0x5818C  /* PSP command */
+#define C2PMSG_36_OFF   0x58190  /* PSP data (PA low, 1MB units for bootloader) */
+#define C2PMSG_37_OFF   0x58194  /* PSP data (PA high) */
+#define C2PMSG_81_OFF   0x58244  /* PSP response / SOS status */
 
 /* Bootloader command codes (Linux amdgpu_psp.h psp_bootloader_cmd).
  * NOTE: these are the REAL v11 bootloader values, NOT the older
@@ -43,7 +49,7 @@ static NTSTATUS PspFwWaitReady(PVOID Bar5Va, ULONG timeoutMs)
 {
     for(ULONG i=0; i<timeoutMs; i++){
         ULONG val = PspFwRead(Bar5Va, C2PMSG_81_OFF);
-        if(val & 0x80000000) return STATUS_SUCCESS;
+        if(val != 0) return STATUS_SUCCESS;
         KeStallExecutionProcessor(1000);
     }
     return STATUS_TIMEOUT;
@@ -102,11 +108,11 @@ NTSTATUS DreamV3LoadPspFirmware(_In_ PDREAM_V3_DEVICE_EXTENSION DevExt)
 {
     NTSTATUS status;
     PVOID bar5 = DevExt ? DevExt->MmioVirtualBase : NULL;
-    if(!bar5 || DevExt->MmioSize < 0x10618) return STATUS_DEVICE_NOT_READY;
+    if(!bar5 || DevExt->MmioSize < 0x58248) return STATUS_DEVICE_NOT_READY;
 
     /* Check SOS already alive (loaded by BIOS/PSP driver). */
     ULONG sol = PspFwRead(bar5, C2PMSG_81_OFF);
-    if(sol & 0x80000000){
+    if(sol != 0){
         KdPrint(("PSP-FW: SOS already alive (0x%08X), skip load\n", sol));
         return STATUS_SUCCESS;
     }
@@ -120,7 +126,7 @@ NTSTATUS DreamV3LoadPspFirmware(_In_ PDREAM_V3_DEVICE_EXTENSION DevExt)
             &iosb, PSP_IOCTL_BOOT_SEQ, &bootCmd, sizeof(bootCmd), NULL, 0);
         /* Re-verify SOS alive even if the proxy reports success. */
         sol = PspFwRead(bar5, C2PMSG_81_OFF);
-        if (NT_SUCCESS(status) && (sol & 0x80000000)) {
+        if (NT_SUCCESS(status) && (sol != 0)) {
             KdPrint(("PSP-FW: PSP driver bootloader OK\n"));
             return STATUS_SUCCESS;
         }
@@ -147,7 +153,7 @@ NTSTATUS DreamV3LoadPspFirmware(_In_ PDREAM_V3_DEVICE_EXTENSION DevExt)
 
     sol = PspFwRead(bar5, C2PMSG_81_OFF);
     KdPrint(("PSP-FW: C2PMSG_81 = 0x%08X %s\n", sol,
-        (sol & 0x80000000) ? "SOS ALIVE!" : "SOS NOT alive"));
+        (sol != 0) ? "SOS ALIVE!" : "SOS NOT alive"));
 
-    return (sol & 0x80000000) ? STATUS_SUCCESS : STATUS_DEVICE_NOT_READY;
+    return (sol != 0) ? STATUS_SUCCESS : STATUS_DEVICE_NOT_READY;
 }

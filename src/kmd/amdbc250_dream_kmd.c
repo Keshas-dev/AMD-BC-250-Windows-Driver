@@ -2995,6 +2995,43 @@ DreamV3CreateClose(
     return STATUS_SUCCESS;
 }
 
+/* --- Decode the 32-byte raw CMOS block (0x90..0xAF) into the IOCTL struct. --- */
+static VOID
+DreamV3CmosDecode(
+    _Inout_ PAMDBC250_IOCTL_CMOS_ACCESS cm,
+    _In_ const UCHAR Raw[0x20]
+    )
+{
+    UINT32 sig = (UINT32)Raw[0] | ((UINT32)Raw[1] << 8) |
+                 ((UINT32)Raw[2] << 16) | ((UINT32)Raw[3] << 24);
+    UINT16 cksStored = (UINT16)(Raw[4] | (Raw[5] << 8));
+    UINT16 cksCalc = 0;
+    for (ULONG i = 0x06; i <= 0x1B; i++) cksCalc = (UINT16)(cksCalc + Raw[i]);
+
+    cm->Signature = sig;
+    cm->ChecksumStored = cksStored;
+    cm->ChecksumCalc = cksCalc;
+    RtlCopyMemory(cm->Raw, Raw, 0x20);
+
+    cm->ClockSpeed = (UINT16)(Raw[0x06] | (Raw[0x07] << 8));
+    cm->tCL    = Raw[0x08];
+    cm->tRAS   = Raw[0x09];
+    cm->tRCDRD = Raw[0x0A];
+    cm->tRCDWR = Raw[0x0B];
+    cm->tRCAb  = Raw[0x0C];
+    cm->tRCPb  = Raw[0x0D];
+    cm->tRPAb  = Raw[0x0E];
+    cm->tRPPb  = Raw[0x0F];
+    cm->tRRDS  = Raw[0x10];
+    cm->tRRDL  = Raw[0x11];
+    cm->tRTP   = Raw[0x12];
+    cm->tFAW   = Raw[0x13];
+    cm->tREF   = (UINT16)(Raw[0x14] | (Raw[0x15] << 8));
+    cm->RFCPb  = (UINT16)(Raw[0x16] | (Raw[0x17] << 8));
+    cm->tRFC   = (UINT16)(Raw[0x18] | (Raw[0x19] << 8));
+    cm->UmaSizeMb = (UINT16)(Raw[0x1A] | (Raw[0x1B] << 8));
+}
+
 NTSTATUS
 DreamV3DeviceControl(
     _In_ PDEVICE_OBJECT DeviceObject,
@@ -3767,6 +3804,294 @@ DreamV3DeviceControl(
 
         status = STATUS_SUCCESS;
         bytesReturned = sizeof(*cu);
+        break;
+    }
+
+    /* --- CMOS (APCB memcfg) access: port of fanoush/bc250_memcfg ---
+     * BC-250 BIOS keeps a MemConf_t blob at CMOS offset 0x90 (signature 0x42435041,
+     * "APCB") with memory timings + UMA_SIZE (VRAM MB, 16M aligned) at 0xAA.
+     * Ports 0x72/0x73 (index/data). Field writes are range-validated here, the
+     * Signature + checksum (sum of 0x96..0xAB) are recomputed, and 0x90..0xAB is
+     * written back. REBOOT to apply. Read op never writes CMOS. */
+    case IOCTL_AMDBC250_CMOS_ACCESS: {
+        if (inputLen < sizeof(AMDBC250_IOCTL_CMOS_ACCESS) ||
+            outputLen < sizeof(AMDBC250_IOCTL_CMOS_ACCESS)) {
+            status = STATUS_BUFFER_TOO_SMALL;
+            break;
+        }
+        PAMDBC250_IOCTL_CMOS_ACCESS cm = (PAMDBC250_IOCTL_CMOS_ACCESS)outputBuffer;
+
+        /* METHOD_BUFFERED: read all input fields BEFORE touching output. */
+        ULONG op = cm->Operation;
+        ULONG field = cm->Field;
+        ULONG value = cm->Value;
+
+        /* Field descriptor: {offset, isWord, min, max, aligned16}. */
+        typedef struct _CMOS_FIELD_DESC {
+            ULONG Offset;
+            BOOLEAN IsWord;
+            ULONG Min;
+            ULONG Max;
+            BOOLEAN Align16;
+        } CMOS_FIELD_DESC;
+        static const CMOS_FIELD_DESC FieldTable[] = {
+            { 0x96, TRUE, 0x01C2, 0x06D6, FALSE },  /* ClockSpeed 450-1750 MHz */
+            { 0x98, FALSE, 8, 33, FALSE },          /* tCL */
+            { 0x99, FALSE, 21, 58, FALSE },         /* tRAS */
+            { 0x9A, FALSE, 8, 27, FALSE },          /* tRCDRD */
+            { 0x9B, FALSE, 8, 27, FALSE },          /* tRCDWR */
+            { 0x9C, FALSE, 40, 90, FALSE },         /* tRCAb */
+            { 0x9D, FALSE, 0, 11, FALSE },          /* tRCPb */
+            { 0x9E, FALSE, 8, 27, FALSE },          /* tRPAb */
+            { 0x9F, FALSE, 0, 11, FALSE },          /* tRPPb */
+            { 0xA0, FALSE, 4, 12, FALSE },          /* tRRDS */
+            { 0xA1, FALSE, 4, 12, FALSE },          /* tRRDL */
+            { 0xA2, FALSE, 0, 14, FALSE },          /* tRTP */
+            { 0xA3, FALSE, 4, 34, FALSE },          /* tFAW */
+            { 0xA4, TRUE, 0, 0xFFFF, FALSE },       /* tREF */
+            { 0xA6, TRUE, 0, 0xFFFF, FALSE },       /* RFCPb */
+            { 0xA8, TRUE, 0, 0xFFFF, FALSE },       /* tRFC */
+            { 0xAA, TRUE, 256, 0xFFFF, TRUE },      /* UMA_SIZE (>=256, 16M aligned) */
+        };
+
+        RtlZeroMemory(cm, sizeof(*cm));
+        cm->Operation = op;
+        cm->Field = field;
+        cm->Value = value;
+
+        if (op != AMDBC250_CMOS_OP_READ && op != AMDBC250_CMOS_OP_SET) {
+            cm->Result = 0;
+            status = STATUS_INVALID_PARAMETER;
+            break;
+        }
+
+        UCHAR raw[0x20];
+        RtlZeroMemory(raw, sizeof(raw));
+
+        __try {
+            /* Read the 32-byte 0x90..0xAF block via CMOS index/data ports. */
+            for (ULONG i = 0; i < 0x20; i++) {
+                WRITE_PORT_UCHAR((PUCHAR)(ULONG_PTR)0x72, (UCHAR)(0x90 + i));
+                KeMemoryBarrier();
+                raw[i] = READ_PORT_UCHAR((PUCHAR)(ULONG_PTR)0x73);
+            }
+
+            DreamV3CmosDecode(cm, raw);
+
+            /* SET: validate the target field, apply, recompute signature+checksum,
+             * write back 0x90..0xAB. */
+            if (op == AMDBC250_CMOS_OP_SET) {
+                BOOLEAN found = FALSE;
+                for (ULONG f = 0; f < sizeof(FieldTable) / sizeof(FieldTable[0]); f++) {
+                    if (FieldTable[f].Offset != field) continue;
+                    found = TRUE;
+
+                    ULONG newVal = value;
+                    if (FieldTable[f].Align16) newVal &= 0xFFF0;
+                    if (newVal < FieldTable[f].Min || newVal > FieldTable[f].Max) {
+                        cm->Result = 0;
+                        break;
+                    }
+
+                    /* Read current decoded value for FieldValueBefore. */
+                    if (FieldTable[f].IsWord) {
+                        cm->FieldValueBefore = (UINT32)(raw[FieldTable[f].Offset - 0x90] |
+                            (raw[FieldTable[f].Offset - 0x90 + 1] << 8));
+                    } else {
+                        cm->FieldValueBefore = raw[FieldTable[f].Offset - 0x90];
+                    }
+
+                    /* Apply new value to the raw block. */
+                    if (FieldTable[f].IsWord) {
+                        raw[FieldTable[f].Offset - 0x90]     = (UCHAR)(newVal & 0xFF);
+                        raw[FieldTable[f].Offset - 0x90 + 1] = (UCHAR)((newVal >> 8) & 0xFF);
+                    } else {
+                        raw[FieldTable[f].Offset - 0x90] = (UCHAR)newVal;
+                    }
+                    cm->FieldValueAfter = newVal;
+
+                    /* Set APCB signature + recompute checksum (0x96..0xAB). */
+                    raw[0] = 0x41; raw[1] = 0x50; raw[2] = 0x43; raw[3] = 0x42; /* "APCB" LE */
+                    UINT16 cks = 0;
+                    for (ULONG i = 0x06; i <= 0x1B; i++) cks = (UINT16)(cks + raw[i]);
+                    raw[4] = (UCHAR)(cks & 0xFF);
+                    raw[5] = (UCHAR)((cks >> 8) & 0xFF);
+
+                    /* Write back 0x90..0xAB. */
+                    for (ULONG i = 0; i < 0x1C; i++) {
+                        WRITE_PORT_UCHAR((PUCHAR)(ULONG_PTR)0x72, (UCHAR)(0x90 + i));
+                        KeMemoryBarrier();
+                        WRITE_PORT_UCHAR((PUCHAR)(ULONG_PTR)0x73, raw[i]);
+                    }
+                    KeMemoryBarrier();
+
+                    /* Re-decode so the returned fields reflect the new value. */
+                    DreamV3CmosDecode(cm, raw);
+
+                    cm->FieldValueAfter = newVal;
+                    cm->Result = 1;
+                    break;
+                }
+                if (!found) {
+                    cm->Result = 0;
+                    break;
+                }
+            } else {
+                cm->Result = 1;
+            }
+
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                "AMDBC250-DREAM-V4.3: CMOS_ACCESS op=%u sig=0x%08X cks=%04X/%04X uma=%u\n",
+                op, cm->Signature, cm->ChecksumStored, cm->ChecksumCalc, cm->UmaSizeMb));
+
+            status = STATUS_SUCCESS;
+            bytesReturned = sizeof(*cm);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
+                "AMDBC250-DREAM-V4.3: CMOS_ACCESS EXCEPTION 0x%08X\n", GetExceptionCode()));
+            cm->Result = 0;
+            status = STATUS_IO_DEVICE_ERROR;
+        }
+        break;
+    }
+
+    /* --- SMU CPU message (whitelisted) - safe subset for the CPU OC/undervolt
+     * utility. Port of the bc250_smu_oc Linux message map. Queue 0 = GFX
+     * pstate/cclk/core-enable mailbox (C2PMSG_66/82/90 = SMN 0x03B10A08/48/68),
+     * Queue 3 = CPU voltage/freq mailbox (CMD/RSP/ARG = SMN 0x03B10A20/80/88).
+     * Message ID + argument are validated against a fixed whitelist; anything
+     * else is refused (no raw passthrough). --- */
+    case IOCTL_AMDBC250_SMU_CPU_MSG: {
+        if (inputLen < sizeof(AMDBC250_IOCTL_SMU_CPU_MSG) ||
+            outputLen < sizeof(AMDBC250_IOCTL_SMU_CPU_MSG)) {
+            status = STATUS_BUFFER_TOO_SMALL;
+            break;
+        }
+        PAMDBC250_IOCTL_SMU_CPU_MSG sm = (PAMDBC250_IOCTL_SMU_CPU_MSG)outputBuffer;
+
+        /* METHOD_BUFFERED: read input fields before writing output. */
+        ULONG q = sm->Queue;
+        ULONG msgId = sm->Message;
+        ULONG arg = sm->Argument;
+
+        if (q != 0 && q != 3) {
+            sm->Result = 0;
+            status = STATUS_INVALID_PARAMETER;
+            break;
+        }
+
+        if (!DevExt || !DevExt->MmioVirtualBase) {
+            sm->Result = 0;
+            sm->ResponseStatus = 0xFF;
+            status = STATUS_DEVICE_NOT_READY;
+            break;
+        }
+        PUCHAR mmio = (PUCHAR)DevExt->MmioVirtualBase;
+
+        RtlZeroMemory(sm, sizeof(*sm));
+        sm->Queue = q;
+        sm->Message = msgId;
+        sm->Argument = arg;
+
+        /* Whitelist: {queue, message, arg type}. The argument is validated per
+         * type below against the safe ranges from the bc250_smu_oc Linux tool.
+         * NOTE: the SMU VID-curve field itself accepts +/-0x3FFF, but we clamp
+         * to the tool's proven-safe +/-1000 (negative shifts into overvoltage;
+         * CPU VID > 1.325V bricks the board). */
+        typedef enum _SMU_CPU_ARG_TYPE {
+            SMU_ARG_NONE = 0,    /* argument must be 0 (query) */
+            SMU_ARG_MASK8,       /* 0x01..0xFF (core enable mask; 0 would kill all cores) */
+            SMU_ARG_CORE_FREQ,   /* (core_id 0..7)<<20 | freq 3500..5000 MHz */
+            SMU_ARG_VID16,       /* signed 16-bit, -1000..+1000 (VID curve scale) */
+            SMU_ARG_BOOST,       /* 3500..5000 MHz */
+            SMU_ARG_TEMP,        /* 30..100 C */
+            SMU_ARG_BOOL,        /* 0 or 1 */
+            SMU_ARG_CORE_ID,     /* 0..7 */
+        } SMU_CPU_ARG_TYPE;
+        typedef struct _SMU_CPU_MSG_DESC {
+            ULONG Queue;
+            ULONG Message;
+            SMU_CPU_ARG_TYPE ArgType;
+        } SMU_CPU_MSG_DESC;
+        static const SMU_CPU_MSG_DESC Whitelist[] = {
+            /* Q0: CPU pstate / cclk / core enable */
+            { 0, AMDBC250_SMU_Q0_SET_CORE_ENABLE_MASK, SMU_ARG_MASK8 },
+            { 0, AMDBC250_SMU_Q0_SET_SOFT_MIN_CCLK,    SMU_ARG_CORE_FREQ },
+            { 0, AMDBC250_SMU_Q0_SET_SOFT_MAX_CCLK,    SMU_ARG_CORE_FREQ },
+            /* Q3: CPU voltage / freq */
+            { 3, AMDBC250_SMU_Q3_SCALE_F_VID_CURVE,     SMU_ARG_VID16 },
+            { 3, AMDBC250_SMU_Q3_GET_CURRENT_CPU_VOLT,  SMU_ARG_NONE },
+            { 3, AMDBC250_SMU_Q3_GET_CORE_FREQ,         SMU_ARG_CORE_ID },
+            { 3, AMDBC250_SMU_Q3_SET_MAX_CPU_BOOST_CLK, SMU_ARG_BOOST },
+            { 3, AMDBC250_SMU_Q3_SET_CPU_MAX_TEMP,      SMU_ARG_TEMP },
+            { 3, AMDBC250_SMU_Q3_SET_GPU_MAX_TEMP,      SMU_ARG_TEMP },
+            { 3, AMDBC250_SMU_Q3_DISABLE_EXTRA_VOLT,    SMU_ARG_BOOL },
+        };
+
+        /* Find + validate the message against the whitelist. */
+        BOOLEAN allowed = FALSE;
+        ULONG argSend = arg; /* argument actually forwarded to the SMU */
+        for (ULONG w = 0; w < sizeof(Whitelist) / sizeof(Whitelist[0]); w++) {
+            if (Whitelist[w].Queue != q || Whitelist[w].Message != msgId) continue;
+            ULONG a = arg;
+            switch (Whitelist[w].ArgType) {
+            case SMU_ARG_NONE:     allowed = (a == 0); break;
+            case SMU_ARG_MASK8:    allowed = (a >= 1 && a <= 0xFF); break;
+            case SMU_ARG_CORE_FREQ: {
+                ULONG freq = a & 0xFFFF;
+                ULONG core = (a >> 20) & 0xFF;
+                allowed = (core <= 7 && freq >= 3500 && freq <= 5000);
+                break;
+            }
+            case SMU_ARG_VID16: {
+                INT32 v = (INT32)(INT16)(a & 0xFFFF);
+                allowed = (v >= -1000 && v <= 1000);
+                if (allowed) argSend = (ULONG)(INT32)(INT16)v;
+                break;
+            }
+            case SMU_ARG_BOOST:    allowed = (a >= 3500 && a <= 5000); break;
+            case SMU_ARG_TEMP:     allowed = (a >= 30 && a <= 100); break;
+            case SMU_ARG_BOOL:     allowed = (a == 0 || a == 1); break;
+            case SMU_ARG_CORE_ID:  allowed = (a <= 7); break;
+            default:               allowed = FALSE; break;
+            }
+            break;
+        }
+
+        if (!allowed) {
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+                "AMDBC250-DREAM-V4.3: SMU_CPU_MSG refused q=%u msg=0x%X arg=0x%X\n",
+                q, msgId, arg));
+            sm->Result = 0;
+            sm->ResponseStatus = 0xFD; /* rejected */
+            status = STATUS_INVALID_PARAMETER;
+            break;
+        }
+
+        /* Send via the matching mailbox helper. The Q0/Q3 round-trips are 4
+         * independent writes over the SHARED NBIO SMN index/data ports, so
+         * serialize against concurrent telemetry/unlock callers. */
+        ULONG resp = 0, respSt = 0;
+        NTSTATUS smuSt;
+        ExAcquireFastMutex(&DevExt->DeviceMutex);
+        if (q == 0) {
+            smuSt = Amdbc250PspDirectSmuMsg(mmio, msgId, argSend, &resp, &respSt);
+        } else {
+            smuSt = Amdbc250PspSmuQ3Msg(mmio, msgId, argSend, &resp, &respSt);
+        }
+        ExReleaseFastMutex(&DevExt->DeviceMutex);
+
+        sm->Argument = argSend;
+        sm->Response = resp;
+        sm->ResponseStatus = respSt;
+        sm->Result = (NT_SUCCESS(smuSt)) ? 1 : 0;
+
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+            "AMDBC250-DREAM-V4.3: SMU_CPU_MSG q=%u msg=0x%X arg=0x%X resp=0x%X st=%u res=%u (0x%08X)\n",
+            q, msgId, argSend, resp, respSt, sm->Result, smuSt));
+
+        status = STATUS_SUCCESS;
+        bytesReturned = sizeof(*sm);
         break;
     }
 
@@ -5359,7 +5684,10 @@ DreamV3DeviceControl(
                     "AMDBC250-DREAM-V4.3: GET_NBIO_STATUS exception\n"));
             }
 
-            if (sol & 0x80000000) { out[0] = 1; } else { out[0] = 0; }
+            /* C2PMSG_81 (0x58244) carries SOS status; on BC-250 bit31 is NOT
+             * the alive flag (verified live: 0x002B9309 with ring working), so
+             * report "alive" for any non-zero status. */
+            if (sol != 0) { out[0] = 1; } else { out[0] = 0; }
             if (grbm != 0xFFFFFFFF && grbm != 0x00000000) {
                 out[1] = 0;  /* NBIO unlocked */
                 /* Auto-init GFX ring if needed */
@@ -5468,7 +5796,7 @@ DreamV3DeviceControl(
             "AMDBC250-DREAM-V4.3: PSP_LOAD_IP_FW entered, inputLen=%u outputLen=%u\n",
             inputLen, outputLen));
 
-        if (!DevExt || !DevExt->MmioVirtualBase || DevExt->MmioSize < 0x10618) {
+        if (!DevExt || !DevExt->MmioVirtualBase || DevExt->MmioSize < 0x58248) {
             status = STATUS_DEVICE_NOT_READY;
             break;
         }
@@ -5561,7 +5889,7 @@ DreamV3DeviceControl(
             "AMDBC250-DREAM-V4.3: PSP_LOAD_TOS entered, inputLen=%u outputLen=%u\n",
             inputLen, outputLen));
 
-        if (!DevExt || !DevExt->MmioVirtualBase || DevExt->MmioSize < 0x10618) {
+        if (!DevExt || !DevExt->MmioVirtualBase || DevExt->MmioSize < 0x58248) {
             status = STATUS_DEVICE_NOT_READY;
             break;
         }

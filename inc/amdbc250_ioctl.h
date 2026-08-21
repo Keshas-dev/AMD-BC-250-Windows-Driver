@@ -138,6 +138,115 @@ Environment:
    submits GFX_CMD_ID_SETUP_TMR (0x05). Packed value: 0x80000C24 (Function 0x99). */
 #define IOCTL_AMDBC250_PSP_RING_SETUP_TMR   CTL_CODE_AMDBC250(0x99, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
+/* CMOS (APCB memcfg) access - port of fanoush/bc250_memcfg (ports 0x72/0x73).
+   BC-250 BIOS keeps a MemConf_t blob at CMOS offset 0x90 with signature 0x42435041
+   ("APCB"). Fields: ClockSpeed, tCL..tRFC memory timings, and UMA_SIZE (VRAM/UMA
+   frame buffer in MB, 16M aligned) at 0xAA. Any field write is range-validated in
+   the kernel, the Signature + 16-bit Checksum (sum of bytes 0x96..0xAB) are
+   recomputed, and the whole 0x90..0xAB block is written back. REBOOT to apply.
+   Packed value: 0x80000C28 (Function 0x9A). */
+#define IOCTL_AMDBC250_CMOS_ACCESS          CTL_CODE_AMDBC250(0x9A, METHOD_BUFFERED, FILE_ANY_ACCESS)
+
+/* CMOS memcfg operations */
+#define AMDBC250_CMOS_OP_READ               0  /* dump decoded fields (no writes) */
+#define AMDBC250_CMOS_OP_SET                1  /* set one field (validated) */
+
+/* CMOS memcfg field IDs (== byte offset within the 0x90..0xAB block) */
+#define AMDBC250_CMOS_F_CLOCKSPEED  0x96  /* WORD, [0x01C2:0x06D6] = 450-1750 MHz */
+#define AMDBC250_CMOS_F_TCL         0x98  /* BYTE, [8:33] */
+#define AMDBC250_CMOS_F_TRAS        0x99  /* BYTE, [21:58] */
+#define AMDBC250_CMOS_F_TRCDRD      0x9A  /* BYTE, [8:27] */
+#define AMDBC250_CMOS_F_TRCDWR      0x9B  /* BYTE, [8:27] */
+#define AMDBC250_CMOS_F_TRCAB       0x9C  /* BYTE, [40:90] */
+#define AMDBC250_CMOS_F_TRCPB       0x9D  /* BYTE, [0:11] */
+#define AMDBC250_CMOS_F_TRPAB       0x9E  /* BYTE, [8:27] */
+#define AMDBC250_CMOS_F_TRPPB       0x9F  /* BYTE, [0:11] */
+#define AMDBC250_CMOS_F_TRRDS       0xA0  /* BYTE, [4:12] */
+#define AMDBC250_CMOS_F_TRRDL       0xA1  /* BYTE, [4:12] */
+#define AMDBC250_CMOS_F_TRTP        0xA2  /* BYTE, [0:14] */
+#define AMDBC250_CMOS_F_TFAW        0xA3  /* BYTE, [4:34] */
+#define AMDBC250_CMOS_F_TREF        0xA4  /* WORD, [0:0xFFFF] */
+#define AMDBC250_CMOS_F_RFCPB       0xA6  /* WORD, [0:0xFFFF] */
+#define AMDBC250_CMOS_F_TRFC        0xA8  /* WORD, [0:0xFFFF] */
+#define AMDBC250_CMOS_F_UMA_SIZE    0xAA  /* WORD, >=256, 16MB aligned (val &= 0xFFF0) */
+
+typedef struct _AMDBC250_IOCTL_CMOS_ACCESS {
+    UINT32 Operation;              /* IN: AMDBC250_CMOS_OP_* */
+    UINT32 Result;                 /* OUT: 1=ok, 0=failed */
+    /* Field to set (Operation=SET) */
+    UINT32 Field;                  /* IN: AMDBC250_CMOS_F_* */
+    UINT32 Value;                  /* IN: new value */
+    /* Field readback (OUT, both ops) */
+    UINT32 FieldValueBefore;       /* OUT: decoded value before */
+    UINT32 FieldValueAfter;        /* OUT: decoded value after */
+    /* Signature / checksum (OUT) */
+    UINT32 Signature;              /* OUT: 0x42435041 = APCB, 0x4C424124 = ABL */
+    UINT16 ChecksumStored;         /* OUT: checksum currently in CMOS @0x94 */
+    UINT16 ChecksumCalc;           /* OUT: checksum recomputed over 0x96..0xAB */
+    /* Decoded memcfg (OUT, READ op) */
+    UINT16 ClockSpeed;             /* MHz */
+    UINT8  tCL;
+    UINT8  tRAS;
+    UINT8  tRCDRD;
+    UINT8  tRCDWR;
+    UINT8  tRCAb;
+    UINT8  tRCPb;
+    UINT8  tRPAb;
+    UINT8  tRPPb;
+    UINT8  tRRDS;
+    UINT8  tRRDL;
+    UINT8  tRTP;
+    UINT8  tFAW;
+    UINT16 tREF;
+    UINT16 RFCPb;
+    UINT16 tRFC;
+    UINT16 UmaSizeMb;              /* VRAM/UMA frame buffer in MB */
+    UINT8  Raw[0x20];              /* OUT: raw bytes 0x90..0xAF */
+} AMDBC250_IOCTL_CMOS_ACCESS, *PAMDBC250_IOCTL_CMOS_ACCESS;
+
+/* --- SMU CPU message (whitelisted) - safe subset for the CPU OC/undervolt
+   utility. Port of the bc250_smu_oc Linux message map. The kernel validates
+   the message ID + argument range against a fixed whitelist; anything else is
+   refused. Packed value: 0x80000C2C (Function 0x9B). */
+#define IOCTL_AMDBC250_SMU_CPU_MSG          CTL_CODE_AMDBC250(0x9B, METHOD_BUFFERED, FILE_ANY_ACCESS)
+
+typedef struct _AMDBC250_IOCTL_SMU_CPU_MSG {
+    UINT32 Queue;                /* IN: SMU mailbox queue (0 = Q0, 3 = Q3) */
+    UINT32 Message;              /* IN: message ID (see whitelist below) */
+    UINT32 Argument;             /* IN: argument (encoded per message) */
+    UINT32 Response;             /* OUT: response value */
+    UINT32 ResponseStatus;       /* OUT: 1=OK, 0xFF=fail, 0xFE=unknown,
+                                    0xFD=rejected, 0xFC=busy, 0=timeout */
+    UINT32 Result;               /* OUT: 1=ok, 0=refused/invalid */
+} AMDBC250_IOCTL_SMU_CPU_MSG, *PAMDBC250_IOCTL_SMU_CPU_MSG;
+
+/* Whitelisted SMU CPU messages (safe subset, validated in kernel):
+ * Q0 (GFX pstate/cclk + core enable):
+ *   0x2C set_core_enable_mask   arg = core mask 0x01..0xFF (0 refused - would kill all cores)
+ *   0x35 set_soft_min_cclk      arg = (core_id 0..7)<<20 | freq 3500..5000
+ *   0x36 set_soft_max_cclk      arg = (core_id 0..7)<<20 | freq 3500..5000
+ * Q3 (CPU voltage/freq):
+ *   0x50 scale_f_vid_curve      arg = signed 16-bit VID curve scale, -1000..+1000
+ *                                (SMU field limit is +/-0x3FFF but that range can
+ *                                push CPU VID past the 1.325V brick threshold)
+ *   0x8F set_max_cpu_boost_clk  arg = MHz [3500..5000]
+ *   0x8B set_cpu_max_temperature arg = temp C [30..100]
+ *   0x8C set_gpu_max_temperature arg = temp C [30..100]
+ *   0x9A disable_extra_cpu_gpu_voltage  arg = 1/0
+ *   0x36 get_current_cpu_voltage arg = 0, returns mV
+ *   0x43 get_core_freq          arg = core_id [0..7], returns MHz
+ */
+#define AMDBC250_SMU_Q0_SET_CORE_ENABLE_MASK  0x2C
+#define AMDBC250_SMU_Q0_SET_SOFT_MIN_CCLK     0x35
+#define AMDBC250_SMU_Q0_SET_SOFT_MAX_CCLK     0x36
+#define AMDBC250_SMU_Q3_SCALE_F_VID_CURVE     0x50
+#define AMDBC250_SMU_Q3_GET_CURRENT_CPU_VOLT  0x36
+#define AMDBC250_SMU_Q3_GET_CORE_FREQ         0x43
+#define AMDBC250_SMU_Q3_SET_MAX_CPU_BOOST_CLK 0x8F
+#define AMDBC250_SMU_Q3_SET_CPU_MAX_TEMP      0x8B
+#define AMDBC250_SMU_Q3_SET_GPU_MAX_TEMP      0x8C
+#define AMDBC250_SMU_Q3_DISABLE_EXTRA_VOLT    0x9A
+
 typedef struct _AMDBC250_PSP_LOAD_IP_FW_IN {
     UINT32 FwType;              /* GFX_FW_TYPE_*: 1=CP_ME 2=CP_PFP 3=CP_CE 4=CP_MEC 8=RLC_G 9=SDMA0 10=SDMA1 18=SMU */
     WCHAR  FileName[260];       /* Absolute path to firmware blob, e.g.

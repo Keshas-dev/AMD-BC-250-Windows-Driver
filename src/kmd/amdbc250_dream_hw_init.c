@@ -132,8 +132,8 @@ DreamV3HwInitialize(
 
     /* Step 0b: Load PSP firmware (SYSDRV/SOS/SMC) via C2PMSG
      * Must happen before SOS is alive and before KIQ init.
-     * Uses direct GPU BAR5 C2PMSG registers (MP0 base 0x103D0,
-     * C2PMSG_35/36/37 = 0x1055C/0x10560/0x10564, C2PMSG_81 = 0x10614). */
+     * Uses direct GPU BAR5 C2PMSG registers (MP0 base 0x58000,
+     * C2PMSG_35/36/37/81 = 0x5818C/0x58190/0x58194/0x58244). */
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                 "AMDBC250-DREAM-V4.3: [STEP 0b] PSP firmware load (SYSDRV/SOS/SMC)\n"));
     Status = DreamV3LoadPspFirmware(DevExt);

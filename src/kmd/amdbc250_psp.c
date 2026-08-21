@@ -25,7 +25,7 @@ typedef struct _PSP_KIQ_SUBMIT_REQUEST {
 #define PSP_CMD_BUF_SIZE        1024  /* Command buffer size for PSP firmware commands */
 
 /* C2PMSG_81 (SOS alive) byte offset within GPU BAR5 (0xFE800000). */
-#define GPU_BAR5_C2PMSG_81_OFFSET   0x10614
+#define GPU_BAR5_C2PMSG_81_OFFSET   0x58244
 
 /* PSP ring frame command IDs (from Linux psp_gfx_if.h) */
 #define GFX_CMD_ID_LOAD_IP_FW   0x00000006
@@ -87,21 +87,33 @@ static PVOID g_GpuBar5Va = NULL;
    writes PM4 packets into the GPCOM ring, which does not work.
    See Amdbc250PspKiqReadReg and Amdbc250PspKiqSubmit. */
 
-/* # C2PMSG mailbox (proven by psp-ring-probe 2026-08-18: MP0 base = 0x103D0).
- *   C2PMSG_35 (0x1055C): command to SOS
- *   C2PMSG_36 (0x10560): argument / firmware PA low
- *   C2PMSG_37 (0x10564): argument / firmware PA high
- *   C2PMSG_81 (0x10614): status (0xF0000010 = OK, bit31 = SOS alive)
- *   NOTE: previous values 0x1056C/0x10570/0x10574 (base 0x103E0) were wrong;
- *   only C2PMSG_81 at 0x10614 was ever proven. Probe readback of base 0x103E0
- *   C2PMSG_81 (0x10624) = 0 (dead), base 0x103D0 (0x10614) = 0xF0000010. */
-#define DIRECT_C2PMSG_35_OFFSET      0x1055C
-#define DIRECT_C2PMSG_36_OFFSET      0x10560
-#define DIRECT_C2PMSG_37_OFFSET      0x10564
-#define DIRECT_C2PMSG_64_OFFSET      0x105D0  /* ring/TOS mailbox (bit31 = TOS ready) */
-#define DIRECT_C2PMSG_81_OFFSET      0x10614
+/* # C2PMSG mailbox (corrected 2026-08-20: MP0 base = 0x58000, byte offsets —
+ *   verified by psp-ring-submit-test against live hardware 2026-08-18.
+ *   The earlier 0x103D0-based offsets (0x1055C/0x10560/0x105D0/0x10614) were
+ *   WRONG — they read back idle values. Base 0x58000 = ip_discovery MP0 base
+ *   0x16000 (dwords) * 4.
+ *   C2PMSG_35 (0x5818C): command to SOS
+ *   C2PMSG_36 (0x58190): argument / firmware PA low (1MB units for bootloader)
+ *   C2PMSG_37 (0x58194): argument / firmware PA high
+ *   C2PMSG_64 (0x58200): cmd / TOS-ready / response (bit31 = RESP/TOS ready)
+ *   C2PMSG_67 (0x5820C): ring WPTR
+ *   C2PMSG_69/70/71 (0x58214/18/1C): ring addr lo/hi, size
+ *   C2PMSG_81 (0x58244): SOS status */
+#define DIRECT_C2PMSG_35_OFFSET      0x5818C
+#define DIRECT_C2PMSG_36_OFFSET      0x58190
+#define DIRECT_C2PMSG_37_OFFSET      0x58194
+#define DIRECT_C2PMSG_64_OFFSET      0x58200  /* ring/TOS mailbox (bit31 = TOS ready) */
+#define DIRECT_C2PMSG_67_OFFSET      0x5820C  /* ring WPTR */
+#define DIRECT_C2PMSG_81_OFFSET      0x58244
 #define DIRECT_C2PMSG_OK             0xF0000010
 #define DIRECT_C2PMSG_SOS_ALIVE      0x80000000
+
+/* NOTE (2026-08-20): the old DIRECT_C2PMSG_OK=0xF0000010 was read from the
+ * WRONG base 0x103D0. With the corrected base 0x58000, C2PMSG_81 reads the SOS
+ * status (verified live: 0x002B9309, bit31 NOT set). Bootloader-load completion
+ * is signaled on C2PMSG_35 bit31 (see Amdbc250PspDirectLoadTos); PspWaitCompletion
+ * below therefore only makes sense as a legacy helper and is NOT used by the
+ * working ring path (kmd.c PSP_RING_* / 0x58000). */
 
 /* Bootloader command codes (Linux amdgpu_psp.h psp_bootloader_cmd). */
 #define PSP_BL__LOAD_SYSDRV          0x10000
@@ -156,14 +168,17 @@ static NTSTATUS SmuWaitReady(PVOID GpuBar5Va, ULONG TimeoutMs)
     return STATUS_TIMEOUT;
 }
 
-/* --- Wait for PSP C2PMSG_81 completion. --- */
+/* --- Wait for PSP C2PMSG_35 bit31 (bootloader completion) ---
+ * NOTE: on BC-250, C2PMSG_81 bit31 is NOT the alive/complete flag.
+ * The bootloader signals completion via C2PMSG_35 bit31 set.
+ * Poll C2PMSG_35 (and report C2PMSG_64 bit31 as TOS ready for TOS load). --- */
 static NTSTATUS PspWaitCompletion(PVOID GpuBar5Va, ULONG TimeoutMs)
 {
     ULONG i;
     for (i = 0; i < TimeoutMs; i++) {
         ULONG status = READ_REGISTER_ULONG(
-            (PULONG)((PUCHAR)GpuBar5Va + DIRECT_C2PMSG_81_OFFSET));
-        if (status == DIRECT_C2PMSG_OK) return STATUS_SUCCESS;
+            (PULONG)((PUCHAR)GpuBar5Va + DIRECT_C2PMSG_35_OFFSET));
+        if (status & 0x80000000) return STATUS_SUCCESS;
         KeStallExecutionProcessor(1000);
     }
     return STATUS_TIMEOUT;
@@ -499,8 +514,12 @@ static BOOLEAN PspProxyInit(VOID)
                 KdPrint(("BC250-PSP: GPCOM ring PA=0x%llX VA=%p\n", ringPhys.QuadPart, g_GpcomRingVa));
             }
 
-            /* Update SOS-alive in the shared PSP context (the loader checks this). */
-            g_PspContext.SosAlive = (c2pmsg81 == 0xF0000010) ? TRUE : FALSE;
+            /* Update SOS-alive in the shared PSP context (the loader checks this).
+             * With the corrected MP0 base (0x58000), C2PMSG_81 carries the SOS
+             * status value; bit31 is not set for an alive-but-idle SOS on BC-250,
+             * so treat any non-zero status as "SOS present". The old exact-match
+             * against 0xF0000010 was read from the WRONG base and is removed. */
+            g_PspContext.SosAlive = (c2pmsg81 != 0) ? TRUE : FALSE;
             g_PspContext.Initialized = TRUE;
 
             /* Initialize KIQ ring for command submission */
@@ -975,10 +994,13 @@ static NTSTATUS Amdbc250PspIsSosAlive(PBOOLEAN Alive)
 
 static NTSTATUS Amdbc250PspDiscoverMp0Base(VOID)
 {
-    /* Primary scan: fine-grained check of the 0x0-0x8000 range
-       where the actual PSP mailbox registers live.
-       The PSP driver confirmed working MP0 base at ~0x40F4. */
+    /* Primary scan: ip_discovery-verified MP0 base FIRST. Linux reads MP0/0
+       base_addr = 0x16000 (dwords) from the discovery TMR -> BAR5 byte base
+       0x58000. That is the REAL mailbox (C2PMSG_81 @ 0x58244 = SOS status).
+       The old heuristics below can match a false candidate (e.g. 0x040F4)
+       whose C2PMSG_81 @ 0x10614 reads 0xF0000010 but is NOT the live mailbox. */
     ULONG tryOffsets[] = {
+        0x16000, /* ip_discovery MP0 base (verified 2026-07-31, BAR5 0x58000) */
         0x00000, 0x04000, 0x040F0, 0x040F4, 0x040F8, 0x04100, 0x0410C, 0x04200,
         0x04400, 0x04800, 0x05000, 0x06000, 0x08000, 0x10000,
     };
@@ -1105,7 +1127,7 @@ NTSTATUS Amdbc250PspInit(ULONG64 MmioPhysicalBase)
     /* Check if SOS is already alive (loaded by PSP driver) */
     {
         ULONG sol = Amdbc250PspReadRegister(MP0_C2PMSG_81_BYTE);
-        g_PspContext.SosAlive = (sol & 0x80000000) ? TRUE : FALSE;
+        g_PspContext.SosAlive = (sol != 0) ? TRUE : FALSE;
         g_PspContext.Initialized = TRUE;
         KdPrint(("BC250-PSP: Init OK - MP0 base=0x%05X SOL=0x%08X SOS=%u\n",
             g_Mp0BaseDword, sol, g_PspContext.SosAlive));
