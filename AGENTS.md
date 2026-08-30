@@ -59,6 +59,9 @@ Tool: `output\stale-verdict-recheck.exe` (+ `cp-ucode-recheck.exe`) — every pr
 
 **Implication:** engine-not-processing root cause remains WGP power state + no ring consumption — NOT wrong addresses anymore.
 
+### SOS LOCK CLARIFICATION (2026-08-30) — Linux does NOT unlock SOS, it succeeds via correct init order
+Fetched `psp_v11_0_8.c` (torvalds/master) — `psp_v11_0_8_ring_create` only waits `TOS_READY` and programs `C2PMSG_69/70/71/64` at `0x58000`; no explicit unlock. `SPI_PG 0x5C3C` is written by `gfx_v10_0_get_cu_info()` as plain `WREG32` with correct `GRBM_GFX_INDEX 0x34D0` (`SE 1<<16`, `SH 1<<8`, broadcast `0x15000000`) together with `CC 0x9C1C` + `RLC 0x3D64`. Success requires prior `GART/VM (MC 0xF400000000)` + `PSP ring` setup — Linux does `GCVM/GART + TOS ring` before `get_cu_info`. Our `wgp-persist-check` still `0` because `HwInitGart=0`, `HwInitVm=0` (skip due 0x1A) and `SPI_PG` is attempted after `StartDevice`, not in correct order. The recurring claim “SOS locked in BIOS / fused” is FALSE — it is a runtime gate, not BIOS fuse.
+
 ### SOURCE-VERIFIED CORRECTION (2026-08-21): NO DPM TABLES EXIST FOR BC-250
 Fetched actual Linux `cyan_skillfish_ppt.c` (torvalds/master) and verified:
 - `cyan_skillfish_table_map` has ONLY `SMU_TABLE_SMU_METRICS` (telemetry). There is NO DpmClocks_t, no DPM clock-level tables for this ASIC. The old claim "missing SMU DPM tables → SMU cannot power WGPs" is WRONG — such tables do not exist for cyan_skillfish.
