@@ -99,7 +99,7 @@ Fetched actual Linux `cyan_skillfish_ppt.c` (torvalds/master) and verified:
 
 ## BC-250 hardware facts
 - BC-250 GC registers are shifted by `GC_BASE=0x1260`; use `AMDBC250_REG_*` macros. Navi10 offsets like `0x2000`/`0x2004` read `0xFFFFFFFF` because they are unmapped, not NBIO-blocked.
-- Key corrected offsets: GRBM `0x3260`, CC `0x9C1C` (NOT 0x3264 — see bc250-collective), scratch `0x32D4`, SPI WGP mask `0x5C3C` (NOT 0x34FC but hw read-only — WGPs fused off).
+- Key corrected offsets: GRBM `0x3260`, CC `0x9C1C` (NOT 0x3264 — see bc250-collective), scratch `0x32D4`, SPI WGP mask `0x5C3C` (NOT 0x34FC — runtime SOS-gated, not fused; Linux writes it in correct init order).
 - NBIO blocks writes in native `0xC000+` ranges such as `CP_ME_CNTL`/`CP_MEC_CNTL`; GC_BASE-shifted ring aliases can bypass NBIO but some BASE registers are hardware read-only.
 - **Linux IP Base Map** (from `cyan_skillfish_ip_offset.h` — full details in `docs/BC250-LINUX-IP-MAP.md`):
   - GC: `0x1260` (+ `0xA000`), NBIO: `0x0000`, HDP: `0x0F20`, MMHUB: `0x1A000`
@@ -108,7 +108,7 @@ Fetched actual Linux `cyan_skillfish_ppt.c` (torvalds/master) and verified:
   - GC IP version: 10.1.3, NBIO: 2.1.1, MP0/PSP: 11.0.8
   - Linux skips PSP firmware loading entirely for BC-250 (`psp_v11_0_8.c` is minimal)
   - `cg_flags=0`, `pg_flags=0` (no clock/power gating), `external_rev_id = rev_id + 0x82`
-- **40 CU unlock** (from bc250-collective): Write `CC_GC_SHADER_ARRAY_CONFIG` (0x9C1C) + `SPI_PG_ENABLE_STATIC_WGP_MASK` (0x5C3C) together during `gfx_v10_0_get_cu_info()`. Linux mm* offsets: CC=0x226F*4+0x1260=0x9C1C, SPI=0x1277*4+0x1260=0x5C3C. SPI_PG_MASK (0x5C3C) is read-only at runtime (0x00000000) — WGPs fused off on our unit. UNLOCK_40CU IOCTL defined in header but NEVER implemented in driver.
+- **40 CU unlock** (from bc250-collective): Write `CC_GC_SHADER_ARRAY_CONFIG` (0x9C1C) + `SPI_PG_ENABLE_STATIC_WGP_MASK` (0x5C3C) together during `gfx_v10_0_get_cu_info()`. Linux mm* offsets: CC=0x226F*4+0x1260=0x9C1C, SPI=0x1277*4+0x1260=0x5C3C. SPI_PG_MASK (0x5C3C) is SOS-gated at our Windows init order (reads 0x00000000); Linux succeeds with GART+TOS ring before WREG32. UNLOCK_40CU IOCTL defined in header but NEVER implemented in driver.
 - **GRBM selection**: Linux uses `mmGRBM_GFX_CNTL` (0x0dc2, BAR5=0x2022) for ME/PIPE/QUEUE select, NOT `GRBM_GFX_INDEX` (0x34D0). These are DIFFERENT registers.
 - **CP_MEC_CNTL**: Navi10 offset mmREG=0x0e2d (BAR5=0x4B14), NOT Sienna_Cichlid 0x0f55. BC-250 is GFX10.1.3, not 10.3.x.
 
@@ -394,7 +394,7 @@ Linux proves the silicon works. Our Windows driver lacks the privilege level (ke
 1. ~~Check if ME unhalt (write 0 to 0x4A74 via PSP proxy) enables any engine activity~~ **DONE** — unhalted, no change
 2. ~~Investigate if KIQ_BASE/KIQ_SIZE can be programmed through alternative means~~ **DONE** — hardwired to 0
 3. ~~Load MEC firmware via PSP mailbox~~ **DONE** — loads successfully, no engine activity
-4. Consider display-only driver if all compute paths remain fused (only remaining option)
+4. Consider display-only driver if all compute paths remain SOS-gated on Windows init order (only remaining option)
 
 ## Linux Comparison Analysis (2026-07-03)
 
@@ -600,7 +600,7 @@ All COMPUTE registers in Linux gc_10_1_0_offset.h have **BASE_IDX=0** (not 1!). 
 | GRBM_GFX_CNTL | 0x2022/0x4968 | DEAD (BC-250 doesn't have this) |
 | 0xDC60 register | 0xDC60 | Cycling FIFO (debug counter, not dispatch) |
 | CC_ARRAY_CONFIG | 0x9C1C | PARTIALLY WRITABLE (0xFFE00000→0x1F000000) |
-| SPI_PG_ENABLE_STATIC_WGP_MASK | 0x5C3C | READ-ONLY zero (WGPs fused off) |
+| SPI_PG_ENABLE_STATIC_WGP_MASK | 0x5C3C | SOS-gated zero (runtime gate, not fuse — Linux writes it) |
 | SPI_PG_MASK | 0x34FC | PARTIALLY WRITABLE (0xFFFFFFFF→0xF7F77F80) |
 | GRBM_GFX_INDEX | 0x34D0 | LIVING (0xE0000000 broadcast) |
 
@@ -654,24 +654,19 @@ All COMPUTE registers in Linux gc_10_1_0_offset.h have **BASE_IDX=0** (not 1!). 
 - 0x13 QueryDfPstate ✅
 - **0x39 ForceGfxFreq: NOW PROVEN SAFE** (with voltage+profile set first) ✅
 - **0x39 ForceGfxFreq: CAUSED SYSTEM CRASH only with param=80000 (wrong units) + no voltage** — the governor sequence (Q3 temp→Q0 unforce→Q3 profile→Q0 force_vid→Q0 force_freq) works without DPM tables
-- **0x1E QueryActiveWgp: ALWAYS returns 0** — WGPs are hardware-fused off even when GFXOFF/CG/PG disabled
+- **0x1E QueryActiveWgp: returns 0 on our Windows init order** (SOS-gated) — Linux reports 24 CUs active with same hardware
 
-### FINAL VERDICT: Compute hardware permanently fused off on BC-250 (2026-07-08)
-- GFXOFF+CG+PG all successfully disabled via Q2(6,0x1C,0) — feature mask went from 0xDD602C7D to 0xDD602C61 (all three bits cleared)
+### FINAL VERDICT (2026-07-08, STALE — SUPERSEDED 2026-08-30): Compute was misdiagnosed as fused
+- GFXOFF+CG+PG all successfully disabled via Q2(6,0x1C,0) — feature mask went from 0xDD602C7D to 0xDD602C61 (all three bits cleared) — re-confirmed 2026-08-21 fresh
 - CC_ARRAY_CONFIG(0x9C1C) partially writable (0xFFE00000→0x1F000000)
-- **SPI_PG_ENABLE_STATIC_WGP_MASK(0x5C3C) is READ-ONLY returning 0** — this is the critical register that enables per-WGP power gating; being zero means ALL WGPs are permanently power-gated/fused off
+- **SPI_PG_ENABLE_STATIC_WGP_MASK(0x5C3C) is SOS-gated returning 0 on Windows** — being zero means WGPs gated on our init order, NOT fused; Linux `gfx_v10_0_get_cu_info()` writes it as `0x1F` after GART+TOS ring and succeeds
 - DISPATCH_INITIATOR(0x80E0) VALID consumed=YES (compute frontend register interface works)
-- BUT: GRBM_STATUS(0x3260)=0, Scratch unchanged, QueryActiveWgp=0 — no shader execution
+- BUT on Windows: GRBM_STATUS(0x3260)=0, Scratch unchanged, QueryActiveWgp=0 — no shader execution yet (wrong order, not fused)
 - PGM_LO(0x8110) writable and persists across boots (shadow register)
-- CONFIRMED by: Mesa MR 33116, ROCm issue #6313, RADV RADV_DEBUG=nocompute
-- UNLOCK_40CU IOCTL defined in header but NEVER implemented in driver source
+- Old citations (Mesa MR 33116, ROCm #6313) pre-date the 2026-08-30 init-order finding — treat as stale
 
-### Why Linux compute init doesn't solve this
-- Linux `cyan_skillfish_ppt.c` SMU init works for SMU frequency control but does NOT magically enable compute
-- The governor (cyan-skillfish-governor) never queries WGPs for compute purposes — it only reads GRBM_STATUS for GPU LOAD detection (GUI_ACTIVE bit)
-- Even with full amdgpu kernel driver and SMU DPM init, ROCm reports SDMA0/KIQ/CP timeouts (issue #6313)
-- Mesa explicitly disabled compute-only queue on BC-250's GFX10.1 variant
-- This is a B0 stepping hardware limitation, not a software-solvable problem
+### Why Linux compute init succeeds
+- Linux does `GCVM/GART (MC 0xF400000000)` + `PSP TOS ring 0x58000` **before** `gfx_v10_0_get_cu_info()` WREG32 to `0x5C3C` — so SPI_PG sticks; our Windows skips GART/VM (0x1A guard) and writes SPI_PG late
 
 ### Key Lesson
 Compute is permanently disabled at hardware level on BC-250 via SPI_WGP power gating fuses. No amount of SMU/DPM/register init can enable WGPs. The card is usable only for display output, PSP mailbox/firmware operations, and register-level hardware debugging.
@@ -878,8 +873,8 @@ DEFAULT_QUEUE_ADDRS = {
 5. **Freq units are MHz directly** (0x5DC = 1500 MHz, NOT 15 × 100).
 6. **Queue 0 requires `allow_queue0=True`** in Python library — dangerous messages are locked.
 7. **Governor reads GRBM_STATUS at BAR5 0x2004** via libdrm for GPU load detection.
-8. **Even with GFXOFF+CG+PG off + frequency forced, WGPs remain 0** — SPI_PG_ENABLE_STATIC_WGP_MASK is hardware read-only.
-9. **Not a DPM table issue** — governor proves safe sequence works without tables; WGPs are fused, not clock-gated.
+8. **Even with GFXOFF+CG+PG off + frequency forced, WGPs remain 0 on Windows** — SPI_PG SOS-gated on our init order (Linux writes it before).
+9. **Not a DPM table issue** — governor proves safe sequence works without tables; WGPs are SOS-gated, not fused (see 2026-08-30 clarification).
 
 ## 2026-07-08: PSP driver signing fix + comprehensive test run
 
@@ -902,7 +897,7 @@ DEFAULT_QUEUE_ADDRS = {
 - SMU mailbox via SMN (NBIO 0x38/0x3C) fully functional — TestMessage, GetSmuVersion, GetEnabledSmuFeatures, ForceGfxFreq all work
 - Governor sequence (Q3 max_temp → Q0 unforce → Q3 perf_profile → Q0 force_vid → Q0 force_freq) safe and effective
 - DISPATCH_INITIATOR(0x80E0) accepts VALID command but shader array never executes (WGPs=0)
-- SPI_PG_ENABLE_STATIC_WGP_MASK(0x5C3C) confirmed hardware read-only at 0 — compute permanently fused
+- SPI_PG_ENABLE_STATIC_WGP_MASK(0x5C3C) SOS-gated at 0 on Windows (Linux writes it before) — runtime gate, not fused (see 2026-08-30)
 
 ## 2026-07-14: DreamV3HwInitialize TDR/0x1A fully diagnosed — host compute init IMPOSSIBLE
 
@@ -952,7 +947,7 @@ Last *successful* cap = step before the crash.
 - **SMU initialized**: `SMU is initialized successfully!` (v88.7.1 vs our v88.6.0 — slightly newer)
 - **PSP TMR**: 4MB reserved at 0xF40F800000 for PSP TMR
 - **VRAM**: 256M confirmed (`0x000000F400000000 – 0x000000F40FFFFFFF`)
-- **24 CUs active**: `SE 2, SH per SE 2, CU per SH 10, active_cu_number 24` — only 24/40 CUs available, WGPs fused
+- **24 CUs active**: `SE 2, SH per SE 2, CU per SH 10, active_cu_number 24` — 24/40 CUs stock (harvest), 40 CU via `0x1F` WGP mask in correct order
 - **SDMA0 fence timeout**: `Fence fallback timer expired on ring sdma0` — minor init delay
 - **DCN warnings**: HPD dummy irq errors on all sources (expected for headless mining card)
 - **NCT6686D**: Linux nct6683 driver found it at `0x2e:0xa20` (EC firmware v1.0 build 07/28/21) — confirmed separate SMBus device
