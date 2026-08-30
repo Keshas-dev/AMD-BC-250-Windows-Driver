@@ -4,11 +4,69 @@
 - **The agent runs ON the target machine: an ASRock AMD BC-250 (8× Zen2 + RDNA2 gfx1013, 16GB GDDR6).** The user has confirmed the agent may run the hardware tests it needs (`output\*.exe` against the installed `atikmdag.sys`), install drivers, and verify results on the live hardware.
 - Rebooting mid-session may be required by reinstall flows; ask before rebooting if the test requires it, but otherwise treat the machine as available for hardware verification.
 
-## ⚠️ Historical-data caution (2026-08-20)
-- **This driver is continuously improved and bugs are being fixed (e.g. the VRAM/MC base fix). Old tests and conclusions in this file may be STALE — a test that "failed" before may now pass, and offset constants may have changed.**
-- Treat old AGENTS.md data as *hypotheses to re-verify*, not facts. When a fix lands, the corresponding tests must be RE-RUN on hardware, not assumed from earlier logs.
+## 📦 F:\AMD Hybrid Driver Analysis (2026-08-27) — see docs\AMD_Hybrid.md
+- **F:\AMD = AMD Adrenalin 23.9.1 + Radeon ID Community + Amernime Zone installer** — a hybrid WDDM driver package with registry-level GPU parameter toolkit
+- **WGPMode/CUMode = driver-level SOFTWARE flags in registry** (NOT hardware SPI_PG register):
+  - Registry: `HKLM\SYSTEM\CurrentControlSet\Services\MSFTProxy\WMIC` = `"_0_"` / `"_1_"` / `"_2_"` (auto/off/on)
+  - Registry: `HKLM\SYSTEM\CurrentControlSet\Control\Class\{4d36e968-...}\0000` = `ForceWGPmode` = dword:0/1
+  - Registry: `HKLM\SYSTEM\CurrentControlSet\Services\amdkmdag` = `ForceWGPmode` = dword:0/1
+  - **DOES NOT write to SPI_PG_ENABLE_STATIC_WGP_MASK (0x5C3C) hardware register**
+- **ATIVaxySID.cmd (6273 lines)** = GPU Parameter Manager with 300+ registry parameters (WGP, CU, ReBar, ULPS, etc.)
+- **ATIVaxyCalsMM.cmd** = registry write mechanism (REG.EXE IMPORT .dat files)
+- **ATIVaxyQuery.cmd** = registry read mechanism
+- **.dat files in ConEmu\CLSID\** = Windows Registry Editor 5.00 format, imported via REG.EXE
+- **bc250_vangogh.inf**: BC-250 INF, modified 16299→26200 but CAT hash mismatch → 0xE000024B error
+- **Code 43 cause**: CAT hash mismatch + amdkmdag.sys can't init BC-250 hardware (SPI_PG=0, ring BASE SOS-locked)
+- **No EFI DXE unlock, VBIOS mod, or SPI_PG hardware writer** in F:\AMD package
+- **DEV_13E9 (PS5 VanGogh) may work** because different BIOS/VBIOS or EFI DXE unlock used by Radeon ID Community
+
+## ⚠️ Historical-data caution (2026-08-21, STRENGTHENED)
+- **CRITICAL VRAM BUG CONTEXT: the driver previously had a critical VRAM/MC addressing bug (we were reading/writing the WRONG addresses). After that fix, ALL earlier test results and conclusions are STALE and potentially INVALID — tests done before the fix measured the wrong thing.** A test that "failed" before may now pass, and offset constants may have changed. Do NOT build new decisions on pre-fix data.
+- **Test-expiry rule (~3 days): results older than ~3 days are considered expired. Never cite them as current facts; RE-RUN on the current driver build and date-stamp fresh results.** Example of the mistake to avoid: citing the 2026-07-08 `gfxoff-kill-v2` conclusion in August as if still valid.
+- Treat old AGENTS.md entries below as *hypotheses to re-verify*, not facts. Every conclusion should state WHICH driver build/date produced it.
 - **Rule: after any code fix, update this file immediately AND save the change to memory** (`memory` tool). Keep the "current source of truth" section near the top so stale historical entries below do not mislead.
 - When re-testing, note explicitly whether the result was obtained with the OLD or NEW (fixed) driver build.
+
+### Fresh re-verifications (current build, 2026-08-21)
+- **GFXOFF/CG/PG disable does NOT unlock WGPs** (re-run 2026-08-21 with current atikmdag.sys): Q2 msg 0x06 mask 0x1C → features `0xDD602C7D` → `0xDD602C61` (resp OK), but SPI_PG stays `0x00000000` on ALL banks, RLC_PG `0xFFFFFFFF`, ActiveWgp `0`. Confirms the old 2026-07-08 finding with FRESH data. Reversible via `smu-feature-toggle.exe on`.
+- Tool: `output\smu-feature-toggle.exe [off|on] [hexmask]` — SMU feature toggle via Q2 mailbox (cmd=0x03B10528 rsp=0x03B10564 arg=0x03B10998). Default mask 0x1C = GFXOFF|CG|PG. Verified both directions OK on 2026-08-21.
+- Tool: `output\wgp-persist-check.exe` — per-bank SPI_PG/RLC_PG/CC readback + ActiveWgp verdict; run after any EFI/Linux WGP-unlock attempt to check persistence into Windows.
+- Test-tool gotcha: IOCTL_GPU_INIT (0x80000B80) buffer MUST be the full 32-byte `AMDBC250_IOCTL_INIT_HARDWARE` struct (with FbPhysicalBase/FbSize) — the driver writes back the full struct and a smaller stack buffer overflows → 0xC0000409 crash at exit.
+- **⚠️ LIVE-SYSTEM PROBE SAFETY (learned 2026-08-21): writing GCVM_PT_BASE0_LO (0x0B408), MQD/ring/HQD registers, or anything VM/display-adjacent on a LIVE system with active display → WHITE SCREEN (display fetch faults even if value is restored afterwards). Future probe tools must treat VM/page-table/scanout-adjacent regs as READ-ONLY. White screen recovery = reboot.**
+
+### Fresh re-verifications round 2 — full stale-verdict audit (2026-08-21)
+Tool: `output\stale-verdict-recheck.exe` (+ `cp-ucode-recheck.exe`) — every pre-fix "locked/dead" verdict re-tested with current driver. Results:
+
+**CONFIRMED still true (fresh data, 2026-08-21):**
+| Register | Fresh verdict |
+|---|---|
+| SPI_PG (0x5C3C) | STUCK at 0 (SOS-locked), incl. per-bank SE0/SH0 |
+| KIQ_SIZE (0xE068) | STUCK = 0 |
+| GFX CP_RB0_BASE (0x89E0) | STUCK (read-only) |
+| SDMA RB_BASE (0xE000) | STUCK at garbage 0x00555555 |
+| COMPUTE_PGM_RSRC1/2 (0x8128/C) | UNMAPPED (reads 0xFFFFFFFF) |
+| GCVM_PT_BASE (0xB608) | STUCK = 0 |
+| SCRATCH_REG0 | PARTIAL — high nibble [31:28] HW-masked (re-confirmed) |
+| **CP UCODE direct-load regs** (NBIO 0xC0A0/B0 AND GC-HYP 0x172B0/B8/C4) | **STUCK even WITH CP halted first (ME/PFP/CE halt bits written)** — direct ucode load path is DEAD; old "freeze zone" verdict CONFIRMED and strengthened |
+| Ring processing | EXECUTE_RING_PM4: WPTR advances 0→0x10, **RPTR stays 0** — engine still not consuming |
+
+**NEW/CORRECTED findings:**
+- **GCVM_PT_BASE0_LO (0x0B408) holds a REAL value 0x017ECCC4 and is WRITABLE** — SOS/VBIOS has an active GPUVM context programmed. The "GCVM path completely broken" claim is WRONG for context 0; only the secondary PT_BASE (0xB608) is stuck at 0.
+- KIQ_BASE_LO (0xE060) WRITABLE (re-confirmed); SDMA_RB_CNTL (0xE008) WRITABLE; COMPUTE_PGM_LO/HI shadow-writable (persists); CP_MQD_BASE_ADDR WRITABLE; RLC_CP_SCHEDULERS (0xECA8) WRITABLE (0xFF→0xFFF sticks).
+- IB test IOCTL now returns Result=0 (was 0xDEAD0001 pre-fix) but scratch unchanged + FwLoad=0 — path executes but produces no engine work.
+- RLC_PG_ALWAYS_ON reads 0xFFFFFFFF (value or unmapped — ambiguous, treat as before).
+- sdma-selftest still 0xC00000A3; test-gpu-ioctls still 14/15.
+
+**Implication:** engine-not-processing root cause remains WGP power state + no ring consumption — NOT wrong addresses anymore.
+
+### SOURCE-VERIFIED CORRECTION (2026-08-21): NO DPM TABLES EXIST FOR BC-250
+Fetched actual Linux `cyan_skillfish_ppt.c` (torvalds/master) and verified:
+- `cyan_skillfish_table_map` has ONLY `SMU_TABLE_SMU_METRICS` (telemetry). There is NO DpmClocks_t, no DPM clock-level tables for this ASIC. The old claim "missing SMU DPM tables → SMU cannot power WGPs" is WRONG — such tables do not exist for cyan_skillfish.
+- Clock control = DIRECT MESSAGES: `RequestGfxclk(param=sclk)` + `ForceGfxVid(vid)`/`UnforceGfxVid`. This is exactly what our governor sequence already does (Q0 0x39/0x3B/0x3C equivalents). Our SMU control surface is COMPLETE.
+- Source VID formula: `vid = (1550 - mV) * 160 / 1000` (matches our `(1.55 - V)*160`).
+- `SetDriverTableDramAddrHigh/Low` + `TransferTable*` are for the GPU_METRICS telemetry table (SmuMetrics_t: per-clk freqs, per-core CPU freq/temp/power) — a monitoring upgrade we can add later, NOT a control dependency.
+- NOTE: Linux uses `PPSMC_MSG_RequestGfxclk` ROUTINELY (od_edit_dpm_table COMMIT path) — our old "Q0 0x0E RequestGfxclk DANGER/crashes SMU" warning likely came from wrong units/no-vid-prep; worth a careful retry with vid forced first if ever needed.
+- **Remaining true blockers: SPI_PG/WGP power state (SOS lock) + ring consumption. Viable experiments left: (1) Linux warm-reboot persistence test with wgp-persist-check.exe, (2) EFI DXE unlock.**
 
 ## Workspace boundary
 - This is the GPU driver repo; the PSP driver is a sibling git repo at `C:\AMD-BC-250\AMD-BC-250-PSP-Windows-Driver`.

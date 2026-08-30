@@ -1809,8 +1809,9 @@ Bc250DdiQueryAdapterInfo(
 
         pSegOut->NbSegment = AMDBC250_QSEG_TWO_SEGMENTS ? 2 : 1;
 
-        /* Segment 0: UMA local segment (CPU-visible and cache coherent). */
-        pSegOut->pSegmentDescriptor[0].BaseAddress.QuadPart = 0;
+        /* Segment 0: UMA local segment (CPU-visible and cache coherent).
+           BC-250 dedicated VRAM is 256MB at MC 0xF400000000 (aper_base 0xC0000000). */
+        pSegOut->pSegmentDescriptor[0].BaseAddress.QuadPart = 0xF400000000ULL;
         pSegOut->pSegmentDescriptor[0].Size = ReportedVramBytes;
         pSegOut->pSegmentDescriptor[0].CommitLimit = ReportedVramBytes;
         BC250_SET_UMA_SEGMENT_FLAGS(pSegOut->pSegmentDescriptor[0].Flags);
@@ -1853,10 +1854,12 @@ Bc250DdiQueryAdapterInfo(
         pSegOut2->SegmentCount = AMDBC250_QSEG_TWO_SEGMENTS ? 2 : 1;
         RtlZeroMemory(pSegOut2->pSegmentDescriptor, sizeof(DXGK_SEGMENTDESCRIPTOR2) * pSegOut2->SegmentCount);
 
+        pSegOut2->pSegmentDescriptor[0].BaseAddress.QuadPart = 0xF400000000ULL;
         pSegOut2->pSegmentDescriptor[0].Size = ReportedVramBytes;
         BC250_SET_UMA_SEGMENT_FLAGS(pSegOut2->pSegmentDescriptor[0].Flags);
         if (AMDBC250_QSEG_TWO_SEGMENTS) {
             SIZE_T GttBytes = Bc250GetReportedGttSizeBytes();
+            pSegOut2->pSegmentDescriptor[1].BaseAddress.QuadPart = 0;
             pSegOut2->pSegmentDescriptor[1].Size = GttBytes;
             BC250_SET_UMA_SEGMENT_FLAGS(pSegOut2->pSegmentDescriptor[1].Flags);
         }
@@ -1900,11 +1903,13 @@ Bc250DdiQueryAdapterInfo(
         pSegOut3->PagingBufferPrivateDataSize = 0;
         RtlZeroMemory(pSegOut3->pSegmentDescriptor, sizeof(DXGK_SEGMENTDESCRIPTOR3) * pSegOut3->NbSegment);
 
+        pSegOut3->pSegmentDescriptor[0].BaseAddress.QuadPart = 0xF400000000ULL;
         pSegOut3->pSegmentDescriptor[0].Size = ReportedVramBytes;
         pSegOut3->pSegmentDescriptor[0].CommitLimit = ReportedVramBytes;
         BC250_SET_UMA_SEGMENT_FLAGS(pSegOut3->pSegmentDescriptor[0].Flags);
         if (AMDBC250_QSEG_TWO_SEGMENTS) {
             SIZE_T GttBytes = Bc250GetReportedGttSizeBytes();
+            pSegOut3->pSegmentDescriptor[1].BaseAddress.QuadPart = 0;
             pSegOut3->pSegmentDescriptor[1].Size = GttBytes;
             pSegOut3->pSegmentDescriptor[1].CommitLimit = GttBytes;
             BC250_SET_UMA_SEGMENT_FLAGS(pSegOut3->pSegmentDescriptor[1].Flags);
@@ -2075,7 +2080,7 @@ Bc250DdiIsSupportedVidPn(
         return STATUS_INVALID_PARAMETER;
     }
 
-    Bc250DiagWriteDword(L"DiagIsSupVidPnHandle", (ULONG)pIsSupportedVidPn->hDesiredVidPn);
+    Bc250DiagWriteDword(L"DiagIsSupVidPnHandle", (ULONG)(ULONG_PTR)pIsSupportedVidPn->hDesiredVidPn);
 
     if (pIsSupportedVidPn->hDesiredVidPn == 0) {
         pIsSupportedVidPn->IsVidPnSupported = TRUE;

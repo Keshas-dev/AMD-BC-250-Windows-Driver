@@ -138,7 +138,7 @@ int main(int argc, char* argv[]) {
     printf("CreateFile OK\n");
 
     /* Map BAR5 (required on Win11 26100 WDM fallback) */
-    typedef struct { UINT64 MmioPhysicalBase; UINT32 MmioSize; UINT32 Flags; } INIT_HW;
+    typedef struct { UINT64 MmioPhysicalBase; UINT32 MmioSize; UINT32 Flags; UINT64 FbPhysicalBase; UINT32 FbSize; } INIT_HW; /* FIX: full 32-byte struct */
     INIT_HW ih; DWORD ret = 0;
     ZeroMemory(&ih, sizeof(ih));
     ih.MmioPhysicalBase = 0xFE800000ULL;

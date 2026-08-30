@@ -91,7 +91,7 @@ int main(void) {
     if (g_hDev == INVALID_HANDLE_VALUE) { printf("FAIL: CreateFile gle=%lu\n", GetLastError()); return 1; }
     printf("CreateFile OK\n");
 
-    typedef struct { UINT64 MmioPhysicalBase; UINT32 MmioSize; UINT32 Flags; } INIT_HW;
+    typedef struct { UINT64 MmioPhysicalBase; UINT32 MmioSize; UINT32 Flags; UINT64 FbPhysicalBase; UINT32 FbSize; } INIT_HW; /* FIX: full 32-byte struct */
     INIT_HW ih; DWORD ret = 0;
     ZeroMemory(&ih, sizeof(ih));
     ih.MmioPhysicalBase = 0xFE800000ULL;

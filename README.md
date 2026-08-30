@@ -18,9 +18,13 @@ AMD BC-250 Windows driver project by Keshas. Goal: fully working GPU driver for 
 - **SMU version:** 88.6.0 (driver_if=8); Linux runs 88.7.1
 - **PSP IP:** v11.0.8 (CYAN_SKILLFISH2 variant)
 
+### F:\AMD Hybrid Package (2026-08-27)
+- **Source:** `F:\AMD` — AMD Adrenalin 23.9.1 + Radeon ID Community (Amernime Zone) hybrid WDDM package
+- **Fixes applied 2026-08-30:** MultiParse INF `16299→26200` (Win11 25H2/b26200) + `DEV_13FE` BC-250 entry, `u0395510.cat` regenerated via Inf2Cat, `KMD_EnableDisplayableSupport=1` (Mode 1, `GPUDisplayOne`) — see [docs/AMD_Hybrid.md](docs/AMD_Hybrid.md)
+
 ---
 
-## Current Status (2026-08-21)
+## Current Status (2026-08-30)
 
 ### Working
 - ✅ **PSP KM GPCOM ring WORKS on hardware** — ring created at correct MP0 base `0x58000`, commands executed by the PSP through the ring, fences reached. **This reopens PSP firmware loading on Windows.**
@@ -39,6 +43,8 @@ AMD BC-250 Windows driver project by Keshas. Goal: fully working GPU driver for 
 - ✅ **CPU core unlock** via SMU Q3 msg 0x98 (6→8 cores, requires reboot)
 - ✅ **Software PM4 executor** — IT_WRITE_DATA, IT_NOP, IT_SET_CONFIG_REG confirmed
 - ✅ **14/15 IOCTL tests pass** — GetCaps, GetVramInfo, GetTempInfo, AllocVidMem, etc.
+- ✅ **Win11 25H2 INF + CAT fixed** — `u0395510_VanGogh/FireFlight_Stock*.inf` now `26200` + `DEV_13FE`, CAT regenerated
+- ✅ **Display support Mode 1** — `KMD_EnableDisplayableSupport=1` (`DisplayableSupport=_2_`) via F:\AMD `GPUDisplayOne` (requires reboot)
 
 ### Not Working / Blocked
 - ❌ **SDMA self-test** — ring not initialized (RB_BASE_LO=0x00555555, no copy engine)
@@ -565,6 +571,7 @@ reg add "HKLM\SYSTEM\CurrentControlSet\Services\atikmdag" /v DisplayWritesEnable
 | File | Description |
 |------|-------------|
 | [AGENTS.md](AGENTS.md) | Agent memory — hardware facts, current blockers, test results |
+| [docs/AMD_Hybrid.md](docs/AMD_Hybrid.md) | F:\AMD hybrid driver analysis (WGP/CUMode registry, INF, CAT) |
 | [docs/BC250-LINUX-IP-MAP.md](docs/BC250-LINUX-IP-MAP.md) | Linux-verified IP base addresses |
 | [docs/REGISTER-MAP-BC250.md](docs/REGISTER-MAP-BC250.md) | Complete BC-250 register map |
 | [docs/RING-INIT-STATUS.md](docs/RING-INIT-STATUS.md) | Ring init blockers and KIQ path |

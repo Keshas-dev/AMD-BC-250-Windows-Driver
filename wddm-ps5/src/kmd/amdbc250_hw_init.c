@@ -48,6 +48,8 @@ Environment:
 static NTSTATUS Bc250InitCommandProcessor(_In_ PAMDBC250_DEVICE_EXTENSION DevExt);
 static NTSTATUS Bc250InitMemoryController(_In_ PAMDBC250_DEVICE_EXTENSION DevExt);
 static NTSTATUS Bc250InitSmu(_In_ PAMDBC250_DEVICE_EXTENSION DevExt);
+static NTSTATUS Bc250WaitForSmuReady(_In_ PAMDBC250_DEVICE_EXTENSION DevExt, _In_ ULONG TimeoutUs);
+static NTSTATUS Bc250SmuSendMsg(_In_ PAMDBC250_DEVICE_EXTENSION DevExt, _In_ ULONG Message, _In_ ULONG Argument);
 static ULONG Bc250GetRingBufferSizeField(_In_ ULONG RingSizeInBytes);
 static NTSTATUS Bc250WaitForRegister(
     _In_ PAMDBC250_DEVICE_EXTENSION DevExt,
@@ -193,8 +195,8 @@ Bc250HwInitialize(
     }
     Bc250DiagWriteDword(L"DiagStepDisplayDone", 1);
 
-    /* Set VRAM size from hardware configuration */
-    DevExt->TotalVramBytes = (SIZE_T)AMDBC250_DEFAULT_VRAM_MB * 1024 * 1024;
+    /* Set VRAM size from hardware configuration (256 MB dedicated VRAM at MC 0xF400000000) */
+    DevExt->TotalVramBytes = AMDBC250_DEDICATED_VRAM_BYTES;
     DevExt->UsedVramBytes  = 0;
 
     /* Set default clock speeds */
@@ -392,22 +394,19 @@ Bc250HwInitGfxRing(
                    CP_ME_CNTL__ME_HALT_MASK |
                    CP_ME_CNTL__PFP_HALT_MASK);
 
-    /* Program ring buffer base address */
-    Bc250WriteMmio(DevExt, AMDBC250_REG_CP_RB0_BASE,
-                   (ULONG)(RingPhys.QuadPart >> 8));
-    Bc250WriteMmio(DevExt, AMDBC250_REG_CP_RB0_BASE_HI,
-                   (ULONG)(RingPhys.QuadPart >> 40));
+    /* NOTE: BASE_LO (0x89E0) and BASE_HI (0x8BA4) are HARDWARE READ-ONLY on BC-250.
+       BIOS sets ring base. Do NOT write them — writes silently fail. */
 
     /* Calculate ring buffer size field (log2 of size in DWORDs) */
     RbBufSz = Bc250GetRingBufferSizeField(RingSize);
 
-    /* Program ring control register */
+    /* Program ring control register (writable on BC-250) */
     RbCntl = (RbBufSz & CP_RB0_CNTL__RB_BUFSZ_MASK) |
              ((1 << CP_RB0_CNTL__RB_BLKSZ_SHIFT) & CP_RB0_CNTL__RB_BLKSZ_MASK) |
              CP_RB0_CNTL__RB_RPTR_WR_ENA_MASK;
     Bc250WriteMmio(DevExt, AMDBC250_REG_CP_RB0_CNTL, RbCntl);
 
-    /* Initialize read/write pointers */
+    /* Initialize read/write pointers (writable) */
     Bc250WriteMmio(DevExt, AMDBC250_REG_CP_RB0_RPTR, 0);
     Bc250WriteMmio(DevExt, AMDBC250_REG_CP_RB0_WPTR, 0);
     Bc250WriteMmio(DevExt, AMDBC250_REG_CP_RB0_WPTR_HI, 0);
@@ -444,7 +443,7 @@ Bc250HwInitGfxRing(
     }
 
     DevExt->GfxRing.Initialized = TRUE;
-    KdPrint(("AMDBC250: GFX ring initialized at PA=0x%llX\n",
+    KdPrint(("AMDBC250: GFX ring initialized at PA=0x%llX (BASE read-only)\n",
              RingPhys.QuadPart));
 
     return STATUS_SUCCESS;
@@ -549,11 +548,8 @@ Bc250HwInitSdmaRing(
     Bc250WriteMmio(DevExt, AMDBC250_REG_SDMA0_F32_CNTL, 0x00000001);
     KeStallExecutionProcessor(10);
 
-    /* Program ring base address */
-    Bc250WriteMmio(DevExt, AMDBC250_REG_SDMA0_GFX_RB_BASE,
-                   (ULONG)(SdmaPhys.QuadPart >> 8));
-    Bc250WriteMmio(DevExt, AMDBC250_REG_SDMA0_GFX_RB_BASE_HI,
-                   (ULONG)(SdmaPhys.QuadPart >> 40));
+    /* NOTE: SDMA RB_BASE (0xE000) and RB_BASE_HI (0xE004) are HARDWARE READ-ONLY on BC-250.
+       BIOS sets ring base. Do NOT write them — writes silently fail. */
 
     /* Calculate buffer size field */
     RbBufSz = Bc250GetRingBufferSizeField(SdmaSize);
@@ -561,7 +557,7 @@ Bc250HwInitSdmaRing(
     RbCntl = (RbBufSz & 0x3F) | (1 << 8);  /* RB_SIZE + RB_SWAP_ENABLE */
     Bc250WriteMmio(DevExt, AMDBC250_REG_SDMA0_GFX_RB_CNTL, RbCntl);
 
-    /* Initialize pointers */
+    /* Initialize pointers (writable) */
     Bc250WriteMmio(DevExt, AMDBC250_REG_SDMA0_GFX_RB_RPTR, 0);
     Bc250WriteMmio(DevExt, AMDBC250_REG_SDMA0_GFX_RB_WPTR, 0);
 
@@ -572,7 +568,7 @@ Bc250HwInitSdmaRing(
     Bc250WriteMmio(DevExt, AMDBC250_REG_SDMA0_F32_CNTL, 0x00000000);
 
     DevExt->SdmaRing.Initialized = TRUE;
-    KdPrint(("AMDBC250: SDMA ring initialized at PA=0x%llX\n", SdmaPhys.QuadPart));
+    KdPrint(("AMDBC250: SDMA ring initialized at PA=0x%llX (BASE read-only)\n", SdmaPhys.QuadPart));
 
     return STATUS_SUCCESS;
 }
@@ -688,18 +684,13 @@ Bc250InitMemoryController(
     KdPrint(("AMDBC250: InitMemoryController\n"));
 
     /*
-     * Configure GB_ADDR_CONFIG for RDNA2 / Navi 10 topology:
-     * - 4 memory channels (pipes)
-     * - 256-bit memory bus
-     * - Standard pipe interleave size
+     * DO NOT write MC_VM_AGP_BASE/TOP/BOT, MC_VM_SYSTEM_APERTURE,
+     * or GB_ADDR_CONFIG on BC-250 — these are SOS-owned and cause 0x1A BSOD.
+     * BC-250 VRAM is 256MB dedicated at MC 0xF400000000 (aper_base 0xC0000000).
+     * Memory controller is configured by BIOS/SOS. Read-only here.
      */
-    Bc250WriteMmio(DevExt, AMDBC250_REG_GB_ADDR_CONFIG,
-                   (2 & GB_ADDR_CONFIG__NUM_PIPES_MASK) |          /* 4 pipes */
-                   (2 << 4 & GB_ADDR_CONFIG__PIPE_INTERLEAVE_SIZE_MASK) |
-                   (1 << 8 & GB_ADDR_CONFIG__MAX_COMPRESSED_FRAGS_MASK) |
-                   (2 << 12 & GB_ADDR_CONFIG__NUM_PKRS_MASK));
 
-    KdPrint(("AMDBC250: Memory controller configured\n"));
+    KdPrint(("AMDBC250: Memory controller configured (read-only, SOS-managed)\n"));
     return STATUS_SUCCESS;
 }
 
@@ -718,26 +709,21 @@ Bc250InitSmu(
     KdPrint(("AMDBC250: InitSmu\n"));
 
     /*
-     * Send SMU message to enable GPU clocks.
-     * SMU messages are sent via the MP1 C2P (CPU-to-Platform) message registers.
+     * SMU lives in SMN space (0x03B10Axx), NOT in BAR5.
+     * Use NBIO SMN window (BAR5+0x38/0x3C) to communicate with SMU.
+     * The BAR5 slot AMDBC250_REG_MP1_SMN_P2CMSG_33 (0x16284) reads 0
+     * because MP1 is not mapped into BAR5 on BC-250.
      */
 
-    /* Wait for SMU to be ready */
-    Status = Bc250WaitForRegister(DevExt, AMDBC250_REG_MP1_SMN_P2CMSG_33,
-                                   0x80000000, 0x80000000,
-                                   AMDBC250_SMU_TIMEOUT_US);
+    /* Wait for SMU to be ready via NBIO SMN window */
+    Status = Bc250WaitForSmuReady(DevExt, AMDBC250_SMU_TIMEOUT_US);
     if (!NT_SUCCESS(Status)) {
-        KdPrint(("AMDBC250: SMU not ready (timeout)\n"));
+        KdPrint(("AMDBC250: SMU not ready (timeout), continuing with conservative clocks\n"));
         return Status;
     }
 
-    /* Send EnableAllSmuFeatures message */
-    Bc250WriteMmio(DevExt, AMDBC250_REG_MP1_SMN_C2PMSG_66, 0x00000001);
-
-    /* Wait for response */
-    Status = Bc250WaitForRegister(DevExt, AMDBC250_REG_MP1_SMN_P2CMSG_33,
-                                   0x80000000, 0x80000000,
-                                   AMDBC250_SMU_TIMEOUT_US);
+    /* Send EnableAllSmuFeatures message via NBIO SMN window */
+    Status = Bc250SmuSendMsg(DevExt, 0x01, 0);  /* EnableAllSmuFeatures = 0x01 */
     if (!NT_SUCCESS(Status)) {
         KdPrint(("AMDBC250: SMU enable command timed out, continuing with conservative clocks\n"));
         return Status;
@@ -881,6 +867,97 @@ Bc250FreeContiguousMemory(
         MmFreeContiguousMemory(VirtualAddress);
     }
     UNREFERENCED_PARAMETER(SizeInBytes);
+}
+
+/*===========================================================================
+  Static Helper: Bc250WaitForSmuReady
+  Waits for SMU mailbox to be ready via NBIO SMN window (BAR5+0x38/0x3C).
+=========================================================================*/
+
+static NTSTATUS
+Bc250WaitForSmuReady(
+    _In_ PAMDBC250_DEVICE_EXTENSION DevExt,
+    _In_ ULONG TimeoutUs
+    )
+{
+    ULONG Elapsed = 0;
+    ULONG Value = 0;
+
+    if (DevExt->MmioVirtualBase == NULL) {
+        return STATUS_DEVICE_NOT_READY;
+    }
+
+    while (Elapsed < TimeoutUs) {
+        /* Read C2PMSG_90 (SMU control) via NBIO SMN window:
+         * Write SMN address 0x03B10A68 to BAR5+0x38, read from BAR5+0x3C */
+        Bc250WriteMmio(DevExt, 0x38, 0x03B10A68);
+        Value = Bc250ReadMmio(DevExt, 0x3C);
+        if ((Value & 1) == 1) {  /* C2PMSG_90 == 1 means ready */
+            return STATUS_SUCCESS;
+        }
+        KeStallExecutionProcessor(10);
+        Elapsed += 10;
+    }
+
+    KdPrint(("AMDBC250: SMU not ready timeout (got 0x%X)\n", Value));
+    return STATUS_TIMEOUT;
+}
+
+/*===========================================================================
+  Static Helper: Bc250SmuSendMsg
+  Sends a message to SMU via NBIO SMN window (BAR5+0x38/0x3C).
+  Queue 0: cmd=0x03B10A08, rsp=0x03B10A68, arg=0x03B10A48
+=========================================================================*/
+
+static NTSTATUS
+Bc250SmuSendMsg(
+    _In_ PAMDBC250_DEVICE_EXTENSION DevExt,
+    _In_ ULONG Message,
+    _In_ ULONG Argument
+    )
+{
+    NTSTATUS Status;
+    ULONG Value = 0;
+
+    if (DevExt->MmioVirtualBase == NULL) {
+        return STATUS_DEVICE_NOT_READY;
+    }
+
+    /* Wait for SMU ready */
+    Status = Bc250WaitForSmuReady(DevExt, AMDBC250_SMU_TIMEOUT_US);
+    if (!NT_SUCCESS(Status)) {
+        return Status;
+    }
+
+    /* Protocol: wait RSP=1 -> ack by writing 0 to RSP -> write ARG -> write CMD -> poll RSP for completion */
+    /* For queue 0: CMD=0x03B10A08, RSP=0x03B10A68, ARG=0x03B10A48 */
+
+    /* Write argument to C2PMSG_82 */
+    Bc250WriteMmio(DevExt, 0x38, 0x03B10A48);
+    Bc250WriteMmio(DevExt, 0x3C, Argument);
+
+    /* Write command to C2PMSG_66 */
+    Bc250WriteMmio(DevExt, 0x38, 0x03B10A08);
+    Bc250WriteMmio(DevExt, 0x3C, Message);
+
+    /* Poll response */
+    ULONG Elapsed = 0;
+    while (Elapsed < AMDBC250_SMU_TIMEOUT_US) {
+        Bc250WriteMmio(DevExt, 0x38, 0x03B10A68);
+        Value = Bc250ReadMmio(DevExt, 0x3C);
+        if ((Value & 0xFF) != 0) {  /* Response received */
+            if (Value == 0x01) {
+                return STATUS_SUCCESS;
+            }
+            KdPrint(("AMDBC250: SMU msg 0x%X failed with response 0x%X\n", Message, Value));
+            return STATUS_UNSUCCESSFUL;
+        }
+        KeStallExecutionProcessor(10);
+        Elapsed += 10;
+    }
+
+    KdPrint(("AMDBC250: SMU msg 0x%X timeout\n", Message));
+    return STATUS_TIMEOUT;
 }
 
 

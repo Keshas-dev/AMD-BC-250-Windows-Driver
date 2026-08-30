@@ -65,25 +65,19 @@ Environment:
 #define AMDBC250_BAR5_MMIO_PHYSICAL_BASE  0xFE800000ULL
 #define AMDBC250_BAR5_MMIO_SIZE           0x80000ULL   /* 512 KB */
 
-/*===========================================================================
-  Hardware Capabilities
-===========================================================================*/
-
-#define AMDBC250_NUM_COMPUTE_UNITS      24      /* RDNA2 CUs                 */
-#define AMDBC250_NUM_SHADER_ENGINES     1       /* Single shader engine      */
-#define AMDBC250_NUM_SHADER_ARRAYS      2       /* Shader arrays per SE      */
-#define AMDBC250_WAVEFRONT_SIZE         32      /* RDNA2 wave32 mode         */
-#define AMDBC250_MAX_WAVES_PER_CU       20      /* Max waves per CU          */
-#define AMDBC250_CACHE_LINE_SIZE        64      /* L1 cache line (bytes)     */
-#define AMDBC250_L2_CACHE_SIZE_KB       512     /* L2 cache size (KB)        */
-#define AMDBC250_TOTAL_MEMORY_MB        16384   /* 16 GB GDDR6 shared (UMA)  */
-#define AMDBC250_DEFAULT_VRAM_MB        16384   /* UMA dynamic pool baseline */
-#define AMDBC250_MAX_VRAM_MB            16384   /* Max logical shared budget */
-#define AMDBC250_MEMORY_BUS_WIDTH       256     /* Memory bus width (bits)   */
-#define AMDBC250_BASE_CLOCK_MHZ         1000    /* Base GPU clock (MHz)      */
-#define AMDBC250_BOOST_CLOCK_MHZ        2000    /* Boost GPU clock (MHz)     */
-#define AMDBC250_MEMORY_CLOCK_MHZ       1750    /* GDDR6 memory clock (MHz)  */
-#define AMDBC250_TDP_WATTS              220     /* Thermal Design Power      */
+/* BC-250 dedicated VRAM is 256MB at MC 0xF400000000 (probed via Linux dmesg).
+   BAR0 physical base = 0xC0000000 (aper_base). VRAM aper_base + 0xF800000 = MC. */
+#define AMDBC250_BAR0_PHYSICAL_BASE       0xC0000000ULL
+#define AMDBC250_DEDICATED_VRAM_MB        256
+#define AMDBC250_DEDICATED_VRAM_BYTES     (256ULL * 1024 * 1024)
+#define AMDBC250_TOTAL_MEMORY_MB          16384   /* 16 GB GDDR6 shared (UMA) */
+#define AMDBC250_DEFAULT_VRAM_MB          AMDBC250_DEDICATED_VRAM_MB
+#define AMDBC250_MAX_VRAM_MB              16384
+#define AMDBC250_MEMORY_BUS_WIDTH         256
+#define AMDBC250_BASE_CLOCK_MHZ           1500
+#define AMDBC250_BOOST_CLOCK_MHZ          2000
+#define AMDBC250_MEMORY_CLOCK_MHZ         1750
+#define AMDBC250_TDP_WATTS                220
 
 /*===========================================================================
   MMIO Register Offsets (GFX/COMPUTE/DISPLAY)
@@ -105,10 +99,7 @@ Environment:
 #define AMDBC250_REG_SCRATCH_REG3       (AMDBC250_GC_BASE + 0x00002080)  /* 0x32E0 */
 
 /* --- GPU Identification --- */
-#define AMDBC250_REG_CHIP_FAMILY        0x00000E00  /* Chip family ID        */
-#define AMDBC250_REG_CHIP_REVISION      0x00000E04  /* Chip revision         */
-#define AMDBC250_REG_HW_ID              0x00000E08  /* Hardware ID           */
-#define AMDBC250_REG_ASIC_REVISION      0x00000E0C  /* ASIC revision         */
+#define AMDBC250_REG_GPU_ID             0x00000000
 
 /* --- GFX Command Processor (GC_BASE-shifted; mm from gc_10_1_0_offset.h) --- */
 #define AMDBC250_REG_CP_ME_CNTL         (AMDBC250_GC_BASE + 0x00003814)  /* 0x4A74 */
@@ -123,8 +114,10 @@ Environment:
 #define AMDBC250_REG_CP_HQD_VMID        (AMDBC250_GC_BASE + 0x00007EB0)  /* 0x9110 */
 
 /* --- Graphics Ring Buffer (GFX Ring 0; mm=0x1DE0..0x1DF5, GC_BASE-shifted) --- */
-#define AMDBC250_REG_CP_RB0_BASE        (AMDBC250_GC_BASE + 0x00007780)  /* 0x89E0 */
-#define AMDBC250_REG_CP_RB0_BASE_HI     (AMDBC250_GC_BASE + 0x00007944)  /* 0x8BA4 */
+/* NOTE: BASE_LO (0x89E0) and BASE_HI (0x8BA4) are HARDWARE READ-ONLY on BC-250.
+   BIOS sets ring base. Driver MUST NOT write them. */
+#define AMDBC250_REG_CP_RB0_BASE        (AMDBC250_GC_BASE + 0x00007780)  /* 0x89E0 (RO) */
+#define AMDBC250_REG_CP_RB0_BASE_HI     (AMDBC250_GC_BASE + 0x00007944)  /* 0x8BA4 (RO) */
 #define AMDBC250_REG_CP_RB0_CNTL        (AMDBC250_GC_BASE + 0x00007784)  /* 0x89E4 */
 #define AMDBC250_REG_CP_RB0_RPTR        (AMDBC250_GC_BASE + 0x00003D80)  /* 0x4FE0 */
 #define AMDBC250_REG_CP_RB0_WPTR        (AMDBC250_GC_BASE + 0x000077D0)  /* 0x8A30 */
@@ -132,15 +125,13 @@ Environment:
 #define AMDBC250_REG_CP_RB_VMID         (AMDBC250_GC_BASE + 0x00007788)  /* 0x89E8 */
 #define AMDBC250_REG_CP_RB_DOORBELL_CTL (AMDBC250_GC_BASE + 0x0000C820)  /* 0xDA80 */
 
-/* --- Memory Controller --- */
-#define AMDBC250_REG_MC_VM_FB_LOCATION  0x00009520  /* Framebuffer location  */
-#define AMDBC250_REG_MC_VM_AGP_BASE     0x00009524  /* AGP base              */
-#define AMDBC250_REG_MC_VM_AGP_TOP      0x00009528  /* AGP top               */
-#define AMDBC250_REG_MC_VM_AGP_BOT      0x0000952C  /* AGP bottom            */
-#define AMDBC250_REG_MC_VM_SYSTEM_APERTURE_LOW   0x00009540
-#define AMDBC250_REG_MC_VM_SYSTEM_APERTURE_HIGH  0x00009544
+/* --- Memory Controller (SOS-owned on BC-250, DO NOT WRITE) ---
+   MC_VM_AGP_BASE/TOP/BOT, MC_VM_SYSTEM_APERTURE cause 0x1A BSOD if written.
+   Framebuffer location at 0x9520 is readable but SOS-managed. */
+#define AMDBC250_REG_MC_VM_FB_LOCATION  0x00009520  /* Read-only, SOS-managed */
 
-/* --- VM/GART (IOMMU/address translation) --- */
+/* --- VM/GART (IOMMU/address translation) ---
+   PT_BASE registers are SOS-locked; PT_BASE (0x0B608) reads 0 always. */
 #define AMDBC250_REG_VM_CONTEXT0_PAGE_TABLE_BASE_ADDR_LO32  0x00009B00
 #define AMDBC250_REG_VM_CONTEXT0_PAGE_TABLE_BASE_ADDR_HI32  0x00009B04
 #define AMDBC250_REG_VM_CONTEXT0_PAGE_TABLE_START_ADDR_LO32 0x00009B08
@@ -178,22 +169,23 @@ Environment:
 
 /* --- Power Management (SMU/MP1) ---
    MP1 C2PMSG live in SMN space (0x03B10Axx) reachable via NBIO SMN window
-   (BAR5+0x38/0x3C), NOT directly in BAR5. BAR5 offsets (MP1_BASE 0x16000 +
-   mm*4) still hold the raw register slots for direct-probe purposes. */
+   (BAR5+0x38/0x3C), NOT directly in BAR5. BAR5 slots (MP1_BASE 0x16000 +
+   mm*4) hold raw register slots for direct-probe purposes only. */
 #define AMDBC250_REG_SMC_IND_INDEX      0x00000200  /* SM indirect index    */
 #define AMDBC250_REG_SMC_IND_DATA       0x00000204  /* SM indirect data     */
-#define AMDBC250_REG_MP1_SMN_C2PMSG_66  0x00016A08  /* C2P 66 (msg, 0x16000+0x0282*4) */
-#define AMDBC250_REG_MP1_SMN_C2PMSG_82  0x00016A48  /* C2P 82 (arg, 0x16000+0x0292*4) */
-#define AMDBC250_REG_MP1_SMN_C2PMSG_90  0x00016A68  /* C2P 90 (rsp, 0x16000+0x029A*4) */
-#define AMDBC250_REG_MP1_SMN_P2CMSG_1   0x00016204  /* P2C message 1         */
-#define AMDBC250_REG_MP1_SMN_P2CMSG_33  0x00016284  /* P2C message 33        */
+#define AMDBC250_REG_MP1_SMN_C2PMSG_66  0x00016A08  /* C2P 66 (msg, 0x16000+0x0282*4) - BAR5 slot */
+#define AMDBC250_REG_MP1_SMN_C2PMSG_82  0x00016A48  /* C2P 82 (arg, 0x16000+0x0292*4) - BAR5 slot */
+#define AMDBC250_REG_MP1_SMN_C2PMSG_90  0x00016A68  /* C2P 90 (rsp, 0x16000+0x029A*4) - BAR5 slot */
+#define AMDBC250_REG_MP1_SMN_P2CMSG_1   0x00016204  /* P2C message 1         - BAR5 slot */
+#define AMDBC250_REG_MP1_SMN_P2CMSG_33  0x00016284  /* P2C message 33        - BAR5 slot (reads 0, SMU in SMN) */
 
 /* --- GFX Configuration ---
    Corrected 2026-08-03 (per inc/amdbc250_dream_hw.h): Linux mmGB_ADDR_CONFIG
-   = 0x13DE, BAR5 offset = 0x61D8 (verified), read = 0x61DC. */
+   = 0x13DE, BAR5 offset = 0x61D8 (verified), read = 0x61DC.
+   GB_ADDR_CONFIG is in FREEZE ZONE (0x3400-0x8100), do NOT write on BC-250. */
 #define AMDBC250_REG_GC_USER_PRIM_CONFIG    0x00009B7C  /* Primitive config  */
 #define AMDBC250_REG_GC_USER_RB_BACKEND_DISABLE 0x00009B80
-#define AMDBC250_REG_GB_ADDR_CONFIG         0x000061D8  /* GB address config */
+#define AMDBC250_REG_GB_ADDR_CONFIG         0x000061D8  /* GB address config (READ-ONLY on BC-250) */
 #define AMDBC250_REG_GB_ADDR_CONFIG_READ    0x000061DC  /* GB addr config rd */
 
 /*===========================================================================

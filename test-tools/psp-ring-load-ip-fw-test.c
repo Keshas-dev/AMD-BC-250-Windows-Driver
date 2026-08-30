@@ -50,7 +50,7 @@ typedef struct { UINT32 RegisterOffset; UINT32 Value; } REG_IO;
 
 /* Must mirror the driver's byte layout exactly (Out is a PULONG array):
    driver writes {Result@0, RingPaLo@4, RingPaHi@8, RingSize@12,
-                  C2pmsg64@16, C2pmsg81@20} — no UINT64 member here to avoid
+                  C2pmsg64@16, C2pmsg81@20} ??? no UINT64 member here to avoid
    MSVC padding between Result and RingPa. */
 typedef struct {
     UINT32 Result;
@@ -156,7 +156,7 @@ int main(int argc, char* argv[]) {
     printf("CreateFile OK\n");
 
     /* Map BAR5 (required on Win11 26100 WDM fallback) */
-    typedef struct { UINT64 MmioPhysicalBase; UINT32 MmioSize; UINT32 Flags; } INIT_HW;
+    typedef struct { UINT64 MmioPhysicalBase; UINT32 MmioSize; UINT32 Flags; UINT64 FbPhysicalBase; UINT32 FbSize; } INIT_HW; /* FIX: full 32-byte struct */
     INIT_HW ih; DWORD ret = 0;
     ZeroMemory(&ih, sizeof(ih));
     ih.MmioPhysicalBase = 0xFE800000ULL;

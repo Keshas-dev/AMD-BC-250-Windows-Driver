@@ -55,7 +55,7 @@ static uint32_t SmuQueryParam(uint16_t msg, uint32_t param) {
 }
 
 /* SMU v11.8 PPSMC header (Linux kernel, smu_v11_8_ppsmc.h):
-   PPSMC_Message_Count = 0x3E — valid messages are 0x01 through 0x3D only.
+   PPSMC_Message_Count = 0x3E ??? valid messages are 0x01 through 0x3D only.
    0x3E/0x3F are NOT valid commands (return 0xFFFFFFFF).
    There is NO DisableSmuFeatures/EnableSmuFeatures in v11.8.
    GFXOFF control is baked into firmware, not externally controllable. */
@@ -67,7 +67,7 @@ int main() {
     printf("CreateFile OK\n");
 
     /* Step 1: INIT_HARDWARE to map BAR5 (required on Win11 26100 WDM fallback) */
-    typedef struct { UINT64 MmioPhysicalBase; UINT32 MmioSize; UINT32 Flags; } INIT_HW;
+    typedef struct { UINT64 MmioPhysicalBase; UINT32 MmioSize; UINT32 Flags; UINT64 FbPhysicalBase; UINT32 FbSize; } INIT_HW; /* FIX: full 32-byte struct */
     INIT_HW ih; DWORD ret = 0;
     ZeroMemory(&ih, sizeof(ih));
     ih.MmioPhysicalBase = 0xFE800000ULL;
@@ -104,7 +104,7 @@ int main() {
     /* Step 4: Try safe clock changes */
     printf("\n=== Safe Clock Changes ===\n");
 
-    /* SetSoftMinCclk (0x35) — set minimum GFX clock */
+    /* SetSoftMinCclk (0x35) ??? set minimum GFX clock */
     printf("SetSoftMinCclk(0x35, 20000 = 200 MHz)...\n");
     v = SmuQueryParam(0x35, 20000);
     printf("  Response: 0x%08X\n", v);
@@ -112,7 +112,7 @@ int main() {
     v = SmuQuery(0x37); printf("  GfxFreq after: %u MHz\n", v);
     v = SmuQuery(0x1E); printf("  ActiveWgp: %u\n", v);
 
-    /* SetSoftMaxCclk (0x36) — set maximum GFX clock */
+    /* SetSoftMaxCclk (0x36) ??? set maximum GFX clock */
     printf("\nSetSoftMaxCclk(0x36, 40000 = 400 MHz)...\n");
     v = SmuQueryParam(0x36, 40000);
     printf("  Response: 0x%08X\n", v);
@@ -147,7 +147,7 @@ int main() {
     Sleep(300);
     v = SmuQuery(0x37); printf("  GfxFreq: %u MHz\n", v);
 
-    /* Try RequestActiveWgp (0x18) — valid v11.8 msg, may wake GFX */
+    /* Try RequestActiveWgp (0x18) ??? valid v11.8 msg, may wake GFX */
     printf("\nRequestActiveWgp(0x18)...\n");
     v = SmuQueryParam(0x18, 0);
     printf("  Response: 0x%08X\n", v);
@@ -156,10 +156,10 @@ int main() {
     v = SmuQuery(0x1E); printf("  ActiveWgp: %u\n", v);
 
     /* NOTE: RequestGfxclk(0xE, 1000) set freq to 10 MHz (side effect).
-       This is the overdrive message from Linux — only works in full DPM context.
+       This is the overdrive message from Linux ??? only works in full DPM context.
        Not useful without proper init sequence. */
 
-    /* UnForceGfxFreq (0x3A) — release any forced frequency */
+    /* UnForceGfxFreq (0x3A) ??? release any forced frequency */
     printf("\nUnForceGfxFreq(0x3A)...\n");
     v = SmuQuery(0x3A);
     printf("  Response: 0x%08X\n", v);
@@ -175,3 +175,4 @@ int main() {
     printf("\nDONE\n");
     return 0;
 }
+
