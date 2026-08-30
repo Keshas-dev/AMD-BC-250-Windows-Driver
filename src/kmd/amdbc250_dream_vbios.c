@@ -465,6 +465,25 @@ DreamV3DetectVram(
         DevExt->VisibleVramBytes = DevExt->FbVisibleSize;
     }
     if (DevExt->VisibleVramBytes == 0) {
+        /* Try CMOS UMA_SIZE at 0x90/0xAA (fanoush/bc250_memcfg) — real BIOS setting, e.g. 512M */
+        __try {
+            UCHAR raw[32];
+            for (int i = 0; i < 32; i++) {
+                WRITE_PORT_UCHAR((PUCHAR)(ULONG_PTR)0x72, (UCHAR)(0x90 + i));
+                raw[i] = READ_PORT_UCHAR((PUCHAR)(ULONG_PTR)0x73);
+            }
+            UINT32 sig = *(UINT32*)&raw[0]; /* 0x90 */
+            if (sig == 0x42435041) { /* 'APCB' */
+                UINT16 umaSizeMb = *(UINT16*)&raw[0x1A]; /* 0xAA - 0x90 = 0x1A */
+                if (umaSizeMb >= 256 && umaSizeMb <= 16384 && (umaSizeMb & 0xF) == 0) {
+                    DevExt->VisibleVramBytes = (SIZE_T)umaSizeMb * 1024 * 1024;
+                    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                        "AMDBC250-VBIOS: CMOS UMA_SIZE=%u MB\n", umaSizeMb));
+                }
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    }
+    if (DevExt->VisibleVramBytes == 0) {
         DevExt->VisibleVramBytes = min(
             10ULL * 1024 * 1024 * 1024, DevExt->TotalVramBytes);
     }

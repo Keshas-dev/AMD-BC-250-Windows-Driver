@@ -728,9 +728,9 @@ DreamV3DdiAddDevice(
     DevExt->GrbmGfxIndexOffset = AMDBC250_REG_GRBM_GFX_INDEX;
 
     /* Initialize hardware quirks from Linux driver knowledge */
-    /* BC-250 is UMA: 16GB GDDR6 shared (512KB BAR5 at 0xFE800000, VRAM MC 0xF400000000) */
-    DevExt->VisibleVramBytes = 16ULL * 1024 * 1024 * 1024; /* 16GB shared default, DetectVram will clamp to CMOS UMA_SIZE / 10GB quirk */
-    DevExt->TotalVramBytes = 16ULL * 1024 * 1024 * 1024;   /* 16GB fallback, DetectVram overwrites */
+    /* BC-250 is UMA: 16GB GDDR6 shared, VRAM split configurable via CMOS UMA_SIZE (BIOS 512M) */
+    DevExt->VisibleVramBytes = 0; /* Will be set by DreamV3DetectVram reading CMOS 0x90 UMA_SIZE */
+    DevExt->TotalVramBytes = 0;   /* DetectVram will set from FB_LOCATION / CMOS / fallback */
     DevExt->NumDisplayPipes = 4;  /* DCN 2.1: 4 pipes */
     DevExt->CurrentTemperatureC = 0;
     DevExt->NextGpuVa = 0x100000000ULL; /* GPU VA starts at 4GB */
@@ -3357,23 +3357,10 @@ DreamV3DeviceControl(
     /* --- Get Temp Info --- */
     case 0x80000808: { /* IOCTL_AMDBC250_GET_TEMP_INFO */
         if (outputLen >= sizeof(ULONG) * 4 + sizeof(BOOLEAN)) {
-            LONG liveEdge = DevExt ? DevExt->CurrentTemperatureC : 0;
-            if (DevExt && DevExt->MmioVirtualBase) {
-                PUCHAR mmioTemp = (PUCHAR)DevExt->MmioVirtualBase;
-                ULONG smnEdge = Amdbc250PspSmnRead(mmioTemp, 0x03B10000);
-                if (smnEdge != 0 && smnEdge != 0xFFFFFFFF && smnEdge < 150) {
-                    liveEdge = (LONG)smnEdge;
-                    DevExt->CurrentTemperatureC = liveEdge;
-                } else {
-                    /* Fallback: try SMU Q3 GetCpuTempMax (0x40) */
-                    ULONG resp = 0, rstat = 0;
-                    if (NT_SUCCESS(Amdbc250PspDirectSmuMsg(mmioTemp, 0x02, 0, &resp, &rstat))) { /* TestMessage as liveness, temp via SMN is primary */ }
-                }
-            }
             PLONG TempData = (PLONG)outputBuffer;
-            TempData[0] = liveEdge; /* Edge */
-            TempData[1] = liveEdge + 12; /* Junction */
-            TempData[2] = liveEdge + 5; /* VRM */
+            TempData[0] = DevExt->CurrentTemperatureC; /* Edge */
+            TempData[1] = DevExt->CurrentTemperatureC + 12; /* Junction */
+            TempData[2] = DevExt->CurrentTemperatureC + 5; /* VRM */
             PULONG UData = (PULONG)(TempData + 3);
             *UData = DevExt->PowerState.CurrentFanSpeedPercent;
             PBOOLEAN BData = (PBOOLEAN)(UData + 1);
@@ -3706,31 +3693,13 @@ DreamV3DeviceControl(
     case 0x80000904: { /* IOCTL_AMDBC250_GET_POWER_TELEMETRY */
         if (outputLen >= sizeof(ULONG) * 9) {
             PULONG OutData = (PULONG)outputBuffer;
-            ULONG liveGfxMhz = DevExt ? DevExt->GpuClockMhz : 0;
-            ULONG liveMemMhz = DevExt ? DevExt->MemoryClockMhz : 0;
-            LONG liveTemp = DevExt ? DevExt->CurrentTemperatureC : 0;
-            if (DevExt && DevExt->MmioVirtualBase) {
-                PUCHAR mmioLive = (PUCHAR)DevExt->MmioVirtualBase;
-                ULONG resp = 0, rstat = 0;
-                if (NT_SUCCESS(Amdbc250PspDirectSmuMsg(mmioLive, 0x37, 0, &resp, &rstat)) && rstat == 1 && resp > 0 && resp < 4000) {
-                    liveGfxMhz = resp;
-                    if (DevExt) DevExt->GpuClockMhz = resp;
-                }
-                /* Try SMN edge temp as live fallback (0x03B10000 ~ 45-85C) */
-                {
-                    ULONG smnEdge = Amdbc250PspSmnRead(mmioLive, 0x03B10000);
-                    if (smnEdge != 0 && smnEdge != 0xFFFFFFFF && smnEdge < 150) {
-                        liveTemp = (LONG)smnEdge;
-                    }
-                }
-            }
             OutData[0] = 0; /* PowerMilliwatts (stub) */
             OutData[1] = DevExt->PowerState.PowerLimitWatts;
-            OutData[2] = liveGfxMhz;
-            OutData[3] = liveMemMhz;
+            OutData[2] = DevExt->GpuClockMhz;
+            OutData[3] = DevExt->MemoryClockMhz;
             OutData[4] = DevExt->PowerState.CurrentFanSpeedPercent;
-            OutData[5] = (ULONG)liveTemp;
-            OutData[6] = (ULONG)(liveTemp + 12);
+            OutData[5] = (ULONG)DevExt->CurrentTemperatureC;
+            OutData[6] = (ULONG)(DevExt->CurrentTemperatureC + 12);
             OutData[7] = DevExt->PowerState.ThermalThrottleActive ? 1 : 0;
             OutData[8] = DevExt->ThermalThrottleCount;
             bytesReturned = sizeof(ULONG) * 9;
