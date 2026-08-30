@@ -20,7 +20,7 @@ AMD BC-250 Windows driver project by Keshas. Goal: fully working GPU driver for 
 
 ### F:\AMD Hybrid Package (2026-08-27)
 - **Source:** `F:\AMD` — AMD Adrenalin 23.9.1 + Radeon ID Community (Amernime Zone) hybrid WDDM package
-- **Fixes applied 2026-08-30:** MultiParse INF `16299→26200` (Win11 25H2/b26200) + `DEV_13FE` BC-250 entry, `u0395510.cat` regenerated via Inf2Cat, `KMD_EnableDisplayableSupport=1` (Mode 1, `GPUDisplayOne`) — see [docs/AMD_Hybrid.md](docs/AMD_Hybrid.md)
+- **Fixes applied 2026-08-30:** MultiParse INF `16299→26200` (Win11 25H2/b26200) + `DEV_13FE` BC-250 entry, `u0395510.cat` regenerated via Inf2Cat, `KMD_EnableDisplayableSupport=1` (Mode 1, `GPUDisplayOne`), Mesa/OpenGL vendor switch via `glmesa_dslink` + `ATIVaxyLinked` — see [docs/AMD_Hybrid.md](docs/AMD_Hybrid.md)
 
 ---
 

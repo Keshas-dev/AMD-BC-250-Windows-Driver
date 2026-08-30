@@ -299,6 +299,7 @@ Infrastructure variables:
 - **Registry import system** — .dat files for REG.EXE IMPORT
 - **Parameter query system** — Read current registry state
 - **Installer infrastructure** — SetupBIN, CoInst, ATILib, etc.
+- **Mesa / OpenGL vendor switching** — `glmesa_dslink_main/cmd` + `ATIVaxyLinked.cmd` (34625 lines) + `gl_dslink_vndr.cmd` — switches ICD vendor (Mesa/RADV vs AMDVLK) via DSLink + devcon disable/enable
 - **ConEmu terminal** — Console emulator with WSL bridge
 - **Snappy Driver Installer** — Alternative driver installer
 
