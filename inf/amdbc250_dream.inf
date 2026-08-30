@@ -184,6 +184,20 @@ HKR,, DisableVBS,              %REG_DWORD%,    1       ; Disable Virtualization-
 HKR,, DisableHVCI,             %REG_DWORD%,    1       ; Disable Hypervisor Code Integrity
 HKR,, PlatformFirst,           %REG_DWORD%,    1       ; PSP initializes before OS
 
+; Hybrid-style early registry (like F:\AMD GPUDisplayOne + WGP/CU) — read before StartDevice
+HKR,, KMD_EnableDisplayableSupport, %REG_DWORD%, 1
+HKR,, ForceWGPmode,            %REG_DWORD%,    1
+HKR,, forceCUmode,             %REG_DWORD%,    1
+HKR,"UMD", ForceWGPmode,       %REG_SZ%,       "1"
+HKR,"UMD\DXX", ForceWGPmode,   %REG_SZ%,       "1"
+HKR,"UMD\DXC", ForceWGPmode,   %REG_SZ%,       "1"
+HKR,"UMD", forceCUmode,        %REG_SZ%,       "1"
+HKLM,"SYSTEM\CurrentControlSet\Services\MSFTProxy\WMIC", DisplayableSupport, %REG_SZ%, "_2_"
+HKLM,"SYSTEM\CurrentControlSet\Services\MSFTProxy\WMIC", WGPMode, %REG_SZ%, "_2_"
+HKLM,"SYSTEM\CurrentControlSet\Services\MSFTProxy\WMIC", CUMode, %REG_SZ%, "_2_"
+HKLM,"SYSTEM\CurrentControlSet\Services\atikmdag", KMD_EnableDisplayableSupport, %REG_DWORD%, 1
+HKLM,"SYSTEM\CurrentControlSet\Services\atikmdag", ForceWGPmode, %REG_DWORD%, 1
+
 ;-----------------------------------------------------------------------
 ; Strings
 ;-----------------------------------------------------------------------
