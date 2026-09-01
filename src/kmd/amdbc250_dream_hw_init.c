@@ -145,45 +145,8 @@ DreamV3HwInitialize(
                    "AMDBC250-DREAM-V4.3: [STEP 0b] PSP firmware loaded OK\n"));
     }
 
-    /* Step 0c: WGP unlock (SPI_PG/CC_ARRAY/RLC_PG) — duggasco 40CU method
-     * Must happen early after BAR5 mapping, before SOS locks registers.
-     * CC=0 (clear harvest mask), SPI=0x1F, RLC=0x1F per shader array bank.
-     * SEH-protected: GRBM_GFX_INDEX writes can BSOD on BC-250. */
-    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-                "AMDBC250-DREAM-V4.3: [STEP 0c] WGP unlock (SPI_PG/CC_ARRAY/RLC_PG)\n"));
-    if (MaxStep != 0 && 0 > MaxStep) { } else {
-    if (DevExt->MmioVirtualBase != NULL)
-    {
-        PUCHAR bar5 = (PUCHAR)DevExt->MmioVirtualBase;
-        /* Per-bank GRBM_GFX_INDEX values (Linux gfx10 layout: SH=bits 15:8, SE=bits 23:16) */
-        static const ULONG bankSel[4] = { 0x00000000, 0x00000100, 0x00010000, 0x00010100 };
-        ULONG spiBefore = READ_REGISTER_ULONG((PULONG)(bar5 + 0x5C3C));
-        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-                    "AMDBC250-DREAM-V4.3: [STEP 0c] SPI_PG before = 0x%08X\n", spiBefore));
-        __try {
-            for (int b = 0; b < 4; b++)
-            {
-                WRITE_REGISTER_ULONG((PULONG)(bar5 + 0x34D0), bankSel[b]); /* GRBM_GFX_INDEX */
-                WRITE_REGISTER_ULONG((PULONG)(bar5 + 0x9C1C), 0x00000000); /* CC = 0 (clear harvest) */
-                WRITE_REGISTER_ULONG((PULONG)(bar5 + 0x5C3C), 0x0000001F); /* SPI_PG = 0x1F */
-                WRITE_REGISTER_ULONG((PULONG)(bar5 + 0x3D64), 0x0000001F); /* RLC_PG = 0x1F */
-            }
-            WRITE_REGISTER_ULONG((PULONG)(bar5 + 0x34D0), 0x15000000); /* broadcast */
-            ULONG spiAfter = READ_REGISTER_ULONG((PULONG)(bar5 + 0x5C3C));
-            ULONG ccAfter  = READ_REGISTER_ULONG((PULONG)(bar5 + 0x9C1C));
-            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-                        "AMDBC250-DREAM-V4.3: [STEP 0c] WGP unlock DONE: SPI_PG=0x%08X CC=0x%08X\n", spiAfter, ccAfter));
-        } __except(EXCEPTION_EXECUTE_HANDLER) {
-            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
-                        "AMDBC250-DREAM-V4.3: [STEP 0c] WGP unlock FAILED (SEH caught)\n"));
-        }
-    }
-    else
-    {
-        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
-                    "AMDBC250-DREAM-V4.3: [STEP 0c] SKIP — no BAR5 mapping\n"));
-    }
-    }
+    /* Step 0c: WGP unlock moved to after PSP+GART/VM — Linux does gfx_v10_0_get_cu_info after GART/VM+TOS ring.
+     * Early unlock before GART fails (SOS gate). See post-PSP unlock at Step 12b. */
 
     /* Step 1: Memory controller (GDDR6) */
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
@@ -468,6 +431,33 @@ DreamV3HwInitialize(
     } else {
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
                    "AMDBC250-DREAM-V4.3: [STEP 12/13] SOS not found — continuing\n"));
+    }
+
+    /* Step 12b: WGP unlock — Linux gfx_v10_0_get_cu_info() timing: after GART/VM + PSP ring, before RLC */
+    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+               "AMDBC250-DREAM-V4.3: [STEP 12b] WGP unlock (SPI_PG/CC/RLC) — post-GART/PSP\n"));
+    if (DevExt->MmioVirtualBase != NULL) {
+        PUCHAR bar5b = (PUCHAR)DevExt->MmioVirtualBase;
+        static const ULONG bankSel2[4] = { 0x00000000, 0x00000100, 0x00010000, 0x00010100 };
+        ULONG spiBefore2 = READ_REGISTER_ULONG((PULONG)(bar5b + 0x5C3C));
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                    "AMDBC250-DREAM-V4.3: [STEP 12b] SPI_PG before = 0x%08X\n", spiBefore2));
+        __try {
+            for (int b = 0; b < 4; b++) {
+                WRITE_REGISTER_ULONG((PULONG)(bar5b + 0x34D0), bankSel2[b]);
+                WRITE_REGISTER_ULONG((PULONG)(bar5b + 0x9C1C), 0x00000000);
+                WRITE_REGISTER_ULONG((PULONG)(bar5b + 0x5C3C), 0x0000001F);
+                WRITE_REGISTER_ULONG((PULONG)(bar5b + 0x3D64), 0x0000001F);
+            }
+            WRITE_REGISTER_ULONG((PULONG)(bar5b + 0x34D0), 0x15000000);
+            ULONG spiAfter2 = READ_REGISTER_ULONG((PULONG)(bar5b + 0x5C3C));
+            ULONG ccAfter2  = READ_REGISTER_ULONG((PULONG)(bar5b + 0x9C1C));
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                        "AMDBC250-DREAM-V4.3: [STEP 12b] WGP unlock DONE: SPI_PG=0x%08X CC=0x%08X\n", spiAfter2, ccAfter2));
+        } __except(EXCEPTION_EXECUTE_HANDLER) {
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+                        "AMDBC250-DREAM-V4.3: [STEP 12b] WGP unlock FAILED (SEH)\n"));
+        }
     }
 
     /* Step 13: RLC initialization (power/scheduler) */

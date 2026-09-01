@@ -1,0 +1,50 @@
+;
+; Early WGP Unlock driver for AMD PSP/CCP 1022:143E
+;
+[Version]
+Signature="$Windows NT$"
+Class=System
+ClassGuid={4D36E97D-E325-11CE-BFC1-08002BE10318}
+Provider=%ManufacturerName%
+DriverVer=08/30/2026,1.0.0.0
+CatalogFile=earlywgp.cat
+PnpLockdown=1
+
+[DestinationDirs]
+DefaultDestDir = 12
+
+[SourceDisksNames]
+1 = %DiskName%,,,
+
+[SourceDisksFiles]
+earlywgp.sys = 1
+
+[Manufacturer]
+%ManufacturerName% = Standard,NTamd64
+
+[Standard.NTamd64]
+%DeviceDesc% = EarlyWgp_Install, PCI\VEN_1022&DEV_143E
+
+[EarlyWgp_Install]
+CopyFiles = EarlyWgp_CopyFiles
+
+[EarlyWgp_CopyFiles]
+earlywgp.sys
+
+[EarlyWgp_Install.Services]
+AddService = earlywgp, 0x00000002, EarlyWgp_ServiceInstall
+
+[EarlyWgp_ServiceInstall]
+DisplayName    = %ServiceDesc%
+Description    = %ServiceDesc%
+ServiceType    = 1
+StartType      = 0
+ErrorControl   = 1
+ServiceBinary  = %12%\earlywgp.sys
+LoadOrderGroup = System Bus Extender
+
+[Strings]
+ManufacturerName = "BC250 Early WGP"
+DeviceDesc = "AMD PSP/CCP Early WGP Unlock (1022:143E)"
+ServiceDesc = "BC250 Early WGP Unlock"
+DiskName = "Early WGP Disk"
