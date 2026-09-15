@@ -57,9 +57,20 @@ static uint32_t DrvR32(uint32_t off)
     return 0xFFFFFFFFu;
 }
 
-/* SMN transport via NBIO BAR5 0x38/0x3C (same on both drivers). */
-static void smnW(uint32_t a, uint32_t v){ DrvW32(0x38,a); DrvW32(0x3C,v); }
-static uint32_t smnR(uint32_t a){ DrvW32(0x38,a); DrvR32(0x38); return DrvR32(0x3C); }
+/* SMN transport — DF 00:00.0 B8/BC primary (vienas APU, DF šeimininkas), BAR5 0x38/0x3C fallback.
+ * Linux Bc250PciTransport naudoja DF full 32-bit; ms Testavom 2026-09-02 PCI==BAR5 (IOCTL 0x80000C30). */
+#define IOCTL_PCI_SMN_DF 0x80000C30
+typedef struct{ uint32_t SmnAddress; uint32_t SmnData; uint32_t IsWrite; uint32_t Result; uint32_t Bus; uint32_t Device; uint32_t Function; uint32_t Method; uint32_t Bar5SmnData; } PCI_SMN_DF;
+static void smnW(uint32_t a, uint32_t v){
+    PCI_SMN_DF p={0}; DWORD br=0; p.SmnAddress=a; p.SmnData=v; p.IsWrite=1;
+    if(DeviceIoControl(g_h, IOCTL_PCI_SMN_DF, &p,sizeof(p), &p,sizeof(p), &br,NULL) && p.Result) return;
+    DrvW32(0x38,a); DrvW32(0x3C,v);
+}
+static uint32_t smnR(uint32_t a){
+    PCI_SMN_DF p={0}; DWORD br=0; p.SmnAddress=a; p.IsWrite=0;
+    if(DeviceIoControl(g_h, IOCTL_PCI_SMN_DF, &p,sizeof(p), &p,sizeof(p), &br,NULL) && p.Result) return p.SmnData;
+    DrvW32(0x38,a); DrvR32(0x38); return DrvR32(0x3C);
+}
 
 static int BackendOpen(void)
 {

@@ -6,8 +6,11 @@
 static HANDLE h;
 static BOOL W32(uint32_t o, uint32_t v) { AMDBC250_IOCTL_REG_ACCESS r; DWORD b; r.RegisterOffset=o; r.Value=v; return DeviceIoControl(h,IOCTL_AMDBC250_WRITE_REG,&r,sizeof(r),&r,sizeof(r),&b,NULL); }
 static uint32_t R32(uint32_t o) { AMDBC250_IOCTL_REG_ACCESS r; DWORD b; r.RegisterOffset=o; r.Value=0; if(DeviceIoControl(h,IOCTL_AMDBC250_READ_REG,&r,sizeof(r),&r,sizeof(r),&b,NULL)) return r.Value; return 0xFFFFFFFF; }
-static void smnW(uint32_t a,uint32_t v){W32(0x38,a);W32(0x3C,v);}
-static uint32_t smnR(uint32_t a){W32(0x38,a);R32(0x38);return R32(0x3C);}
+/* DF primary (00:00.0 B8/BC), BAR5 fallback */
+#define IOCTL_PCI_SMN 0x80000C30
+typedef struct{uint32_t a;uint32_t d;uint32_t w;uint32_t r;uint32_t b;uint32_t dev;uint32_t f;uint32_t m;uint32_t bar5;} PSMN;
+static void smnW(uint32_t a,uint32_t v){ PSMN p={0};DWORD br=0;p.a=a;p.d=v;p.w=1; if(DeviceIoControl(h,IOCTL_PCI_SMN,&p,sizeof(p),&p,sizeof(p),&br,NULL)&&p.r) return; W32(0x38,a);W32(0x3C,v); }
+static uint32_t smnR(uint32_t a){ PSMN p={0};DWORD br=0;p.a=a;p.w=0; if(DeviceIoControl(h,IOCTL_PCI_SMN,&p,sizeof(p),&p,sizeof(p),&br,NULL)&&p.r) return p.d; W32(0x38,a);R32(0x38);return R32(0x3C); }
 
 static int q0(uint32_t msg,uint32_t arg){
     smnW(0x03B10A68,0); smnW(0x03B10A48,arg); smnW(0x03B10A08,msg);
