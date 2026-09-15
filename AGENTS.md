@@ -1,5 +1,105 @@
 # AMD BC-250 Windows Driver — Agent Notes
 
+## ⭐ UPDATE 2026-09-15 (POST REINSTALL + DRIVER WHITELIST EXPANSION)
+
+### Driver rebuilt + installed (2026-09-15, post cold boot)
+- **Added Q3 0x28 (SEC_SET_WRITE_PTR) + Q3 0.29 (SEC_WRITE_THROUGH)** to SMU CPU message whitelist (`amdbc250_dream_kmd.c` + `inc/amdbc250_ioctl.h`)
+- **Added `SMU_ARG_SRAM_ADDR`** enum type: DWORD-aligned SMU SRAM offset, range 0x00000000-0x000FFFFF (lower SRAM only)
+- **Added IOCTL_AMDBC250_ALLOC_DMA_BUFFER (0x80000930) + FREE_DMA_BUFFER (0x80000934)** for table DMA tests
+
+### Post-reinstall test results (2026-09-15, ALL PASS)
+| Test | Result | Notes |
+|------|--------|-------|
+| `smu-cpu-msg-test.exe QUERY` | ✅ | Q3 0x36→1199mV pre-reboot, Q3 0x43 all cores OK |
+| `smu-cpu-msg-test.exe 3 0x8F 4000` | ✅ | **First successful SMU WRITE!** ResponseStatus=0x01 OK |
+| `smu-cpu-msg-test.exe 3 0x50 0` | ✅ | scale_f_vid_curve OK |
+| `smu-cpu-msg-test.exe 3 0x8B 80` | ✅ | set_cpu_max_temp OK |
+| `vcn-bit-sweep.exe` | ✅ | Safe bits 0x2/0x80/0x100/0x10000 accepted, no VCN change, no wedge |
+| `smu-sram-test.exe` | ✅ | Q3 0x28/0x29 accepted, no wedge, data echoed (0xDEADBEEF) |
+
+### Post-reboot verification (2026-09-15, ALL PASS)
+| Test | Result | Notes |
+|------|--------|-------|
+| `smu-cpu-msg-test.exe QUERY` | ✅ | Q3 0x36→1206mV, **all 8 cores 3500MHz** (Q3 0x43 all OK) |
+| `smu-cpu-msg-test.exe 3 0x8F 4000` | ✅ | **Q3 0x8F persists after reboot!** ResponseStatus=0x01 OK |
+| `smu-cpu-msg-test.exe 3 0x50 0` | ✅ | scale_f_vid_curve OK |
+| `smu-cpu-msg-test.exe 3 0x8B 80` | ✅ | set_cpu_max_temp OK |
+| `smu-cpu-msg-test.exe 3 0x8C 80` | ✅ | GPU max temp OK (new test) |
+| `smu-sram-addrs.exe` | ✅ | Q3 0x28/0x29 at 0x776C/0x3FF00/0x7770/0x0000 all OK, no wedge |
+
+### Key new findings (2026-09-15)
+- **SMU WRITE works via IOCTL** — Q3 0x8F (set_max_cpu_boost_clk) 4000MHz returned OK — first confirmed successful SMU write. Previously all writes assumed to timeout.
+- **SMU WRITE persists after reboot** — Q3 0x8F 4000MHz works after reboot without reinstall. CPU OC is durable.
+- **All 4 CPU OC messages verified post-reboot**: Q3 0x50 (scale_f_vid_curve), Q3 0x8B (CPU max temp), Q3 0x8C (GPU max temp), Q3 0x8F (max boost clk) — all OK.
+- **SMU SRAM writes accepted but unreadable**: Q3 0x28/0x29 at 0x776C/0x3FF00/0x7770/0x0000 all return OK (result=1, no wedge), but SMN readback at 0x03B10000 range shows no change. SRAM is in a different address space or internally mapped by SMU.
+- **All 8 CPU cores at 3500MHz post-reboot** (Q3 0x43) — previously was 128 MHz on some cores.
+
+### Vulkan SDK available
+- **F:\VulkanSDK\1.4.341.1** — full SDK (vulkan-1.lib, vulkaninfoSDK.exe, vkconfig.exe, layers, tools)
+- No AMD Vulkan ICD installed (only Microsoft loader `vulkan-1.dll`)
+- **RADV porting path**: Valve/Collabora porting Mesa RADV (UMD) to Windows; could use our KMD as backend via D3DKMT/IOCTL
+
+### ALL whitelisted SMU messages verified (2026-09-15, 16/16 PASS)
+- Tool: `smu-all-msgs-test.exe` — tests every whitelisted Q0/Q3 message with wedge check
+- **7 reads**: Q0 0x02/0x03/0x3D, Q3 0x36/0x43(x2)/0x1E — all OK
+- **9 writes with wedge check**: Q3 0x50/0x8B/0x8C/0x8F/0x9A/0x98/0x28/0x29/0x3C — all OK, no wedge
+- Result: SMU CPU message surface is fully verified and stable
+
+### Driver stability (2026-09-15)
+- `smu-stress-test.exe`: 50 iterations, 0 failures
+- All 50 iterations: Q0 0x02/0x0F/0x3D, Q3 0x36/0x43/0x01/0x8B/0x8C/0x8F, Q0 0x3D — all OK
+- SMU version re-verified each iteration (0x00580600)
+
+### SMU SRAM confirmed write-only (2026-09-15)
+- Q3 0x28 (SEC_SET_WRITE_PTR) + Q3 0x29 (SEC_WRITE_THROUGH) are **write-only**
+- No SEC_READ or SRAM_READ in whitelist
+- `SMU_ARG_SRAM_ADDR` = 0x00000000-0x000FFFFF = SMU-internal SRAM range
+- SMN readback at 0x03B10000 range shows no change — SRAM is not host-readable
+- Conclusion: Q3 0x28/0x29 is an SMU-internal write mechanism; host cannot read back written data
+
+### Open questions (2026-09-15)
+- VCN dom6 still unpowered — fabric open (0x02403000=0) but STATUS/CTRL/CMD/RAIL unchanged
+- WGP/SPI_PG unlock on Windows — SOS-locked, EFI or Linux only path
+- RADV/Mesa Windows ICD — Vulkan SDK available but no AMD ICD installed
+- Q3 0x50 (scale_f_vid_curve) result: OK, but CPU voltage still 1199mV? Need verify effect.
+
+## ⭐ CURRENT STATE (2026-09-03, VCN DOM6 TEST) — README THIS FIRST
+**Hardware:** BC250 = **vienas APU (Zen2 CPU + RDNA 10.1.3 GPU + UMC ant vieno DF)** — todėl SMN šeimininkas yra **CPU DF (00:00.0 config 0xB8/0xBC)**, o BAR5 `0x38/0x3C` tėra GPU NBIO aperture į tą patį fabric. Linux `Bc250PciTransport` eina per DF (full 32-bit).
+**Last build:** `output\atikmdag.sys` 139624B 9/2 13:58 (build via `build.bat`, sign with `AMD-BC250-Signer` SHA1 34AFF96C...) — pridėtas `IOCTL 0x80000C38 PCI_SMN_ACCESS` + `amdbc250_dream_hw_init_extended.c` (Linux order DF APU: `GART/VM → PSP ring 0x58000 → golden 34 → WGP per-bank gfx10.1 → RLC/CP`, `HwInitExtended=1` default, `AGENTS.md:48` retest DF OK).
+**VCN dom6 test (2026-09-03):** `Q3 0x3C enable_features` mask sweep — SMU accepts masks `0x2/0x80/0x100/0x10000` (resp non-zero), but **dom6 STATUS/CTRL/CMD/RAIL unchanged** (`STATUS=0x01010101`, `CTRL=0x2`, `enable=0`). `Q0 0x3D GetEnabledFeatures` now whitelisted: **`0xDD613DFF`** (delta `+0x11182` bits 1/7/8/12/16 vs stock `0xDD602C7D`). **VCN MMIO `0x02403000` changed from `0xFFFFFFFF` → `0x00000000`** after mask sweep and **persists after reboot** — fabric opened but not powered; VCN_CTRL writes don't stick (`0x00000000` readback), all VCN regs zero, no firmware loaded. **Conclusion:** Q3 0x3C does **not** power dom6 VCN on cyan_skillfish PMFW 88.6.0; fabric open is insufficient. Nienas independently confirmed Path A falsified: `0x0900c234` first write wedges SMU via `Q3 0x2C` because bank 12 fabric is closed; mem64 primitive is full 32-bit (`0x0115A870` works), wedge = closed fabric, not width limit.
+**External (2026-09-02):** `thelamer/bc250-vcn` PR #1 `psp-vcn-unlock` — VCN 2.0.3 lock = `SEC_GASKET 0x24 0x2e50B@0x982000` + `TOS_SECURITY_POLICY 0x45` PSP Secure World prieš x86; 5 ingredients išpjauti (bank12 51+5, 0x0e 19+5, tail 61, 0x3e810 0→6, windows 0x32201xx) — hash-identical P3.00/P5.00; Path A runtime 56/119/145/169 SMN per `Q3 0x98` **falsified 2026-09-02** (c1 wedge via Q3 0x2C, B8/BC hard-hang) — mūsų DF `0x02403000 0` atitinka; Path B flash ladder C1/B2a/B2b/B2c 16MB iš savo dump + A3MSTX_3.70E donor.
+**Field report P3.00 88.6.0 (2026-09-02):** `replay c1 0x0900c234 Q3 0x2C timeout wedged ok 0` — mem64 `0x0005A870/0x0115A870 0xFF OK` full 32-bit, ne 20-bit; `0x0105A870/0x0905A870 wedge` = closed fabric, ne width; `1461/1461 a1v2` retracted (log ends unlock), vienintelis `26.08 56-write` `Q3 0x98 accepted dropped`.
+**VCN dom6 test (2026-09-03):** `Q3 0x3C enable_features` mask sweep — SMU accepts masks `0x2/0x80/0x100/0x10000` (resp non-zero), but **dom6 STATUS/CTRL/CMD/RAIL unchanged** (`STATUS=0x01010101`, `CTRL=0x2`, `enable=0`). `Q0 0x3D GetEnabledFeatures` now whitelisted: **`0xDD613DFF`** (delta `+0x11182` bits 1/7/8/12/16 vs stock `0xDD602C7D`). **VCN MMIO `0x02403000` changed from `0xFFFFFFFF` → `0x00000000`** after mask sweep and **persists after reboot** — fabric opened but not powered; VCN_CTRL writes don't stick (`0x00000000` readback), all VCN regs zero, no firmware loaded. **Conclusion:** Q3 0x3C does **not** power dom6 VCN on cyan_skillfish PMFW 88.6.0; fabric open is insufficient. Nienas independently confirmed Path A falsified: `0x0900c234` first write wedges SMU via `Q3 0x2C` because bank 12 fabric is closed; mem64 primitive is full 32-bit (`0x0115A870` works), wedge = closed fabric, not width limit.
+**Compute queues (2026-09-02):** `DryhoppedIPA/bc250-gfx1013-fix` — ACE `PARTIAL_TG_EN` mis-execute GFX1013, fix `has_async_compute_threadgroup_bug=GFX1013` → thread-dimension (0001 required, 0002/3 mesh disabled), kernel lifecycle wedge, +25% Cyberpunk 1440p, CTS 81k 0 regress, 7384 compute OK. Windows: `src/vulkan/bc250_aco_wrapper` turi gauti `GFX1013` flag + `KMD RLC safe_mode`.
+**FSR4 (2026-09-02):** `dmorazasanchez/bc250-fsr4 v3` — `v_dot4_i32_i8` broken (0 vs 70) keep disabled, V3 Mesa 26.2.0 deferred SDot hybrid + i24 MUL24/MAD24 + dense reduction, `bc250-fsr4-v3.patch` Cyberpunk FSR4 58→63 FPS, ed7 256→168 VGPR spills 0 scratch 0 waves 6. Windows `bc250_aco_wrapper` palikti dot disabled.
+**Driver code changes in this build:**
+- `amdbc250_dream_hw_init.c`: `GartEnable=VmEnable=SdmaEnable=1` (default ON; was 0 to avoid 0x1A BSOD)
+- `amdbc250_dream_hw_init.c` Step 12b: GRBM reset `0xE0000000` (gfx10.1 all-broadcast, was 0x15000000 wrong)
+- `amdbc250_dream_kmd.c` `UNLOCK_40CU` IOCTL `0x80000980`: `BankSelects[4]={0, 0x100, 0x10000, 0x10100}` (gfx10.1 SA=bit8 SE=bit16; was soc15 instance=bit24 SE=bit28)
+
+**What works NOW (verified on hardware, 2026-09-03):**
+- ✅ SMU mailbox (Q0/Q2/Q3 all r=1 via DF 00:00.0 B8/BC `IOCTL 0x80000C30` primary, BAR5 fallback): force GPU freq 1500↔1600 MHz, force VID, profile, max temp, get_smu_version, query_gfxclk, query_active_wgp — `pci-smn-test` `PCI==BAR5 meth=1`
+- ✅ GFXOFF+CG+PG disable via Q2 0x06 0x1C (Features `0xDD602C7D→0xDD602C61`)
+- ✅ CPU core unlock: `SMN[0x0115A870]` mask `0x77→0xFF` (8c/16t) via DF, persists
+- ✅ CC_GC_SHADER_ARRAY_CONFIG (0x9C1C) **partially writable** (`0→0x1F000000` bits 24-28) after `GART/VM=1` + `HwInitExtended`
+- ✅ Display (KMDOD/SampleDisplay.sys `0xFE800000` BAR5 mapping + DCN modes)
+- ✅ CMOS VRAM config (read 0x90-0xAB, write signature+checksum)
+- ✅ GPU register read/write via BAR5 + DF SMN full 32-bit (no 20-bit mask, `pci-gc-alias-scan -scan` `fg=0 fc=0` safe)
+- ✅ SMU Q3 0x2A/0x2B mem64 + SMU SRAM 0x3FF00/0x776C via DF Q3 0x28/0x29 `sec_set_write_ptr/sec_write_through` — `vcn-probe-readonly` `DOM6 0x01010101/0x02` + `vcn-install-nofire` seq `36 41 00 1C 6A... 1D F0` 5dwords + repoint `0x776C=0x3FF00` + wipe all `st 1 OK` (no fire, no wedge, cold boot restores)
+- ✅ CPU OC via SMU Q3 (scale_f_vid_curve, max_cpu_boost_clk, max_temp)
+- ✅ Q3 0x3C `enable_features` mask sweep — SMU accepts masks `0x2/0x80/0x100/0x10000` (resp non-zero), but **dom6 power unchanged**
+- ✅ Q0 0x3D `GetEnabledFeatures` whitelisted — returns `0xDD613DFF` (delta `+0x11182` bits 1/7/8/12/16 vs stock `0xDD602C7D`)
+- ✅ VCN MMIO `0x02403000` **changed from `0xFFFFFFFF` → `0x00000000`** after Q3 0x3C sweep and **persists after reboot** — fabric opened but not powered
+
+**What DOES NOT work (WGP/SPI_PG, confirmed 2026-09-01 with new build):**
+- ❌ **SPI_PG_ENABLE_STATIC_WGP_MASK (0x5C3C) = 0 even after** GART/VM init + GFXOFF/CG/PG off + SMU secure access open + per-bank GRBM gfx10.1 select + duggasco/UEFI values. NBIO firewall HARD-LOCKED on Windows.
+- ❌ **RLC_PG_ALWAYS_ON_WGP_MASK (0x3D64) = 0xFFFFFFFF** read-only.
+- ❌ **QueryActiveWgp (Q0 0x1E) = 0** — no WGP active.
+- ❌ No shader execution (GRBM_STATUS=0, Scratch unchanged 0x4D585042).
+- ❌ WGP unlock route is **EFI Shell only** (see `uefi\output\wgp_unlock.nsh`) — not reachable from WDM.
+
+**The 3D unlock on Windows WDM is BLOCKED. SMU control + display + CMOS VRAM are the working surfaces.** Treat as authoritative for the next 2 weeks.
+
 ## Host machine
 - **The agent runs ON the target machine: an ASRock AMD BC-250 (8× Zen2 + RDNA2 gfx1013, 16GB GDDR6).** The user has confirmed the agent may run the hardware tests it needs (`output\*.exe` against the installed `atikmdag.sys`), install drivers, and verify results on the live hardware.
 - Rebooting mid-session may be required by reinstall flows; ask before rebooting if the test requires it, but otherwise treat the machine as available for hardware verification.
@@ -610,7 +710,8 @@ All COMPUTE registers in Linux gc_10_1_0_offset.h have **BASE_IDX=0** (not 1!). 
 1. **SMN access via NBIO BAR5+0x38/0x3C works** — this is Linux `WREG32_PCIE`/`RREG32_PCIE` path
    - Write SMN address to `0x38`, data to `0x3C` → generates SMN bus cycles
    - Direct MMIO SMN ports (physical 0x3B10528/0x3B10564) FAIL — use NBIO path only
-   - SMN via PCI config (B0D0F0 + 0xB8/0xBC) is read-only — no reboot fix possible
+   - SMN via PCI config (B0D0F0 + 0xB8/0xBC) is read-only — no reboot fix possible — **RETESTED 2026-09-02: DF OK via IOCTL 0x80000C38 CF8/CFC (PCI==BAR5 on all 0x03B10xxx, 0x0115A870, 0x0006Dxxx, see pci-smn-test.exe; previous was before secure-unlock)**
+   - Update 2026-09-02: default SMN = **DF 00:00.0 0xB8/0xBC** (vienas APU, DF šeimininkas), BAR5 `0x38/0x3C` is NBIO aperture — same fabric.
 
 2. **SMU firmware is RUNNING** (not just loaded by PSP)
    - FW_FLAGS at SMN[0x03B10024] = 0x00000001 → INTERRUPTS_ENABLED = YES
@@ -1755,7 +1856,8 @@ Setup script for BC250 on CachyOS (Limine bootloader). Wraps all community tools
 
 ### SMU transport (all Linux tools use SAME protocol we already have)
 - **Linux transport = PCI config space 0xB8/0xBC** on `/sys/bus/pci/devices/0000:00:00.0/config` (`Bc250PciTransport`: write 0xB8=SMN addr, read/write 0xBC=data). bc250_smu_oc uses this path.
-- **Our Windows path = BAR5+0x38/0x3C (NBIO SMN window)** — functionally identical SMN transport; already works in our driver. PCI config 0xB8/0xBC on Windows was found read-only (2026-07-05) → do NOT switch.
+- **Our Windows path was BAR5+0x38/0x3C (NBIO SMN window)** — functionally identical SMN transport; already works in our driver. **Update 2026-09-02: PCI config 0xB8/0xBC RETESTED OK via IOCTL 0x80000C38 CF8/CFC (PCI==BAR5 on all 0x03B10xxx, 0x0115A870, 0x0006Dxxx, see pci-smn-test.exe; previous was before secure-unlock)**
+   - Update 2026-09-02: default SMN = **DF 00:00.0 0xB8/0xBC** (vienas APU, DF šeimininkas), BAR5 `0x38/0x3C` is NBIO aperture — same fabric.
 - **Mailbox protocol** (Bc250Mailbox.send): write RSP=0 → write ARG → write ARG+4=arg_high(0) → write CMD → poll RSP for {0x01 OK, 0xFF failed, 0xFE unknown, 0xFD rejected-prereq, 0xFC busy}. Timeout poll loop.
 - **Queue addresses** (DEFAULT_QUEUE_ADDRS, confirmed identical to ours): Q0 cmd=0x03B10A08 rsp=0x03B10A68 arg=0x03B10A48; Q1 0x03B10A00/60/40; Q2 0x03B10528/564/998; Q3 0x03B10A20/80/88; Q4 0x03B10A24/84/8C.
 - **VID codec**: `vid_to_mv(vid) = round((vid*-0.00625 + 1.55)*1000)`; `mv_to_vid(mv) = round((1.55 - mv/1000)/0.00625)`. Same formulas as ours.

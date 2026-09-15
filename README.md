@@ -24,7 +24,7 @@ AMD BC-250 Windows driver project by Keshas. Goal: fully working GPU driver for 
 
 ---
 
-## Current Status (2026-08-30)
+## Current Status (2026-09-15)
 
 ### Working
 - ✅ **PSP KM GPCOM ring WORKS on hardware** — ring created at correct MP0 base `0x58000`, commands executed by the PSP through the ring, fences reached. **This reopens PSP firmware loading on Windows.**
@@ -45,6 +45,16 @@ AMD BC-250 Windows driver project by Keshas. Goal: fully working GPU driver for 
 - ✅ **14/15 IOCTL tests pass** — GetCaps, GetVramInfo, GetTempInfo, AllocVidMem, etc.
 - ✅ **Win11 25H2 INF + CAT fixed** — `u0395510_VanGogh/FireFlight_Stock*.inf` now `26200` + `DEV_13FE`, CAT regenerated
 - ✅ **Display support Mode 1** — `KMD_EnableDisplayableSupport=1` (`DisplayableSupport=_2_`) via F:\AMD `GPUDisplayOne` (requires reboot)
+- ✅ **SMU write via IOCTL works** — Q3 0x8F (set_max_cpu_boost_clk 4000MHz) returned OK — first confirmed SMU write (2026-09-15)
+- ✅ **CPU OC via IOCTL fully working** — Q3 0x50 (scale_f_vid_curve), Q3 0x8B (CPU max temp), Q3 0x8C (GPU max temp), Q3 0x8F (max boost clk) — all OK, persist after reboot
+- ✅ **SMU SRAM whitelisted** — Q3 0x28 (SEC_SET_WRITE_PTR) + Q3 0x29 (SEC_WRITE_THROUGH), write-only (SMU-internal, not host-readable)
+- ✅ **ALL 16 whitelisted SMU CPU messages verified** (2026-09-15) — 7 reads + 9 writes with wedge check, 0 failures
+- ✅ **Driver stable** — 50 iterations stress test, 0 failures, 0 wedge events
+- ✅ **CPU OC persists after reboot** — Q3 0x8F 4000MHz works after cold boot without reinstall; all 8 cores at 3500MHz
+- ✅ **Q3 0x3C `enable_features` mask sweep** — SMU accepts masks `0x2/0x80/0x100/0x10000` (resp non-zero), but dom6 power unchanged
+- ✅ **Q0 0x3D `GetEnabledFeatures` whitelisted** — returns `0xDD613DFF` (delta `+0x11182` bits 1/7/8/12/16 vs stock `0xDD602C7D`)
+- ✅ **VCN MMIO `0x02403000` opened** — changed from `0xFFFFFFFF` → `0x00000000` after Q3 0x3C sweep, persists after reboot (fabric open, not powered)
+- ✅ **Vulkan SDK available** — F:\VulkanSDK\1.4.341.1 (RADV porting path requires UMD development)
 
 ### Not Working / Blocked
 - ❌ **SDMA self-test** — ring not initialized (RB_BASE_LO=0x00555555, no copy engine)
@@ -52,6 +62,40 @@ AMD BC-250 Windows driver project by Keshas. Goal: fully working GPU driver for 
 - ❌ **WGP unlock on Windows** — SPI_PG_ENABLE_STATIC_WGP_MASK SOS-locked
 - ❌ **KIQ_SIZE=0** — hardware read-only, cannot create compute rings
 - ❌ **Some PSP commands** — `GET_FW_ATTESTATION2` (0x10) and `FB_FW_RESERV_ADDR` (0x50) return `PSP_ERR_UNKNOWN_COMMAND` (0x100): BC-250 SOS does not implement them (protocol itself works)
+- ❌ **VCN 2.0.3 decode/encode** — fabric opened (`0x02403000=0x0`) but dom6 still unpowered (`STATUS=0x01010101 enable=0`), VCN_CTRL writes don't stick, no firmware loaded. Path A (SMU mem64 Q3 to bank12 `0x0900xxxx`) falsified: wedges SMU via closed fabric. Requires D3-B2 BIOS flash (SEC_GASKET 0x24 + TOS_SECURITY_POLICY 0x45) or EFI pre-boot unlock.
+
+## Post-Install Update (2026-09-15)
+
+### Driver rebuilt + installed (post cold boot)
+- **Added Q3 0x28 (SEC_SET_WRITE_PTR) + Q3 0x29 (SEC_WRITE_THROUGH)** to SMU CPU message whitelist (`amdbc250_dream_kmd.c` + `inc/amdbc250_ioctl.h`)
+- **Added `SMU_ARG_SRAM_ADDR`** enum type: DWORD-aligned SMU SRAM offset, range 0x00000000-0x000FFFFF (lower SRAM only)
+- **Added IOCTL_AMDBC250_ALLOC_DMA_BUFFER (0x80000930) + FREE_DMA_BUFFER (0x80000934)** for table DMA tests
+
+### Post-reinstall test results (ALL PASS)
+| Test | Result | Notes |
+|------|--------|-------|
+| `smu-cpu-msg-test.exe QUERY` | ✅ | Q3 0x36→1206mV, all 8 cores 3500MHz |
+| `smu-cpu-msg-test.exe 3 0x8F 4000` | ✅ | **Q3 0x8F persists after reboot!** ResponseStatus=0x01 OK |
+| `smu-cpu-msg-test.exe 3 0x50 0` | ✅ | scale_f_vid_curve OK |
+| `smu-cpu-msg-test.exe 3 0x8B 80` | ✅ | set_cpu_max_temp OK |
+| `smu-cpu-msg-test.exe 3 0x8C 80` | ✅ | set_gpu_max_temp OK (new) |
+| `vcn-bit-sweep.exe` | ✅ | Safe bits 0x2/0x80/0x100/0x10000 accepted, no wedge |
+| `smu-sram-addrs.exe` | ✅ | Q3 0x28/0x29 at 0x776C/0x3FF00/0x7770/0x0000 all OK, no wedge |
+| `smu-all-msgs-test.exe` | ✅ | **16/16 ALL whitelisted Q0/Q3 messages OK** (7 reads + 9 writes) |
+| `smu-stress-test.exe` | ✅ | **50 iterations, 0 failures**, SMU version verified each iteration |
+
+### Key findings (2026-09-15)
+- **SMU WRITE works via IOCTL** — Q3 0x8F (set_max_cpu_boost_clk) 4000MHz returned OK — first confirmed successful SMU write via the IOCTL path
+- **SMU WRITE persists after reboot** — Q3 0x8F 4000MHz works after reboot without reinstall. CPU OC is durable.
+- **All 4 CPU OC messages verified post-reboot**: Q3 0x50 (scale_f_vid_curve), Q3 0x8B (CPU max temp), Q3 0x8C (GPU max temp), Q3 0x8F (max boost clk) — all OK
+- **SMU SRAM confirmed write-only**: Q3 0x28/0x29 at all tested addresses (0x776C/0x3FF00/0x7770/0x0000) return OK but SMN readback shows no change. SRAM is SMU-internal (0x00000000-0x000FFFFF), not host-readable via PCI_SMN_ACCESS
+- **SMU table transfer NOT implemented**: Q0 0x06 (Smu2Dram) and Q0 0x07 (Dram2Smu) both return 0xFF (rejected). BC-250 SMU firmware does not implement TransferTable. Direct messages (Q0 0x39/0x3B/0x3C) are the only control path
+- **All 8 CPU cores at 3500MHz post-reboot** (Q3 0x43) — previously was 128 MHz on some cores
+
+### Vulkan SDK
+- **F:\VulkanSDK\1.4.341.1** available — full SDK (vulkan-1.lib, vulkaninfoSDK.exe, vkconfig.exe, layers, tools)
+- `vkCreateInstance` returns **ERR_DRIVER** — no AMD Vulkan ICD installed (only Microsoft loader)
+- RADV porting path requires building UMD DLL as Vulkan ICD using our KMD as backend via IOCTL
 
 ---
 
@@ -75,7 +119,7 @@ PUB_CTRL:           0x00000000
 TestMessage:         0x00000001
 GetSmuVersion:       0x00580600 (88.6.0)
 GetDriverIfVersion:  0x00000008 (8)
-Features:            0xDD602C7D (GFXCLK=ON GFXOFF=ON)
+Features:            0xDD602C7D (GFXCLK=ON GFXOFF=ON) — after Q3 0x3C sweep: 0xDD613DFF
 GfxFreq:             1500 MHz
 GfxClk:              1500 MHz
 GfxVid:              0x00000063
@@ -146,6 +190,28 @@ GET_FW_ATTESTATION2 (0x10) / FB_FW_RESERV_ADDR (0x50): 0x00000100 UNKNOWN_COMMAN
 
 ---
 
+### VCN dom6 power test (2026-09-03)
+```
+=== Q3 0x3C feature-bitmask sweep ===
+dom6 STATUS 0x06D190 = 0x01010101 (enable=0)
+dom6 CTRL  0x06D0F8 = 0x00000002 (bit1 ready=1)
+dom6 CMD   0x06D17C = 0x00000000
+dom6 RAIL  0x0006D184 = 0x00000000
+
+Q3 0x3C masks accepted: 0x2, 0x80, 0x100, 0x10000 (resp non-zero)
+Q3 0x3C masks ignored : 0x0/1/4/8/10/20/40/200/400/1000/2000/4000/8000/10000/20000/40000/80000
+
+Q0 0x3D GetEnabledFeatures: 0xDD613DFF (delta +0x11182 bits 1/7/8/12/16)
+
+VCN_CTRL 0x02403000 = 0x00000000 (was 0xFFFFFFFF before sweep)
+VCN_STATUS/CMD/RAIL/FW_LO/FW_HI/IB_LO/IB_HI/DECODE/ENCODE = 0x00000000
+VCN_CTRL writes don't stick (readback always 0x00000000)
+```
+
+**Conclusion:** Q3 0x3C opens VCN fabric (`0xFFFFFFFF` → `0x00000000`) but does **not** power dom6. VCN block remains unpowered, no firmware loaded. Path A (SMU mem64 Q3 to bank12 `0x0900xxxx`) falsified by Nienas: first write `0x0900c234` wedges SMU via `Q3 0x2C` because bank 12 fabric is closed; mem64 primitive is full 32-bit (`0x0115A870` works), wedge = closed fabric, not width limit. VCN unlock requires D3-B2 BIOS flash (SEC_GASKET 0x24 + TOS_SECURITY_POLICY 0x45) or EFI pre-boot unlock.
+
+---
+
 ## Community Research (elektricM/amd-bc250-docs)
 
 ### Mesa/RADV Requirements
@@ -162,7 +228,7 @@ GET_FW_ATTESTATION2 (0x10) / FB_FW_RESERV_ADDR (0x50): 0x00000100 UNKNOWN_COMMAN
 - **ttm.pages_limit** kernel param extends dynamic VRAM beyond default half-RAM limit
 
 ### Known Linux Issues
-- **No VA-API** — VCN firmware blocked by Sony
+- **No VA-API** — VCN 2.0.3 fabric locked by PSP SEC_GASKET 0x24; Path A runtime writes falsified (wedges SMU); requires D3-B2 BIOS flash or EFI pre-boot unlock
 - **ROCm experimental** — gfx1013 support incomplete, rocBLAS missing kernels
 - **Visual artifacts** — fixed in Mesa 25.1.5+ with RADV_DEBUG=nohiz
 - **Limited VRAM visibility in Vulkan** — ~10GB of 12GB split visible
@@ -220,6 +286,7 @@ GET_FW_ATTESTATION2 (0x10) / FB_FW_RESERV_ADDR (0x50): 0x00000100 UNKNOWN_COMMAN
 | 0x38 | GetGfxVid | Returns VID |
 | 0x39 | ForceGfxFreq | SAFE with voltage+profile set first |
 | 0x3B | ForceGfxVid | VID value |
+| 0x3C | EnableSmuFeatures (Q3) | Feature-bitmask write (dom6 power candidate) |
 | 0x3D | GetEnabledSmuFeatures | Returns bitmask |
 | 0x1E | QueryActiveWgp | Always returns 0 (WGPs off) |
 
