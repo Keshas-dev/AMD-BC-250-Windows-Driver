@@ -2017,6 +2017,38 @@ GDDR6 tuning results on BC-250. **Only UMA_SIZE change is low-risk; timings tuni
 | CPU core unlock | Already implemented: IOCTL_AMDBC250_CORE_UNLOCK (0x80000978) = SMU Q3 0x98 → SMN 0x0115A870 | Done |
 | CPU cores permanent | Hexxeh EFI boot entry = UEFI app; could mirror in third-party/EFI_Boot | Later |
 
+## ⭐ ICD STUB + FULL VULKAN PIPELINE (2026-09-15)
+
+### Milestone
+Vulkan ICD stub (`output\bc250_icd_stub.dll`, 722 exports) now passes **full pipeline** through KMD:
+- `vkCreateInstance` → GPU0 AMD BC-250 (RADV Stub) api=1.2 ✅
+- `vkAllocateMemory` → KMD ALLOC_VIDMEM, UserMode mapping ✅
+- `vkMapMemory` → KMD MAP_VIDMEM, write/readback OK ✅
+- `vkCreateBuffer` → KMD alloc + `vkBindBufferMemory` ✅
+- `vkCreateCommandPool` / `vkAllocateCommandBuffers` / `vkBeginCommandBuffer` ✅
+- `vkCreateSemaphore` / `vkCreateFence` ✅
+- `vkQueueSubmit` → VK_SUCCESS ✅ (GPU doesn't execute — WGP locked)
+- `vkWaitForFences` → VK_SUCCESS ✅
+- `vulkaninfoSDK.exe --summary` → GPU0 ✅
+
+### Key Fixes (this session)
+| Fix | File | Detail |
+|-----|------|--------|
+| ALLOC_VIDMEM struct support | `amdbc250_dream_kmd.c:3169` | Accepts `AMDBC250_IOCTL_ALLOC_VIDMEM` + `AMDBC250_IOCTL_ALLOC_VIDMEM_RESULT`; fallback to ULONG[3] |
+| FreeVidMem fix | `amdbc250_dream_kmd.c:3477` | `STATUS_NOT_FOUND` instead of `MmFreeContiguousMemory` double-free |
+| DreamV3AllocVidMem | `amdbc250_dream_kmd.c:91` | UserMode mapping (was KernelMode), 256MB limit (was 64MB) |
+| kmd_alloc_bo | `radv-icd-stub.c:161` | Struct ABI + fallback + log |
+| vkCreateBuffer/vkDestroyBuffer | `radv-icd-stub.c:324` | KMD alloc/free + buffer table |
+| vkMapMemory | `radv-icd-stub.c:215` | KMD MAP_VIDMEM + fallback |
+| vkGetBufferMemoryRequirements | `radv-icd-stub.c` | Returns size/alignment from table |
+| vkBindBufferMemory | `radv-icd-stub.c` | Associate buffer↔memory |
+
+### Gotcha
+- **VK_* env vars break instance creation**: validation layers auto-enable and reject minimal instance. Test batch files use `setlocal` + `for /f unset VK_ VULKAN_` before running tests.
+
+### RADV Path
+ICD stub IS the bypass — RADV PM4 → `vkQueueSubmit` → `IOCTL_AMDBC250_SUBMIT_COMMANDS` (0x80000880) → KMD. To integrate RADV, patch `wddm_submit_command` in Mesa (`src/amd/vulkan/wddm/`) to call our IOCTL instead of `D3DKMTSubmitCommand`.
+
 ## Next Steps
 
 1. ~~**Port VRAM config (bc250_memcfg)**~~ **DONE (2026-08-20)** — `IOCTL_AMDBC250_CMOS_ACCESS` (Function 0x9A, packed 0x80000C28) in `amdbc250_dream_kmd.c` reads/writes the CMOS MemConf_t block (ports 0x72/0x73). READ op = full decode (signature/checksum/timings/UMA_SIZE); SET op = range-validated field write with signature+checksum recompute, writes back 0x90..0xAB. `test-tools/cmos-memcfg-test.c` + `compile-cmos-memcfg.bat` → `output\cmos-memcfg-test.exe`. Usage: `cmos-memcfg-test.exe` (dump), `cmos-memcfg-test.exe UMA_SIZE 512` (set VRAM MB). REBOOT to apply; no software revert (clear CMOS). Build+signed cleanly. NEXT: verify read-only dump on hardware against existing UMA_SIZE, then optionally try `UMA_SIZE` change.
