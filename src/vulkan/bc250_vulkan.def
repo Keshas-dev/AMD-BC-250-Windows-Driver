@@ -3,6 +3,7 @@ EXPORTS
     vk_icdGetInstanceProcAddr
     vk_icdGetDeviceProcAddr
     vk_icdNegotiateLoaderICDInterfaceVersion
+    vkEnumerateInstanceVersion
     vkGetDeviceProcAddr
     vkGetInstanceProcAddr
     DllMain

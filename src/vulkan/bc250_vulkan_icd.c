@@ -7,12 +7,14 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include <vulkan/vulkan_core.h>
 #include "bc250_vulkan.h"
 #include "bc250_aco_wrapper.h"
 #include "bc250_shader.h"
 #include <windows.h>
 #include <stdio.h>
 #include <string.h>
+#include "../../test-tools/wddm_debug_hooks.c"
 
 /* Vulkan error codes not in our headers */
 #ifndef VK_SUCCESS
@@ -57,7 +59,8 @@ static uint32_t g_NumAllocations = 0;
 static HANDLE bc250_open_kmd(void)
 {
     return CreateFileW(L"\\\\.\\AMDBC250DreamV43", GENERIC_READ | GENERIC_WRITE,
-                       0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+                       FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING,
+                       FILE_ATTRIBUTE_NORMAL, NULL);
 }
 
 static VkResult bc250_init_instance(void)
@@ -360,7 +363,6 @@ VkResult VKAPI_CALL bc250_vkGetPhysicalDeviceProperties(
     props->limits.maxTessellationControlPerVertexOutputComponents = 128;
     props->limits.maxTessellationControlPerPatchOutputComponents = 128;
     props->limits.maxTessellationControlTotalOutputComponents = 2048;
-    props->limits.maxTessellationDomainInputComponents = 128;
     props->limits.maxGeometryShaderInvocations = 32;
     props->limits.maxGeometryInputComponents = 64;
     props->limits.maxGeometryOutputComponents = 128;
@@ -461,25 +463,20 @@ VkResult VKAPI_CALL bc250_vkGetPhysicalDeviceMemoryProperties(
         }
     }
 
-    /* Write VkPhysicalDeviceMemoryProperties by byte offsets.
-     * Layout (no padding issues, all types naturally aligned):
-     * [0]   memoryTypeCount (uint32)
-     * [4]   memoryTypes[0] (8 bytes: propertyFlags+heapIndex)
-     * [12]  memoryTypes[1] (8 bytes)
-     * [132] memoryHeapCount (uint32)
-     * [136] memoryHeaps[0] (16 bytes: size uint64 + flags uint32 + pad)
-     * Total: 392 bytes
-     * Flags: DEVICE_LOCAL=0x1, HOST_VISIBLE=0x2, HOST_COHERENT=0x4
-     */
-    uint8_t* p = (uint8_t*)pMemoryProperties;
-    *(uint32_t*)(p + 0)   = 2;        /* memoryTypeCount */
-    *(uint32_t*)(p + 4)   = 0x1;      /* types[0].propertyFlags = DEVICE_LOCAL */
-    *(uint32_t*)(p + 8)   = 0;        /* types[0].heapIndex */
-    *(uint32_t*)(p + 12)  = 0x7;      /* types[1].propertyFlags = DEV_LOCAL|HOST_VIS|HOST_COH */
-    *(uint32_t*)(p + 16)  = 0;        /* types[1].heapIndex */
-    *(uint32_t*)(p + 132) = 1;        /* memoryHeapCount */
-    *(UINT64*)(p + 136)   = totalVram; /* heaps[0].size */
-    *(uint32_t*)(p + 144) = 0x1;      /* heaps[0].flags = DEVICE_LOCAL */
+    VkPhysicalDeviceMemoryProperties* props = (VkPhysicalDeviceMemoryProperties*)pMemoryProperties;
+    memset(props, 0, sizeof(VkPhysicalDeviceMemoryProperties));
+
+    props->memoryTypeCount = 2;
+    props->memoryTypes[0].propertyFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+    props->memoryTypes[0].heapIndex = 0;
+    props->memoryTypes[1].propertyFlags =
+        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT |
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+        VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    props->memoryTypes[1].heapIndex = 0;
+    props->memoryHeapCount = 1;
+    props->memoryHeaps[0].size = totalVram;
+    props->memoryHeaps[0].flags = VK_MEMORY_HEAP_DEVICE_LOCAL_BIT;
 
     OutputDebugStringA("BC-250 Vulkan: GetPhysicalDeviceMemoryProperties OK\n");
     return VK_SUCCESS;
@@ -854,7 +851,9 @@ static void bc250_free_dma(HANDLE kmd, PVOID va)
     DeviceIoControl(kmd, IOCTL_AMDBC250_FREE_DMA_BUFFER, freeIn, sizeof(freeIn), NULL, 0, &ret, NULL);
 }
 
-/* Queue Submit — writes PM4 commands to shared memory (no IOCTL) */
+/* Queue Submit — SEND_PM4 inline path (0x80000B84). No DMA-buffer VA is ever
+ * touched from user mode: ALLOC_DMA_BUFFER returns a kernel VA
+ * (MmAllocateContiguousMemory), writing it from here AVs the caller. */
 VkResult VKAPI_CALL bc250_vkQueueSubmit(
     VkQueue queue,
     uint32_t submitCount,
@@ -867,49 +866,41 @@ VkResult VKAPI_CALL bc250_vkQueueSubmit(
     UNREFERENCED_PARAMETER(fence);
     
     BC250_VK_DEVICE* dev = &g_Device;
-    if (dev->kmdDevice == INVALID_HANDLE_VALUE) return VK_SUCCESS;
+    /* vkCreateDevice inits a heap copy; g_Device keeps NULL/INVALID until
+     * first submit, so cover both and lazy-open here. */
+    if (dev->kmdDevice == INVALID_HANDLE_VALUE || dev->kmdDevice == NULL) {
+        dev->kmdDevice = bc250_open_kmd();
+        if (dev->kmdDevice == INVALID_HANDLE_VALUE || dev->kmdDevice == NULL)
+            return VK_SUCCESS;
+    }
 
-    /* Allocate DMA buffer for PM4 commands via KMD IOCTL */
-    ULONG allocReq = 0x10000; /* 64KB buffer */
-    ULONG64 allocResp[2] = {0};
+    /* Inline SEND_PM4 buffer: Commands[64]@0, Count@256, Fence(u64)@264,
+     * QueueType@272. Padded +256B: KMD requires inputLen >=
+     * sizeof(struct)+CommandCount*4 (amdbc250_dream_kmd.c:4709). */
+    UCHAR spBuf[280 + 64 * sizeof(ULONG)];
+    ZeroMemory(spBuf, sizeof(spBuf));
+    {
+        PULONG cmds = (PULONG)(spBuf + 0);
+        cmds[0] = 0x30000000; /* PM4 TYPE2 NOP <- first DWORD */
+        cmds[1] = 0xC0034600; /* IT_EVENT_WRITE_EOP */
+        cmds[2] = 0xA0000246;
+        cmds[3] = 0x00000000;
+        cmds[4] = 0x00000000;
+        cmds[5] = dev->fenceValue;
+        cmds[6] = 0x00000000;
+        *(PULONG)(spBuf + 256) = 7;                          /* CommandCount */
+        *(PULONG64)(spBuf + 264) = (ULONG64)dev->fenceValue; /* FenceValue */
+        *(PULONG)(spBuf + 272) = 0;                          /* QueueType = GFX */
+    }
+
     DWORD ret = 0;
-    PVOID dmaBuf = NULL;
-    ULONG64 dmaBufPa = 0;
+    BOOL spOk = DeviceIoControl(dev->kmdDevice, 0x80000B84, /* SEND_PM4 */
+                    spBuf, sizeof(spBuf), NULL, 0, &ret, NULL);
+    bc250_debug_submit_status(spOk, spOk ? 0 : GetLastError(),
+                              (unsigned long)(7 * sizeof(ULONG)),
+                              0x30000000);
+    if (spOk) dev->fenceValue++;
 
-    if (DeviceIoControl(dev->kmdDevice, 0x80000930, /* ALLOC_DMA_BUFFER */
-                        &allocReq, sizeof(allocReq),
-                        allocResp, sizeof(allocResp), &ret, NULL)) {
-        dmaBufPa = allocResp[0];
-        dmaBuf    = (PVOID)(ULONG_PTR)allocResp[1];
-    }
-
-    if (dmaBuf) {
-        volatile PULONG cmd = (volatile PULONG)dmaBuf;
-        
-        /* NOP padding */
-        cmd[0] = 0x80000000;
-        
-        /* EOP fence packet (IT_EVENT_WRITE_EOP = 0x46) */
-        cmd[1] = 0xC0034600;  /* PM4_TYPE3_HDR(IT_EVENT_WRITE_EOP, 4) */
-        cmd[2] = 0xA0000246;  /* EVENT_TYPE=EOP, EVENT_INDEX=5, INT_SEL=1 */
-        cmd[3] = (ULONG)(dmaBufPa & 0xFFFFFFFF);    /* Fence addr low */
-        cmd[4] = (ULONG)(dmaBufPa >> 32);            /* Fence addr high */
-        cmd[5] = (ULONG)(dev->fenceValue & 0xFFFFFFFF);
-        cmd[6] = (ULONG)((ULONG64)dev->fenceValue >> 32);
-
-        /* Submit to KMD ring via SUBMIT_COMMANDS */
-        struct { ULONG64 GpuVa; ULONG64 Size; ULONG32 Fence; ULONG32 Queue; } sc = {0};
-        sc.GpuVa = dmaBufPa;
-        sc.Size   = 7 * sizeof(ULONG);
-        sc.Fence  = dev->fenceValue;
-        sc.Queue  = 0; /* GFX ring */
-        
-        DeviceIoControl(dev->kmdDevice, 0x80000880, /* SUBMIT_COMMANDS */
-                        &sc, sizeof(sc), NULL, 0, &ret, NULL);
-        
-        dev->fenceValue++;
-    }
-    
     return VK_SUCCESS;
 }
 
@@ -1347,6 +1338,11 @@ typedef struct VkIcdDispatchTable {
 } VkIcdDispatchTable;
 
 /* Exported dispatch table for ICD loading */
+VkResult VKAPI_CALL vkEnumerateInstanceVersion(uint32_t* pApiVersion) {
+    if (pApiVersion) *pApiVersion = VK_API_VERSION_1_3;
+    return VK_SUCCESS;
+}
+
 __declspec(dllexport) void* VKAPI_CALL vk_icdGetInstanceProcAddr(VkInstance instance, const char* pName)
 {
     UNREFERENCED_PARAMETER(instance);
@@ -1445,14 +1441,15 @@ __declspec(dllexport) void* VKAPI_CALL vk_icdGetInstanceProcAddr(VkInstance inst
     if (!strcmp(pName, "vkGetDeviceProcAddr"))          return (void*)vk_icdGetDeviceProcAddr;
     
     /* Additional required instance-level functions for Vulkan 1.4 loader */
+    if (!strcmp(pName, "vkEnumerateInstanceVersion"))       return (void*)vkEnumerateInstanceVersion;
     if (!strcmp(pName, "vkGetPhysicalDeviceSparseImageFormatProperties")) return (void*)bc250_vkGetPhysicalDeviceSparseImageFormatPropertiesStub;
     if (!strcmp(pName, "vkGetPhysicalDeviceSparseImageFormatProperties2")) return (void*)bc250_vkGetPhysicalDeviceSparseImageFormatProperties2Stub;
     if (!strcmp(pName, "vkGetPhysicalDeviceQueueFamilyProperties2")) return (void*)bc250_vkGetPhysicalDeviceQueueFamilyProperties2Stub;
-    if (!strcmp(pName, "vkGetPhysicalDeviceMemoryProperties2")) return (void*)bc250_vkGetPhysicalDeviceMemoryProperties2Stub;
+    if (!strcmp(pName, "vkGetPhysicalDeviceMemoryProperties2")) return (void*)bc250_vkGetPhysicalDeviceMemoryProperties2;
     if (!strcmp(pName, "vkGetPhysicalDeviceFeatures2")) return (void*)bc250_vkGetPhysicalDeviceFeatures2Stub;
     if (!strcmp(pName, "vkGetPhysicalDeviceFormatProperties2")) return (void*)bc250_vkGetPhysicalDeviceFormatProperties2Stub;
     if (!strcmp(pName, "vkGetPhysicalDeviceImageFormatProperties2")) return (void*)bc250_vkGetPhysicalDeviceImageFormatProperties2Stub;
-    if (!strcmp(pName, "vkGetPhysicalDeviceProperties2")) return (void*)bc250_vkGetPhysicalDeviceProperties2Stub;
+    if (!strcmp(pName, "vkGetPhysicalDeviceProperties2")) return (void*)bc250_vkGetPhysicalDeviceProperties2;
     if (!strcmp(pName, "vkGetPhysicalDeviceSurfaceSupportKHR")) return (void*)bc250_vkGetPhysicalDeviceSurfaceSupportStub;
     if (!strcmp(pName, "vkGetPhysicalDeviceSurfaceCapabilitiesKHR")) return (void*)bc250_vkGetPhysicalDeviceSurfaceCapabilitiesStub;
     if (!strcmp(pName, "vkGetPhysicalDeviceSurfaceFormatsKHR")) return (void*)bc250_vkGetPhysicalDeviceSurfaceFormatsStub;
@@ -1490,21 +1487,20 @@ __declspec(dllexport) void* VKAPI_CALL vk_icdGetDeviceProcAddr(VkDevice device, 
 }
 
 /* Standard Vulkan entry points (called by loader) */
-__declspec(dllexport) void* VKAPI_CALL vkGetInstanceProcAddr(VkInstance instance, const char* pName)
+PFN_vkVoidFunction VKAPI_CALL vkGetInstanceProcAddr(VkInstance instance, const char* pName)
 {
     return vk_icdGetInstanceProcAddr(instance, pName);
 }
 
-__declspec(dllexport) void* VKAPI_CALL vkGetDeviceProcAddr(VkDevice device, const char* pName)
+PFN_vkVoidFunction VKAPI_CALL vkGetDeviceProcAddr(VkDevice device, const char* pName)
 {
     return vk_icdGetDeviceProcAddr(device, pName);
 }
 
-/* ICD interface negotiation - report version 4 for Vulkan 1.0 compatibility */
 __declspec(dllexport) uint32_t VKAPI_CALL vk_icdNegotiateLoaderICDInterfaceVersion(uint32_t* pVersion)
 {
     if (pVersion) {
-        if (*pVersion > 4) *pVersion = 4;
+        if (*pVersion > 5) *pVersion = 5;
         FILE *f = fopen("C:\\AMD-BC-250\\AMD-BC-250-Windows-Driver-main\\output\\icd-log.txt", "a");
         if (f) { fprintf(f, "NegotiateLoaderICDInterfaceVersion: version=%u\n", *pVersion); fclose(f); }
     }

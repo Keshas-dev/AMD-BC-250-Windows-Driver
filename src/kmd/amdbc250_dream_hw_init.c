@@ -112,11 +112,16 @@ DreamV3ReadMaxStep(void)
   6. Display (DCN 2.x)
 ===========================================================================*/
 
+NTSTATUS DreamV3HwInitializeExtended(_In_ PDREAM_V3_DEVICE_EXTENSION DevExt);
+BOOLEAN DreamV3UseExtendedInit(void);
 NTSTATUS
 DreamV3HwInitialize(
     _In_ PDREAM_V3_DEVICE_EXTENSION DevExt
     )
 {
+    if(DreamV3UseExtendedInit()){
+        return DreamV3HwInitializeExtended(DevExt);
+    }
     NTSTATUS Status;
     ULONG MaxStep = DreamV3ReadMaxStep();
 
@@ -290,7 +295,7 @@ DreamV3HwInitialize(
         OBJECT_ATTRIBUTES Oa;
         InitializeObjectAttributes(&Oa, &Path, OBJ_CASE_INSENSITIVE, NULL, NULL);
         HANDLE hKey = NULL;
-        ULONG SdmaEnable = 0;
+        ULONG SdmaEnable = 1;
         if (NT_SUCCESS(ZwOpenKey(&hKey, KEY_READ, &Oa))) {
             UNICODE_STRING vn;
             RtlInitUnicodeString(&vn, L"HwInitSdmaRing");
@@ -333,7 +338,7 @@ DreamV3HwInitialize(
         OBJECT_ATTRIBUTES Oa;
         InitializeObjectAttributes(&Oa, &Path, OBJ_CASE_INSENSITIVE, NULL, NULL);
         HANDLE hKey = NULL;
-        ULONG GartEnable = 0;
+        ULONG GartEnable = 1;
         if (NT_SUCCESS(ZwOpenKey(&hKey, KEY_READ, &Oa))) {
             UNICODE_STRING vn;
             RtlInitUnicodeString(&vn, L"HwInitGart");
@@ -376,7 +381,7 @@ DreamV3HwInitialize(
         OBJECT_ATTRIBUTES Oa;
         InitializeObjectAttributes(&Oa, &Path, OBJ_CASE_INSENSITIVE, NULL, NULL);
         HANDLE hKey = NULL;
-        ULONG VmEnable = 0;
+        ULONG VmEnable = 1;
         if (NT_SUCCESS(ZwOpenKey(&hKey, KEY_READ, &Oa))) {
             UNICODE_STRING vn;
             RtlInitUnicodeString(&vn, L"HwInitVm");
@@ -449,7 +454,7 @@ DreamV3HwInitialize(
                 WRITE_REGISTER_ULONG((PULONG)(bar5b + 0x5C3C), 0x0000001F);
                 WRITE_REGISTER_ULONG((PULONG)(bar5b + 0x3D64), 0x0000001F);
             }
-            WRITE_REGISTER_ULONG((PULONG)(bar5b + 0x34D0), 0x15000000);
+            WRITE_REGISTER_ULONG((PULONG)(bar5b + 0x34D0), AMDBC250_GRBM_GFX_INDEX_BROADCAST_VAL); /* gfx10.1 all-broadcast (INST=24, SH=26, SE=28) */
             ULONG spiAfter2 = READ_REGISTER_ULONG((PULONG)(bar5b + 0x5C3C));
             ULONG ccAfter2  = READ_REGISTER_ULONG((PULONG)(bar5b + 0x9C1C));
             KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
@@ -964,7 +969,7 @@ DreamV3PspHardwareInit(
         PspCtx = Amdbc250PspGetContext();
         if (PspCtx && PspCtx->MmioBase) {
             ULONG sol = Amdbc250PspReadRegister(MP0_C2PMSG_81_BYTE);
-            if (sol & 0x80000000) {
+            if (sol != 0) {
                 KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
                            "AMDBC250-DREAM-V4.3: SOS already alive (SOL=0x%08X) - EFI Shell injection detected!\n", sol));
                 DevExt->PspAlive = TRUE;

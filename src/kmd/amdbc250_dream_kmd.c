@@ -3154,7 +3154,8 @@ DreamV3DeviceControl(
             }
             status = STATUS_SUCCESS;
             goto Cleanup;
-        case 0x80000804: /* GET_VRAM_INFO */
+        case 0x80000804: /* GET_VRAM_INFO (legacy 0x200-based literal) */
+        case IOCTL_AMDBC250_GET_VRAM_INFO: /* GET_VRAM_INFO (header macro) */
             if (outputLen >= sizeof(ULONG64) * 3 + sizeof(ULONG)) {
                 PULONG64 d64 = (PULONG64)outputBuffer;
                 d64[0] = 16ULL * 1024 * 1024 * 1024;        /* Total bytes (16GB) */
@@ -3349,7 +3350,8 @@ DreamV3DeviceControl(
     }
 
     /* --- Get VRAM Info --- */
-    case 0x80000804: { /* IOCTL_AMDBC250_GET_VRAM_INFO */
+    case 0x80000804: /* IOCTL_AMDBC250_GET_VRAM_INFO (legacy literal) */
+    case IOCTL_AMDBC250_GET_VRAM_INFO: { /* header macro (0x270-based) */
         /* BC-250 unified memory (APU): all RAM is GPU-visible */
         DevExt->VisibleVramBytes = DevExt->TotalVramBytes;
         if (outputLen >= sizeof(ULONG64) * 3 + sizeof(ULONG)) {
