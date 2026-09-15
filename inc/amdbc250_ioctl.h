@@ -69,6 +69,10 @@ Environment:
 #define IOCTL_AMDBC250_SDMA_COPY            CTL_CODE_AMDBC250(0x50, METHOD_BUFFERED, FILE_ANY_ACCESS)
 #define IOCTL_AMDBC250_SDMA_FILL            CTL_CODE_AMDBC250(0x51, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
+/* DMA buffer allocation (for SMU table transfers, etc.) */
+#define IOCTL_AMDBC250_ALLOC_DMA_BUFFER     CTL_CODE_AMDBC250(0x52, METHOD_BUFFERED, FILE_ANY_ACCESS)
+#define IOCTL_AMDBC250_FREE_DMA_BUFFER      CTL_CODE_AMDBC250(0x53, METHOD_BUFFERED, FILE_ANY_ACCESS)
+
 /* TDR Reset */
 #define IOCTL_AMDBC250_TDR_RESET            CTL_CODE_AMDBC250(0x54, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
@@ -246,6 +250,24 @@ typedef struct _AMDBC250_IOCTL_SMU_CPU_MSG {
 #define AMDBC250_SMU_Q3_SET_CPU_MAX_TEMP      0x8B
 #define AMDBC250_SMU_Q3_SET_GPU_MAX_TEMP      0x8C
 #define AMDBC250_SMU_Q3_DISABLE_EXTRA_VOLT    0x9A
+#define AMDBC250_SMU_Q3_ENABLE_FEATURES       0x3C
+#define AMDBC250_SMU_Q0_GET_ENABLED_FEATURES  0x3D
+#define AMDBC250_SMU_Q0_GET_SMU_VERSION       0x02
+#define AMDBC250_SMU_Q0_GET_DRIVER_IF_VERSION 0x03
+#define AMDBC250_SMU_Q0_SET_DRV_TBL_ADDR_HI   0x04
+#define AMDBC250_SMU_Q0_SET_DRV_TBL_ADDR_LO   0x05
+#define AMDBC250_SMU_Q0_TRANSFER_TBL_SMU2DRAM  0x06
+#define AMDBC250_SMU_Q0_TRANSFER_TBL_DRAM2SMU  0x07
+#define AMDBC250_SMU_Q3_UNGATED_SMN_WRITE     0x98
+#define AMDBC250_SMU_Q3_SEC_SET_WRITE_PTR     0x28
+#define AMDBC250_SMU_Q3_SEC_WRITE_THROUGH     0x29
+
+/* Safe feature bits for Q3 0x3C EnableSmuFeatures (cyan_skillfish PMFW 88.6.0).
+ * These are the only bits validated by our whitelist; unknown bits are rejected. */
+#define AMDBC250_SAFE_SMU_FEATURE_MASK   0x0000001Du  /* GFXCLK_DPM|GFXOFF|CG|PG */
+
+/* Known-safe SMN addresses for Q3 0x98 ungated write (proven on hardware). */
+#define AMDBC250_SAFE_SMN_ADDR_CORE_MASK   0x0115A870
 
 typedef struct _AMDBC250_PSP_LOAD_IP_FW_IN {
     UINT32 FwType;              /* GFX_FW_TYPE_*: 1=CP_ME 2=CP_PFP 3=CP_CE 4=CP_MEC 8=RLC_G 9=SDMA0 10=SDMA1 18=SMU */
@@ -601,6 +623,13 @@ typedef struct _AMDBC250_IOCTL_PORT_IO {
 /* --- SMN (System Management Network) read/write via MMIO index/data ports --- */
 #define IOCTL_AMDBC250_SMN_ACCESS           CTL_CODE_AMDBC250(0x81, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
+/* --- PCI config SMN window (root port 00:00.0 config 0xB8/0xBC) retest
+ * AGENTS.md:48 was "read-only, no reboot fix" but tested before secure-unlock.
+ * This is the Linux bc250-smu-unlock transport (Bc250PciTransport). Provides
+ * full 32-bit SMN addressing without the 20-bit mask of the SMU mem64 window.
+ * Packed: 0x80000C38 (Function 0x9C). */
+#define IOCTL_AMDBC250_PCI_SMN_ACCESS       CTL_CODE_AMDBC250(0x9C, METHOD_BUFFERED, FILE_ANY_ACCESS)
+
 typedef struct _AMDBC250_IOCTL_SMN_ACCESS {
     UINT32 SmnAddress;              /* IN: SMN register address (byte offset) */
     UINT32 SmnData;                 /* IN/OUT: data to write / data read */
@@ -609,6 +638,18 @@ typedef struct _AMDBC250_IOCTL_SMN_ACCESS {
     UINT32 IndexPort;               /* IN: MMIO index port address (0 = default 0x3B10528) */
     UINT32 DataPort;                /* IN: MMIO data port address (0 = default 0x3B10564) */
 } AMDBC250_IOCTL_SMN_ACCESS, *PAMDBC250_IOCTL_SMN_ACCESS;
+
+typedef struct _AMDBC250_IOCTL_PCI_SMN_ACCESS {
+    UINT32 SmnAddress;              /* IN: SMN address */
+    UINT32 SmnData;                 /* IN/OUT: data */
+    UINT32 IsWrite;                 /* IN: 0=read, 1=write */
+    UINT32 Result;                  /* OUT: 1=success */
+    UINT32 Bus;                     /* IN: PCI bus (0) */
+    UINT32 Device;                  /* IN: device (0) */
+    UINT32 Function;                /* IN: function (0) */
+    UINT32 Method;                  /* OUT: 1=CF8/CFC, 2=Hal, 3=ECAM (which succeeded) */
+    UINT32 Bar5SmnData;             /* OUT: same SMN read via BAR5+0x38/0x3C for comparison */
+} AMDBC250_IOCTL_PCI_SMN_ACCESS, *PAMDBC250_IOCTL_PCI_SMN_ACCESS;
 
 /* --- Direct MMIO test: map any physical address and read/write --- */
 #define IOCTL_AMDBC250_MMIO_TEST            CTL_CODE_AMDBC250(0x80, METHOD_BUFFERED, FILE_ANY_ACCESS)

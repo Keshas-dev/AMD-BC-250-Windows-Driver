@@ -5,6 +5,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <stdlib.h>
+#include <intrin.h>
 #include "F:/VulkanSDK/1.4.341.1/Include/vulkan/vulkan.h"
 
 static HMODULE g_hModule = NULL;
@@ -147,10 +148,7 @@ VKAPI_ATTR VkResult VKAPI_CALL vkEnumerateDeviceLayerProperties(VkPhysicalDevice
     (void)physicalDevice; (void)pProperties; if (pPropertyCount) *pPropertyCount = 0; return VK_SUCCESS;
 }
 
-VKAPI_ATTR void VKAPI_CALL vkGetDeviceQueue(VkDevice                                    device,
-    uint32_t                                    queueFamilyIndex,
-    uint32_t                                    queueIndex,
-    VkQueue*                                    pQueue) { (void)device; (void)queueFamilyIndex; (void)queueIndex; (void)pQueue;   }
+VKAPI_ATTR void VKAPI_CALL vkGetDeviceQueue(VkDevice device, uint32_t queueFamilyIndex, uint32_t queueIndex, VkQueue* pQueue) { (void)device; (void)queueFamilyIndex; (void)queueIndex; if (pQueue) { void* m=malloc(8); if(m){*(void**)m=NULL; *pQueue=(VkQueue)m;} else *pQueue=NULL; } }
 
 VKAPI_ATTR VkResult VKAPI_CALL vkQueueSubmit(VkQueue                                     queue,
     uint32_t                                    submitCount,
@@ -161,24 +159,77 @@ VKAPI_ATTR VkResult VKAPI_CALL vkQueueWaitIdle(VkQueue                          
 
 VKAPI_ATTR VkResult VKAPI_CALL vkDeviceWaitIdle(VkDevice                                    device) { (void)device;      return 0; }
 
-VKAPI_ATTR VkResult VKAPI_CALL vkAllocateMemory(VkDevice                                    device,
-    const VkMemoryAllocateInfo*                 pAllocateInfo,
-    const VkAllocationCallbacks*                pAllocator,
-    VkDeviceMemory*                             pMemory) { (void)device; (void)pAllocateInfo; (void)pAllocator; (void)pMemory;      return 0; }
+typedef struct { UINT64 Size; UINT64 Alignment; UINT32 Flags; UINT32 SegmentId; } KMD_ALLOC_IN;
+typedef struct { UINT64 GpuVa; UINT64 Pa; UINT64 Handle; } KMD_ALLOC_OUT;
+static VkResult kmd_alloc_bo(VkDeviceSize size, void** out_handle) {
+    HANDLE h = CreateFileW(L"\\\\.\\AMDBC250DreamV43", GENERIC_READ|GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
+    if (h == INVALID_HANDLE_VALUE) {
+        FILE*f=fopen("C:\\temp\\kmd_alloc.log","a"); if(f){fprintf(f,"CreateFile failed %d\n",GetLastError()); fclose(f);}
+        return VK_ERROR_INITIALIZATION_FAILED;
+    }
+    KMD_ALLOC_IN in = {0}; in.Size = size; in.Alignment = 4096; in.SegmentId = 0;
+    KMD_ALLOC_OUT out = {0};
+    DWORD ret=0;
+    BOOL ok = DeviceIoControl(h, 0x80000840, &in, sizeof(in), &out, sizeof(out), &ret, NULL);
+    DWORD err=GetLastError();
+    {FILE*f=fopen("C:\\temp\\kmd_alloc.log","a"); if(f){fprintf(f,"new ABI ok=%d ret=%d err=%d Handle=%llx GpuVa=%llx\n",ok,ret,err,out.Handle,out.GpuVa); fclose(f);}}
+    CloseHandle(h);
+    if (ok && ret==sizeof(out) && out.Handle) { *out_handle=(void*)(uintptr_t)out.Handle; return VK_SUCCESS; }
+    // fallback old ABI
+    h = CreateFileW(L"\\\\.\\AMDBC250DreamV43", GENERIC_READ|GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
+    if (h != INVALID_HANDLE_VALUE) {
+        ULONG in2[3] = {(ULONG)size, 0, 0};
+        ULONG64 out2[2]={0,0};
+        ok = DeviceIoControl(h, 0x80000840, in2, sizeof(in2), out2, sizeof(out2), &ret, NULL);
+        err=GetLastError();
+        {FILE*f=fopen("C:\\temp\\kmd_alloc.log","a"); if(f){fprintf(f,"old ABI ok=%d ret=%d err=%d out1=%llx\n",ok,ret,err,out2[1]); fclose(f);}}
+        CloseHandle(h);
+        if (ok && ret==sizeof(out2) && out2[1]) { *out_handle=(void*)(uintptr_t)out2[1]; return VK_SUCCESS; }
+    }
+    return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+}
+VKAPI_ATTR VkResult VKAPI_CALL vkAllocateMemory(VkDevice device, const VkMemoryAllocateInfo* pAllocateInfo, const VkAllocationCallbacks* pAllocator, VkDeviceMemory* pMemory) {
+    (void)device; (void)pAllocator;
+    if (!pAllocateInfo || !pMemory) return VK_ERROR_INITIALIZATION_FAILED;
+    void* h=NULL;
+    if (kmd_alloc_bo(pAllocateInfo->allocationSize ? pAllocateInfo->allocationSize : 4096, &h)==VK_SUCCESS) { *pMemory=(VkDeviceMemory)h; return VK_SUCCESS; }
+    void* m=malloc((size_t)(pAllocateInfo->allocationSize ? pAllocateInfo->allocationSize : 4096));
+    if(!m) return VK_ERROR_OUT_OF_HOST_MEMORY;
+    *(void**)m=NULL;
+    *pMemory=(VkDeviceMemory)m;
+    return VK_SUCCESS;
+}
 
-VKAPI_ATTR void VKAPI_CALL vkFreeMemory(VkDevice                                    device,
-    VkDeviceMemory                              memory,
-    const VkAllocationCallbacks*                pAllocator) { (void)device; (void)memory; (void)pAllocator;   }
+static BOOL kmd_free_bo(void* handle) {
+    HANDLE h = CreateFileW(L"\\\\.\\AMDBC250DreamV43", GENERIC_READ|GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
+    if (h == INVALID_HANDLE_VALUE) return FALSE;
+    ULONG64 in = (ULONG64)(uintptr_t)handle;
+    DWORD ret=0;
+    BOOL ok = DeviceIoControl(h, 0x80000844, &in, sizeof(in), NULL, 0, &ret, NULL);
+    CloseHandle(h);
+    return ok;
+}
+VKAPI_ATTR void VKAPI_CALL vkFreeMemory(VkDevice device, VkDeviceMemory memory, const VkAllocationCallbacks* pAllocator) {
+    (void)device; (void)pAllocator;
+    if (!memory) return;
+    if (!kmd_free_bo((void*)memory)) free((void*)memory);
+}VKAPI_ATTR VkResult VKAPI_CALL vkMapMemory(VkDevice device, VkDeviceMemory memory, VkDeviceSize offset, VkDeviceSize size, VkMemoryMapFlags flags, void** ppData) {
+    (void)device; (void)size; (void)flags;
+    if (!memory || !ppData) return VK_ERROR_INITIALIZATION_FAILED;
+    HANDLE h = CreateFileW(L"\\\\.\\AMDBC250DreamV43", GENERIC_READ|GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
+    if (h != INVALID_HANDLE_VALUE) {
+        ULONG in[3] = {(ULONG)(uintptr_t)memory, (ULONG)offset, (ULONG)size};
+        ULONG64 out[2] = {0,0};
+        DWORD ret=0;
+        BOOL ok = DeviceIoControl(h, 0x80000848, in, sizeof(in), out, sizeof(out), &ret, NULL);
+        CloseHandle(h);
+        if (ok && ret==sizeof(out) && out[0]) { *ppData = (char*)(uintptr_t)out[0] + offset; return VK_SUCCESS; }
+    }
+    *ppData = (char*)(void*)memory + offset;
+    return VK_SUCCESS;
+}
 
-VKAPI_ATTR VkResult VKAPI_CALL vkMapMemory(VkDevice                                    device,
-    VkDeviceMemory                              memory,
-    VkDeviceSize                                offset,
-    VkDeviceSize                                size,
-    VkMemoryMapFlags                            flags,
-    void**                                      ppData) { (void)device; (void)memory; (void)offset; (void)size; (void)flags; (void)ppData;      return 0; }
-
-VKAPI_ATTR void VKAPI_CALL vkUnmapMemory(VkDevice                                    device,
-    VkDeviceMemory                              memory) { (void)device; (void)memory;   }
+VKAPI_ATTR void VKAPI_CALL vkUnmapMemory(VkDevice device, VkDeviceMemory memory) { (void)device; (void)memory; }
 
 VKAPI_ATTR VkResult VKAPI_CALL vkFlushMappedMemoryRanges(VkDevice                                    device,
     uint32_t                                    memoryRangeCount,
@@ -192,19 +243,10 @@ VKAPI_ATTR void VKAPI_CALL vkGetDeviceMemoryCommitment(VkDevice                 
     VkDeviceMemory                              memory,
     VkDeviceSize*                               pCommittedMemoryInBytes) { (void)device; (void)memory; (void)pCommittedMemoryInBytes;   }
 
-VKAPI_ATTR VkResult VKAPI_CALL vkBindBufferMemory(VkDevice                                    device,
-    VkBuffer                                    buffer,
-    VkDeviceMemory                              memory,
-    VkDeviceSize                                memoryOffset) { (void)device; (void)buffer; (void)memory; (void)memoryOffset;      return 0; }
-
 VKAPI_ATTR VkResult VKAPI_CALL vkBindImageMemory(VkDevice                                    device,
     VkImage                                     image,
     VkDeviceMemory                              memory,
     VkDeviceSize                                memoryOffset) { (void)device; (void)image; (void)memory; (void)memoryOffset;      return 0; }
-
-VKAPI_ATTR void VKAPI_CALL vkGetBufferMemoryRequirements(VkDevice                                    device,
-    VkBuffer                                    buffer,
-    VkMemoryRequirements*                       pMemoryRequirements) { (void)device; (void)buffer; (void)pMemoryRequirements;   }
 
 VKAPI_ATTR void VKAPI_CALL vkGetImageMemoryRequirements(VkDevice                                    device,
     VkImage                                     image,
@@ -229,10 +271,7 @@ VKAPI_ATTR VkResult VKAPI_CALL vkQueueBindSparse(VkQueue                        
     const VkBindSparseInfo*                     pBindInfo,
     VkFence                                     fence) { (void)queue; (void)bindInfoCount; (void)pBindInfo; (void)fence;      return 0; }
 
-VKAPI_ATTR VkResult VKAPI_CALL vkCreateFence(VkDevice                                    device,
-    const VkFenceCreateInfo*                    pCreateInfo,
-    const VkAllocationCallbacks*                pAllocator,
-    VkFence*                                    pFence) { (void)device; (void)pCreateInfo; (void)pAllocator; (void)pFence;      return 0; }
+VKAPI_ATTR VkResult VKAPI_CALL vkCreateFence(VkDevice device, const VkFenceCreateInfo* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkFence* pFence) { (void)device; (void)pCreateInfo; (void)pAllocator; if(pFence){void*m=malloc(8); if(!m) return VK_ERROR_OUT_OF_HOST_MEMORY; *(void**)m=NULL; *pFence=(VkFence)m;} return VK_SUCCESS; }
 
 VKAPI_ATTR void VKAPI_CALL vkDestroyFence(VkDevice                                    device,
     VkFence                                     fence,
@@ -251,10 +290,7 @@ VKAPI_ATTR VkResult VKAPI_CALL vkWaitForFences(VkDevice                         
     VkBool32                                    waitAll,
     uint64_t                                    timeout) { (void)device; (void)fenceCount; (void)pFences; (void)waitAll; (void)timeout;      return 0; }
 
-VKAPI_ATTR VkResult VKAPI_CALL vkCreateSemaphore(VkDevice                                    device,
-    const VkSemaphoreCreateInfo*                pCreateInfo,
-    const VkAllocationCallbacks*                pAllocator,
-    VkSemaphore*                                pSemaphore) { (void)device; (void)pCreateInfo; (void)pAllocator; (void)pSemaphore;      return 0; }
+VKAPI_ATTR VkResult VKAPI_CALL vkCreateSemaphore(VkDevice device, const VkSemaphoreCreateInfo* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkSemaphore* pSemaphore) { (void)device; (void)pCreateInfo; (void)pAllocator; if(pSemaphore){void*m=malloc(8); if(!m) return VK_ERROR_OUT_OF_HOST_MEMORY; *(void**)m=NULL; *pSemaphore=(VkSemaphore)m;} return VK_SUCCESS; }
 
 VKAPI_ATTR void VKAPI_CALL vkDestroySemaphore(VkDevice                                    device,
     VkSemaphore                                 semaphore,
@@ -278,14 +314,55 @@ VKAPI_ATTR VkResult VKAPI_CALL vkGetQueryPoolResults(VkDevice                   
     VkDeviceSize                                stride,
     VkQueryResultFlags                          flags) { (void)device; (void)queryPool; (void)firstQuery; (void)queryCount; (void)dataSize; (void)pData; (void)stride; (void)flags;      return 0; }
 
-VKAPI_ATTR VkResult VKAPI_CALL vkCreateBuffer(VkDevice                                    device,
-    const VkBufferCreateInfo*                   pCreateInfo,
-    const VkAllocationCallbacks*                pAllocator,
-    VkBuffer*                                   pBuffer) { (void)device; (void)pCreateInfo; (void)pAllocator; (void)pBuffer;      return 0; }
-
-VKAPI_ATTR void VKAPI_CALL vkDestroyBuffer(VkDevice                                    device,
-    VkBuffer                                    buffer,
-    const VkAllocationCallbacks*                pAllocator) { (void)device; (void)buffer; (void)pAllocator;   }
+typedef struct { uint64_t id; VkDeviceMemory mem; VkDeviceSize size; VkDeviceSize offset; } BC250_BUF;
+static BC250_BUF g_bufs[256]; static int g_bufCount;
+static volatile LONG64 g_nextBufId = 1;
+VKAPI_ATTR VkResult VKAPI_CALL vkCreateBuffer(VkDevice device, const VkBufferCreateInfo* pCI, const VkAllocationCallbacks* pAlloc, VkBuffer* pBuf) {
+    (void)device; (void)pAlloc;
+    if (!pCI || !pBuf) return VK_ERROR_INITIALIZATION_FAILED;
+    void* h = NULL;
+    VkResult r = kmd_alloc_bo(pCI->size ? pCI->size : 4096, &h);
+    if (r != VK_SUCCESS) { void* m = malloc(pCI->size ? pCI->size : 4096); if (!m) return VK_ERROR_OUT_OF_HOST_MEMORY; h = m; }
+    uint64_t id = (uint64_t)InterlockedIncrement64(&g_nextBufId);
+    g_bufs[g_bufCount].id = id;
+    g_bufs[g_bufCount].mem = 0;
+    g_bufs[g_bufCount].size = pCI->size ? pCI->size : 4096;
+    g_bufs[g_bufCount].offset = 0;
+    g_bufCount++;
+    *pBuf = (VkBuffer)((uintptr_t)(id << 32) | (uintptr_t)h);
+    return VK_SUCCESS;
+}
+VKAPI_ATTR void VKAPI_CALL vkDestroyBuffer(VkDevice device, VkBuffer buffer, const VkAllocationCallbacks* pAlloc) {
+    (void)device; (void)pAlloc;
+    uint64_t bid = (uint64_t)buffer >> 32;
+    for (int i=0;i<g_bufCount;i++) {
+        if (g_bufs[i].id == bid) {
+            if (g_bufs[i].mem) vkFreeMemory(device, g_bufs[i].mem, NULL);
+            kmd_free_bo((void*)(uintptr_t)((uint64_t)buffer & 0xFFFFFFFFULL));
+            g_bufs[i] = g_bufs[g_bufCount-1]; g_bufCount--;
+            return;
+        }
+    }
+}
+VKAPI_ATTR void VKAPI_CALL vkGetBufferMemoryRequirements(VkDevice device, VkBuffer buffer, VkMemoryRequirements* pMemReq) {
+    (void)device;
+    uint64_t bid = (uint64_t)buffer >> 32;
+    for (int i=0;i<g_bufCount;i++) {
+        if (g_bufs[i].id == bid) {
+            pMemReq->size = g_bufs[i].size; pMemReq->alignment = 4096; pMemReq->memoryTypeBits = 0x1;
+            return;
+        }
+    }
+    pMemReq->size = 4096; pMemReq->alignment = 4096; pMemReq->memoryTypeBits = 0x1;
+}
+VKAPI_ATTR VkResult VKAPI_CALL vkBindBufferMemory(VkDevice device, VkBuffer buffer, VkDeviceMemory memory, VkDeviceSize offset) {
+    (void)device; (void)offset;
+    uint64_t bid = (uint64_t)buffer >> 32;
+    for (int i=0;i<g_bufCount;i++) {
+        if (g_bufs[i].id == bid) { g_bufs[i].mem = memory; g_bufs[i].offset = offset; return VK_SUCCESS; }
+    }
+    return VK_SUCCESS;
+}
 
 VKAPI_ATTR VkResult VKAPI_CALL vkCreateImage(VkDevice                                    device,
     const VkImageCreateInfo*                    pCreateInfo,
@@ -310,10 +387,7 @@ VKAPI_ATTR void VKAPI_CALL vkDestroyImageView(VkDevice                          
     VkImageView                                 imageView,
     const VkAllocationCallbacks*                pAllocator) { (void)device; (void)imageView; (void)pAllocator;   }
 
-VKAPI_ATTR VkResult VKAPI_CALL vkCreateCommandPool(VkDevice                                    device,
-    const VkCommandPoolCreateInfo*              pCreateInfo,
-    const VkAllocationCallbacks*                pAllocator,
-    VkCommandPool*                              pCommandPool) { (void)device; (void)pCreateInfo; (void)pAllocator; (void)pCommandPool;      return 0; }
+VKAPI_ATTR VkResult VKAPI_CALL vkCreateCommandPool(VkDevice device, const VkCommandPoolCreateInfo* pCreateInfo, const VkAllocationCallbacks* pAllocator, VkCommandPool* pCommandPool) { (void)device; (void)pCreateInfo; (void)pAllocator; if(pCommandPool){void*m=malloc(8); if(!m) return VK_ERROR_OUT_OF_HOST_MEMORY; *(void**)m=NULL; *pCommandPool=(VkCommandPool)m;} return VK_SUCCESS; }
 
 VKAPI_ATTR void VKAPI_CALL vkDestroyCommandPool(VkDevice                                    device,
     VkCommandPool                               commandPool,
@@ -323,9 +397,7 @@ VKAPI_ATTR VkResult VKAPI_CALL vkResetCommandPool(VkDevice                      
     VkCommandPool                               commandPool,
     VkCommandPoolResetFlags                     flags) { (void)device; (void)commandPool; (void)flags;      return 0; }
 
-VKAPI_ATTR VkResult VKAPI_CALL vkAllocateCommandBuffers(VkDevice                                    device,
-    const VkCommandBufferAllocateInfo*          pAllocateInfo,
-    VkCommandBuffer*                            pCommandBuffers) { (void)device; (void)pAllocateInfo; (void)pCommandBuffers;      return 0; }
+VKAPI_ATTR VkResult VKAPI_CALL vkAllocateCommandBuffers(VkDevice device, const VkCommandBufferAllocateInfo* pAllocateInfo, VkCommandBuffer* pCommandBuffers) { (void)device; if(pAllocateInfo && pCommandBuffers){ for(uint32_t i=0;i<pAllocateInfo->commandBufferCount;i++){void*m=malloc(8); if(!m) return VK_ERROR_OUT_OF_HOST_MEMORY; *(void**)m=NULL; pCommandBuffers[i]=(VkCommandBuffer)m; }} return VK_SUCCESS; }
 
 VKAPI_ATTR void VKAPI_CALL vkFreeCommandBuffers(VkDevice                                    device,
     VkCommandPool                               commandPool,

@@ -99,7 +99,7 @@ static NTSTATUS DreamV3AllocVidMem(
     SIZE_T allocSize = (SIZE_T)RequestedSize;
     allocSize = (allocSize + 0xFFF) & ~0xFFFULL;
     if (allocSize < 4096) allocSize = 4096;
-    if (allocSize > 64 * 1024 * 1024) allocSize = 64 * 1024 * 1024;
+    if (allocSize > 256 * 1024 * 1024) allocSize = 256 * 1024 * 1024;
 
     if (KeGetCurrentIrql() > APC_LEVEL) {
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
@@ -120,7 +120,7 @@ static NTSTATUS DreamV3AllocVidMem(
     }
 
     __try {
-        PVOID va = MmMapLockedPagesSpecifyCache(mdl, KernelMode, MmCached,
+        PVOID va = MmMapLockedPagesSpecifyCache(mdl, UserMode, MmCached,
                                                 NULL, FALSE, NormalPagePriority);
         if (va == NULL) {
             KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
@@ -3166,8 +3166,18 @@ DreamV3DeviceControl(
             }
             status = STATUS_SUCCESS;
             goto Cleanup;
-        case 0x80000840: { /* ALLOC_VIDMEM - proper MDL allocation */
-            if (inputLen >= sizeof(ULONG) * 3 && outputLen >= sizeof(ULONG64) * 2) {
+        case 0x80000840: { /* ALLOC_VIDMEM - MDL allocation (supports both old ULONG[3] and new struct) */
+            if (inputLen >= sizeof(AMDBC250_IOCTL_ALLOC_VIDMEM) && outputLen >= sizeof(AMDBC250_IOCTL_ALLOC_VIDMEM_RESULT)) {
+                PAMDBC250_IOCTL_ALLOC_VIDMEM in = (PAMDBC250_IOCTL_ALLOC_VIDMEM)inputBuffer;
+                PAMDBC250_IOCTL_ALLOC_VIDMEM_RESULT out = (PAMDBC250_IOCTL_ALLOC_VIDMEM_RESULT)outputBuffer;
+                SIZE_T sz = (SIZE_T)in->Size;
+                if (sz == 0) sz = 4096;
+                status = DreamV3AllocVidMem(sz, &out->PhysicalAddress, &out->GpuVirtualAddress);
+                if (NT_SUCCESS(status)) {
+                    out->Handle = out->GpuVirtualAddress;
+                    bytesReturned = sizeof(*out);
+                }
+            } else if (inputLen >= sizeof(ULONG) * 3 && outputLen >= sizeof(ULONG64) * 2) {
                 PULONG InData = (PULONG)inputBuffer;
                 PULONG64 OutData = (PULONG64)outputBuffer;
                 status = DreamV3AllocVidMem((SIZE_T)InData[0], &OutData[0], &OutData[1]);
@@ -3467,11 +3477,13 @@ DreamV3DeviceControl(
                 KeReleaseSpinLock(&g_MdlTableLock, oldIrql);
 
                 if (!found) {
-                    MmFreeContiguousMemory(handle);
+                    status = STATUS_NOT_FOUND;
+                    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
+                        "AMDBC250-DREAM-V4.3: FreeVidMem handle not found %p\n", handle));
+                } else {
+                    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                        "AMDBC250-DREAM-V4.3: FreeVidMem OK (MDL freed)\n"));
                 }
-                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-                    "AMDBC250-DREAM-V4.3: FreeVidMem OK (MDL=%s)\n",
-                    found ? "freed" : "contiguous"));
             }
         } else {
             status = STATUS_BUFFER_TOO_SMALL;
@@ -4008,6 +4020,10 @@ DreamV3DeviceControl(
             SMU_ARG_TEMP,        /* 30..100 C */
             SMU_ARG_BOOL,        /* 0 or 1 */
             SMU_ARG_CORE_ID,     /* 0..7 */
+            SMU_ARG_MASK32,      /* raw 32-bit mask (feature bits) — safe bits only */
+            SMU_ARG_SMN_ADDR,    /* known-safe SMN address only (Q3 0x98 ungated write) */
+            SMU_ARG_ADDR32,      /* 32-bit DRAM address high/low for table DMA */
+            SMU_ARG_SRAM_ADDR,   /* DWORD-aligned SMU SRAM offset (lower SRAM only) */
         } SMU_CPU_ARG_TYPE;
         typedef struct _SMU_CPU_MSG_DESC {
             ULONG Queue;
@@ -4015,10 +4031,14 @@ DreamV3DeviceControl(
             SMU_CPU_ARG_TYPE ArgType;
         } SMU_CPU_MSG_DESC;
         static const SMU_CPU_MSG_DESC Whitelist[] = {
+            /* Q0: SMU info queries */
+            { 0, AMDBC250_SMU_Q0_GET_SMU_VERSION,       SMU_ARG_NONE },
+            { 0, AMDBC250_SMU_Q0_GET_DRIVER_IF_VERSION, SMU_ARG_NONE },
             /* Q0: CPU pstate / cclk / core enable */
             { 0, AMDBC250_SMU_Q0_SET_CORE_ENABLE_MASK, SMU_ARG_MASK8 },
             { 0, AMDBC250_SMU_Q0_SET_SOFT_MIN_CCLK,    SMU_ARG_CORE_FREQ },
             { 0, AMDBC250_SMU_Q0_SET_SOFT_MAX_CCLK,    SMU_ARG_CORE_FREQ },
+            { 0, AMDBC250_SMU_Q0_GET_ENABLED_FEATURES, SMU_ARG_NONE },
             /* Q3: CPU voltage / freq */
             { 3, AMDBC250_SMU_Q3_SCALE_F_VID_CURVE,     SMU_ARG_VID16 },
             { 3, AMDBC250_SMU_Q3_GET_CURRENT_CPU_VOLT,  SMU_ARG_NONE },
@@ -4027,6 +4047,17 @@ DreamV3DeviceControl(
             { 3, AMDBC250_SMU_Q3_SET_CPU_MAX_TEMP,      SMU_ARG_TEMP },
             { 3, AMDBC250_SMU_Q3_SET_GPU_MAX_TEMP,      SMU_ARG_TEMP },
             { 3, AMDBC250_SMU_Q3_DISABLE_EXTRA_VOLT,    SMU_ARG_BOOL },
+            { 3, AMDBC250_SMU_Q3_ENABLE_FEATURES,       SMU_ARG_MASK32 },
+            /* Q3: ungated SMN write (only known-safe addresses) */
+            { 3, AMDBC250_SMU_Q3_UNGATED_SMN_WRITE,     SMU_ARG_SMN_ADDR },
+            /* Q3: SMU SRAM write pointer + data (DWORD-aligned, lower SRAM only) */
+            { 3, AMDBC250_SMU_Q3_SEC_SET_WRITE_PTR,     SMU_ARG_SRAM_ADDR },
+            { 3, AMDBC250_SMU_Q3_SEC_WRITE_THROUGH,     SMU_ARG_NONE },
+            /* Q0: SMU table DMA address setup (addr must be 4KB-aligned DRAM) */
+            { 0, AMDBC250_SMU_Q0_SET_DRV_TBL_ADDR_HI,   SMU_ARG_ADDR32 },
+            { 0, AMDBC250_SMU_Q0_SET_DRV_TBL_ADDR_LO,   SMU_ARG_ADDR32 },
+            { 0, AMDBC250_SMU_Q0_TRANSFER_TBL_SMU2DRAM, SMU_ARG_NONE },
+            { 0, AMDBC250_SMU_Q0_TRANSFER_TBL_DRAM2SMU, SMU_ARG_NONE },
         };
 
         /* Find + validate the message against the whitelist. */
@@ -4054,6 +4085,10 @@ DreamV3DeviceControl(
             case SMU_ARG_TEMP:     allowed = (a >= 30 && a <= 100); break;
             case SMU_ARG_BOOL:     allowed = (a == 0 || a == 1); break;
             case SMU_ARG_CORE_ID:  allowed = (a <= 7); break;
+            case SMU_ARG_MASK32:   allowed = ((a & ~AMDBC250_SAFE_SMU_FEATURE_MASK) == 0); break;
+            case SMU_ARG_SMN_ADDR: allowed = (a == AMDBC250_SAFE_SMN_ADDR_CORE_MASK); break;
+            case SMU_ARG_ADDR32:    allowed = ((a & 0xFFF) == 0); break;  /* 4KB-aligned */
+            case SMU_ARG_SRAM_ADDR: allowed = ((a & 3) == 0) && (a <= 0x000FFFFF); break; /* DWORD-aligned SMU SRAM */
             default:               allowed = FALSE; break;
             }
             break;
@@ -4273,16 +4308,14 @@ DreamV3DeviceControl(
             PULONG InData = (PULONG)inputBuffer;
             ULONG enable = InData[0]; /* 0=disable (stock 24CU), 1=enable (40CU) */
 
-            /* Per-bank GRBM_GFX_INDEX values (SE/SH combinations, layout B).
-             * NOTE 2026-08-01: host BAR5 writes to SPI_PG are SOS-locked on
-             * BC-250 G�� verified they do NOT stick on ANY bank (smn-gc-alias-scan
-             * v2). This handler still performs the writes and then reads back to
-             * report the TRUE result instead of claiming success. */
+            /* Per-bank GRBM_GFX_INDEX values (gfx10.1 SA/SE layout).
+             * gfx10.1: INSTANCE=bits[7:0], SA=bits[15:8], SE=bits[23:16].
+             * BC-250 has 2 SE x 2 SA (4 banks). Broadcast bits 29,30,31. */
             static const ULONG BankSelects[4] = {
-                0x00000000,  /* SE0/SH0 */
-                0x01000000,  /* SE0/SH1 */
-                0x10000000,  /* SE1/SH0 */
-                0x11000000   /* SE1/SH1 */
+                0x00000000,  /* SE0/SA0 */
+                0x00000100,  /* SE0/SA1 (SA index 1) */
+                0x00010000,  /* SE1/SA0 (SE index 1) */
+                0x00010100   /* SE1/SA1 */
             };
 
             /* Readback verification: count banks where the write stuck. */
@@ -4385,8 +4418,8 @@ DreamV3DeviceControl(
 
     /* --- Init Hardware (user-mode provides MMIO base) --- */
     case 0x80000B80: { /* IOCTL_AMDBC250_INIT_HARDWARE */
-        /* Accept either old (16B) or new (32B) struct size */
-        if (inputLen >= 16 && inputLen <= sizeof(AMDBC250_IOCTL_INIT_HARDWARE)) {
+        /* Require the full struct; partial buffers cause OOB reads of FbPhysicalBase/FbSize */
+        if (inputLen == sizeof(AMDBC250_IOCTL_INIT_HARDWARE)) {
             PAMDBC250_IOCTL_INIT_HARDWARE InitHw = (PAMDBC250_IOCTL_INIT_HARDWARE)inputBuffer;
 
             /* Serialize re-init: guard the whole map/init sequence against
@@ -4668,6 +4701,11 @@ DreamV3DeviceControl(
 
             if (SendPm4->CommandCount == 0 || SendPm4->CommandCount > 64) {
                 status = STATUS_INVALID_PARAMETER;
+                break;
+            }
+            /* Ensure the input buffer actually contains CommandCount DWORDs. */
+            if (sizeof(AMDBC250_IOCTL_SEND_PM4) + SendPm4->CommandCount * sizeof(ULONG) > inputLen) {
+                status = STATUS_BUFFER_TOO_SMALL;
                 break;
             }
 
@@ -5485,6 +5523,58 @@ DreamV3DeviceControl(
         } else {
             status = STATUS_BUFFER_TOO_SMALL;
         }
+        break;
+    }
+
+    /* --- PCI config SMN window 00:00.0 0xB8/0xBC (Linux Bc250PciTransport retest) --- */
+    case 0x80000C30: { /* IOCTL_AMDBC250_PCI_SMN_ACCESS = CTL_CODE(0x9C) */
+        if (inputLen >= sizeof(AMDBC250_IOCTL_PCI_SMN_ACCESS) &&
+            outputLen >= sizeof(AMDBC250_IOCTL_PCI_SMN_ACCESS)) {
+            PAMDBC250_IOCTL_PCI_SMN_ACCESS p = (PAMDBC250_IOCTL_PCI_SMN_ACCESS)inputBuffer;
+            ULONG bus = p->Bus, dev = p->Device, func = p->Function;
+            if (bus > 255) bus = 0; if (dev > 31) dev = 0; if (func > 7) func = 0;
+            p->Result = 0; p->Method = 0; p->Bar5SmnData = 0xFFFFFFFF;
+            __try {
+                /* Method 1: CF8/CFC ports (legacy PCI config) */
+                ULONG addrB8 = 0x80000000 | (bus << 16) | (dev << 11) | (func << 8) | 0xB8;
+                ULONG addrBC = 0x80000000 | (bus << 16) | (dev << 11) | (func << 8) | 0xBC;
+                if (p->IsWrite) {
+                    WRITE_PORT_ULONG((PULONG)(UINT_PTR)0xCF8, addrB8); KeMemoryBarrier();
+                    WRITE_PORT_ULONG((PULONG)(UINT_PTR)0xCFC, p->SmnAddress); KeMemoryBarrier();
+                    WRITE_PORT_ULONG((PULONG)(UINT_PTR)0xCF8, addrBC); KeMemoryBarrier();
+                    WRITE_PORT_ULONG((PULONG)(UINT_PTR)0xCFC, p->SmnData); KeMemoryBarrier();
+                    /* readback */
+                    WRITE_PORT_ULONG((PULONG)(UINT_PTR)0xCF8, addrB8); KeMemoryBarrier();
+                    WRITE_PORT_ULONG((PULONG)(UINT_PTR)0xCFC, p->SmnAddress); KeMemoryBarrier();
+                    WRITE_PORT_ULONG((PULONG)(UINT_PTR)0xCF8, addrBC); KeMemoryBarrier();
+                    p->SmnData = READ_PORT_ULONG((PULONG)(UINT_PTR)0xCFC);
+                    p->Result = 1; p->Method = 1;
+                } else {
+                    WRITE_PORT_ULONG((PULONG)(UINT_PTR)0xCF8, addrB8); KeMemoryBarrier();
+                    WRITE_PORT_ULONG((PULONG)(UINT_PTR)0xCFC, p->SmnAddress); KeMemoryBarrier();
+                    WRITE_PORT_ULONG((PULONG)(UINT_PTR)0xCF8, addrBC); KeMemoryBarrier();
+                    p->SmnData = READ_PORT_ULONG((PULONG)(UINT_PTR)0xCFC);
+                    p->Result = 1; p->Method = 1;
+                }
+                /* Also read same SMN via BAR5+0x38/0x3C for comparison */
+                if (DevExt && DevExt->MmioVirtualBase) {
+                    volatile PULONG bar5_38 = (volatile PULONG)((PUCHAR)DevExt->MmioVirtualBase + 0x38);
+                    volatile PULONG bar5_3C = (volatile PULONG)((PUCHAR)DevExt->MmioVirtualBase + 0x3C);
+                    WRITE_REGISTER_ULONG((PULONG)bar5_38, p->SmnAddress); KeMemoryBarrier();
+                    (void)READ_REGISTER_ULONG((PULONG)bar5_38);
+                    p->Bar5SmnData = READ_REGISTER_ULONG((PULONG)bar5_3C);
+                }
+                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                    "AMDBC250: PCI_SMN %s B%u:D%u:F%u SMN 0x%08X -> 0x%08X (bar5 0x%08X) via CF8/CFC\n",
+                    p->IsWrite?"W":"R", bus, dev, func, p->SmnAddress, p->SmnData, p->Bar5SmnData));
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
+                    "AMDBC250: PCI_SMN EXCEPTION 0x%08X addr 0x%08X\n", GetExceptionCode(), p->SmnAddress));
+                p->Result = 0;
+            }
+            status = STATUS_SUCCESS;
+            bytesReturned = sizeof(AMDBC250_IOCTL_PCI_SMN_ACCESS);
+        } else { status = STATUS_BUFFER_TOO_SMALL; }
         break;
     }
 
