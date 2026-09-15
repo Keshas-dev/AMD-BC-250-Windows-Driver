@@ -448,12 +448,40 @@ VkResult VKAPI_CALL bc250_vkGetPhysicalDeviceMemoryProperties(
     VkPhysicalDevice physicalDevice,
     void* pMemoryProperties)
 {
-    UNREFERENCED_PARAMETER(physicalDevice);
-    
-    /* Report memory heaps for BC-250 (16GB shared UMA) */
-    memset(pMemoryProperties, 0, 256);
-    
-    OutputDebugStringA("BC-250 Vulkan: GetPhysicalDeviceMemoryProperties\n");
+    BC250_VK_DEVICE* dev = (BC250_VK_DEVICE*)physicalDevice;
+
+    /* Query VRAM from KMD via GET_VRAM_INFO (0x80000804) */
+    UINT64 totalVram = 16ULL * 1024 * 1024 * 1024; /* 16GB fallback */
+    if (dev->kmdDevice != INVALID_HANDLE_VALUE) {
+        DWORD br = 0;
+        UINT64 vramInfo[4] = {0};
+        if (DeviceIoControl(dev->kmdDevice, 0x80000804, NULL, 0,
+                              vramInfo, sizeof(vramInfo), &br, NULL)) {
+            if (vramInfo[0] > 0) totalVram = vramInfo[0];
+        }
+    }
+
+    /* Write VkPhysicalDeviceMemoryProperties by byte offsets.
+     * Layout (no padding issues, all types naturally aligned):
+     * [0]   memoryTypeCount (uint32)
+     * [4]   memoryTypes[0] (8 bytes: propertyFlags+heapIndex)
+     * [12]  memoryTypes[1] (8 bytes)
+     * [132] memoryHeapCount (uint32)
+     * [136] memoryHeaps[0] (16 bytes: size uint64 + flags uint32 + pad)
+     * Total: 392 bytes
+     * Flags: DEVICE_LOCAL=0x1, HOST_VISIBLE=0x2, HOST_COHERENT=0x4
+     */
+    uint8_t* p = (uint8_t*)pMemoryProperties;
+    *(uint32_t*)(p + 0)   = 2;        /* memoryTypeCount */
+    *(uint32_t*)(p + 4)   = 0x1;      /* types[0].propertyFlags = DEVICE_LOCAL */
+    *(uint32_t*)(p + 8)   = 0;        /* types[0].heapIndex */
+    *(uint32_t*)(p + 12)  = 0x7;      /* types[1].propertyFlags = DEV_LOCAL|HOST_VIS|HOST_COH */
+    *(uint32_t*)(p + 16)  = 0;        /* types[1].heapIndex */
+    *(uint32_t*)(p + 132) = 1;        /* memoryHeapCount */
+    *(UINT64*)(p + 136)   = totalVram; /* heaps[0].size */
+    *(uint32_t*)(p + 144) = 0x1;      /* heaps[0].flags = DEVICE_LOCAL */
+
+    OutputDebugStringA("BC-250 Vulkan: GetPhysicalDeviceMemoryProperties OK\n");
     return VK_SUCCESS;
 }
 

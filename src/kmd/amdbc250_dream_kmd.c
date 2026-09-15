@@ -3350,6 +3350,8 @@ DreamV3DeviceControl(
 
     /* --- Get VRAM Info --- */
     case 0x80000804: { /* IOCTL_AMDBC250_GET_VRAM_INFO */
+        /* BC-250 unified memory (APU): all RAM is GPU-visible */
+        DevExt->VisibleVramBytes = DevExt->TotalVramBytes;
         if (outputLen >= sizeof(ULONG64) * 3 + sizeof(ULONG)) {
             PULONG64 Data64 = (PULONG64)outputBuffer;
             PULONG Data32 = (PULONG)(Data64 + 3);
