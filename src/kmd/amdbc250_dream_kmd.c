@@ -632,6 +632,11 @@ DriverEntry(
                         KeInitializeSpinLock(&g_PciDevExt->FenceLock);
                         InitializeListHead(&g_PciDevExt->AllocationList);
                         KeInitializeEvent(&g_PciDevExt->DeviceRemoved, NotificationEvent, FALSE);
+                        /* FIX 2026-09-16 (#1): FenceEvent was never initialized n++
+                         * KeSetEvent on it in SUBMIT path = BSOD 0xA.
+                         * GfxRing.Lock likewise; SUBMIT takes it now. */
+                        KeInitializeEvent(&g_PciDevExt->GlobalFence.FenceEvent, SynchronizationEvent, FALSE);
+                        KeInitializeSpinLock(&g_PciDevExt->GfxRing.Lock);
 
                         g_PciDevExt->VendorId = 0x1002;
                         g_PciDevExt->DeviceId = 0x13FE;
@@ -720,6 +725,9 @@ DreamV3DdiAddDevice(
     KeInitializeSpinLock(&g_MdlTableLock);
     InitializeListHead(&DevExt->AllocationList);
     KeInitializeEvent(&DevExt->DeviceRemoved, NotificationEvent, FALSE);
+    /* FIX 2026-09-16 (#1): see g_PciDevExt init above. */
+    KeInitializeEvent(&DevExt->GlobalFence.FenceEvent, SynchronizationEvent, FALSE);
+    KeInitializeSpinLock(&DevExt->GfxRing.Lock);
 
     DevExt->PhysicalDeviceObject = PhysicalDeviceObject;
 
@@ -2093,15 +2101,23 @@ DreamV3DdiSubmitCommand(
     /* Write EOP fence packet to ring */
     DreamV3WriteEopFence(DevExt, CurrentFence);
 
-    /* Submit ring to hardware - write WPTR */
-    ULONG WPtr = DevExt->GfxRing.WritePointer;
-    DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_GFX_RING0_WPTR, WPtr);
+    /* Submit ring to hardware - write WPTR.
+     * FIX 2026-09-16 (N1): only on verified-initialized ring (same class
+     * as IOCTL SUBMIT fix); otherwise fence bookkeeping only. */
+    ULONG WPtrDdi = DevExt->GfxRing.WritePointer;
+    if (DevExt->GfxRing.Initialized) {
+    DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_GFX_RING0_WPTR, WPtrDdi);
     
     /* Doorbell notification (if available) */
     if (DevExt->DoorbellVirtualBase != NULL) {
         PULONG Doorbell = (PULONG)((PUCHAR)DevExt->DoorbellVirtualBase + DevExt->GfxRing.DoorbellOffset);
-        *Doorbell = WPtr;
+        *Doorbell = WPtrDdi;
         KeMemoryBarrier();  /* Ensure write is visible */
+    }
+    } else {
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_TRACE_LEVEL,
+                   "AMDBC250-DREAM-V4.3: DdiSubmit fence-only (ring not initialized), wptr=0x%X\n",
+                   WPtrDdi));
     }
 
     KeReleaseSpinLock(&DevExt->GfxRing.Lock, OldIrql);
@@ -2110,7 +2126,7 @@ DreamV3DdiSubmitCommand(
 
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_TRACE_LEVEL,
                "AMDBC250-DREAM-V4.3: SubmitCommand - fence=%llu, wptr=0x%X\n",
-               CurrentFence, WPtr));
+               CurrentFence, WPtrDdi));
 
     return STATUS_SUCCESS;
 }
@@ -3517,7 +3533,15 @@ DreamV3DeviceControl(
 
     /* --- Submit Commands --- */
     case 0x80000880: { /* IOCTL_AMDBC250_SUBMIT_COMMANDS */
-        if (inputLen >= sizeof(ULONG) * 4) {
+        /* FIX 2026-09-16 (#1): DevExt NULL guard + GfxRing.Lock +
+         * HW kick only on verified-initialized ring. Previously:
+         * uninitialized FenceEvent KeSetEvent = BSOD 0xA; unguarded
+         * ring write + unconditional SubmitGfxRing on a ring whose
+         * BASE never stuck (SOS-locked) = rogue fetch/0xA.
+         * With HwInitGfxRing=0 (default) Initialized stays FALSE and
+         * this becomes fence-bookkeeping only (IBs owned by the
+         * SW PM4 emulator path). */
+        if (DevExt != NULL && inputLen >= sizeof(ULONG) * 4) {
             PULONG InData = (PULONG)inputBuffer;
             ULONG fenceValue;
             ULONG ibAddrLo = InData[0];
@@ -3534,8 +3558,14 @@ DreamV3DeviceControl(
                 ibSize = InData[2];      /* IB size in bytes */
             }
 
-            /* If IB provided, write INDIRECT_BUFFER packet into ring */
-            if (ibAddrLo != 0 && ibSize > 0 &&
+            KIRQL subIrql;
+            KeAcquireSpinLock(&DevExt->GfxRing.Lock, &subIrql);
+
+            /* If IB provided, write INDIRECT_BUFFER packet into ring.
+             * Gate on Initialized: BASE registers are SOS-locked, so a
+             * ring that was never verified must never be kicked. */
+            if (DevExt->GfxRing.Initialized &&
+                ibAddrLo != 0 && ibSize > 0 &&
                 DevExt->GfxRing.VirtualAddress != NULL &&
                 DevExt->HardwareInitialized) {
                 volatile PULONG Ring = (volatile PULONG)DevExt->GfxRing.VirtualAddress;
@@ -3543,7 +3573,14 @@ DreamV3DeviceControl(
                 ULONG RingSize = (ULONG)DevExt->GfxRing.SizeInBytes;
                 ULONG NeededSpace = 4 * sizeof(ULONG);
 
-                /* Ring wrap if needed */
+                /* FIX 2026-09-16 (N2): never write when the ring cannot
+                 * hold even one packet (SizeInBytes==0/stale). */
+                if (RingSize >= NeededSpace) {
+
+                /* Ring wrap if needed (validated: WPtr <= RingSize or reset) */
+                if (WPtr > RingSize) {
+                    WPtr = 0;
+                }
         if ((ULONG64)WPtr + NeededSpace > RingSize) {
                     WPtr = 0;
                 }
@@ -3555,16 +3592,21 @@ DreamV3DeviceControl(
                 Ring[WPtr / sizeof(ULONG) + 3] = (ibSize + 3) / sizeof(ULONG);
                 WPtr += 4 * sizeof(ULONG);
                 DevExt->GfxRing.WritePointer = WPtr;
+
+                DreamV3WriteEopFence(DevExt, (ULONG64)fenceValue);
+                DreamV3SubmitGfxRing(DevExt);
+                } /* RingSize >= NeededSpace */
             }
 
-            DreamV3WriteEopFence(DevExt, (ULONG64)fenceValue);
+            KeReleaseSpinLock(&DevExt->GfxRing.Lock, subIrql);
+
             DevExt->GlobalFence.LastSubmittedValue = (ULONG64)fenceValue;
-            DreamV3SubmitGfxRing(DevExt);
             KeSetEvent(&DevExt->GlobalFence.FenceEvent, 0, FALSE);
 
             KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_TRACE_LEVEL,
-                "AMDBC250-DREAM-V4.3: SubmitCommands fence=%u ib=%s\n",
-                fenceValue, (ibAddrLo != 0) ? "yes" : "no"));
+                "AMDBC250-DREAM-V4.3: SubmitCommands fence=%u ib=%s %s\n",
+                fenceValue, (ibAddrLo != 0) ? "yes" : "no",
+                DevExt->GfxRing.Initialized ? "hwkick" : "fence-only"));
         }
         break;
     }

@@ -110,7 +110,7 @@ NTSTATUS DreamV3HwInitializeExtended(_In_ PDREAM_V3_DEVICE_EXTENSION DevExt){
                 WRITE_REGISTER_ULONG((PULONG)(bar5 + 0x5C3C), 0x0000001F);
                 WRITE_REGISTER_ULONG((PULONG)(bar5 + 0x3D64), 0x0000001F);
             }
-            WRITE_REGISTER_ULONG((PULONG)(bar5 + 0x34D0), 0xE0000000);
+            WRITE_REGISTER_ULONG((PULONG)(bar5 + 0x34D0), AMDBC250_GRBM_GFX_INDEX_BROADCAST_VAL); /* 0x15000000 gfx10 broadcast (was 0xE0000000 soc15; see hw.h:445) */
             ULONG spiAfter = READ_REGISTER_ULONG((PULONG)(bar5 + 0x5C3C));
             KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL, "AMDBC250: [EXT 12b] SPI 0x%08X->0x%08X %s\n", spiBefore, spiAfter, (spiAfter&0x1F)==0x1F?"UNLOCKED":"STILL LOCKED"));
         }
