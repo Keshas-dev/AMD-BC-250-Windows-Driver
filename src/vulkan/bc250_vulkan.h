@@ -14,6 +14,7 @@
 extern "C" {
 #endif
 
+#ifndef VK_HEADER_VERSION
 /* Vulkan base types */
 typedef uint32_t VkFlags;
 typedef uint32_t VkBool32;
@@ -222,6 +223,7 @@ typedef void (VKAPI_PTR *PFN_vkCmdBindIndexBuffer)(VkCommandBuffer, VkBuffer, Vk
 typedef void (VKAPI_PTR *PFN_vkCmdBindDescriptorSets)(VkCommandBuffer, VkFlags, VkPipelineLayout, uint32_t, uint32_t, const VkDescriptorSet*, uint32_t, const uint32_t*);
 typedef void (VKAPI_PTR *PFN_vkCmdPushConstants)(VkCommandBuffer, VkPipelineLayout, VkFlags, uint32_t, uint32_t, const void*);
 typedef VkResult (VKAPI_PTR *PFN_vkQueuePresentKHR)(VkQueue, const void*);
+#endif /* VK_HEADER_VERSION */
 
 #ifdef __cplusplus
 }
