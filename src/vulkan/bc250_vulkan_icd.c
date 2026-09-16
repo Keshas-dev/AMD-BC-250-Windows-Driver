@@ -30,6 +30,20 @@
 /* Forward declaration */
 static void bc250_DestroyDevice(VkDevice device);
 
+/* File trace: appends entry/exit markers to icd-log.txt.
+ * Last line in the log after a crash == crash site. */
+static void bc250_trace(const char* func, const char* phase, const void* arg)
+{
+    FILE *f = fopen("C:\\AMD-BC-250\\AMD-BC-250-Windows-Driver-main\\output\\icd-log.txt", "a");
+    if (f) {
+        fprintf(f, "TRACE %s %s arg=%p\n", func, phase, arg);
+        fflush(f);
+        fclose(f);
+    }
+}
+#define BC250_TRACE_IN(arg) bc250_trace(__FUNCTION__, "enter", (const void*)(arg))
+#define BC250_TRACE_OUT(arg) bc250_trace(__FUNCTION__, "exit", (const void*)(arg))
+
 /* Device context */
 typedef struct {
     VkDevice        device;
@@ -97,7 +111,9 @@ static VkResult bc250_vkEnumerateDeviceExtensionProperties(
     UNREFERENCED_PARAMETER(physicalDevice);
     UNREFERENCED_PARAMETER(pLayerName);
     UNREFERENCED_PARAMETER(pProperties);
+    BC250_TRACE_IN(physicalDevice);
     if (pPropertyCount) *pPropertyCount = 0;
+    BC250_TRACE_OUT(pPropertyCount);
     return VK_SUCCESS;
 }
 
@@ -105,7 +121,7 @@ static VkResult bc250_vkEnumerateDeviceExtensionProperties(
 static void bc250_vkGetPhysicalDeviceSparseImageFormatPropertiesStub(VkPhysicalDevice a, uint32_t b, uint32_t c, uint32_t d, uint32_t e, uint32_t* f, void** g) { UNREFERENCED_PARAMETER(a); UNREFERENCED_PARAMETER(b); UNREFERENCED_PARAMETER(c); UNREFERENCED_PARAMETER(d); UNREFERENCED_PARAMETER(e); if (f) *f = 0; UNREFERENCED_PARAMETER(g); }
 static void bc250_vkGetPhysicalDeviceSparseImageFormatProperties2Stub(VkPhysicalDevice a, const void* b, uint32_t* c, void* d) { UNREFERENCED_PARAMETER(a); UNREFERENCED_PARAMETER(b); if (c) *c = 0; UNREFERENCED_PARAMETER(d); }
 static void bc250_vkGetPhysicalDeviceQueueFamilyProperties2Stub(VkPhysicalDevice a, uint32_t* b, void* c) { UNREFERENCED_PARAMETER(a); if (b) *b = 0; UNREFERENCED_PARAMETER(c); }
-static void bc250_vkGetPhysicalDeviceMemoryProperties2Stub(VkPhysicalDevice a, void* b) { UNREFERENCED_PARAMETER(a); UNREFERENCED_PARAMETER(b); }
+static VkResult bc250_vkGetPhysicalDeviceToolPropertiesStub(VkPhysicalDevice a, uint32_t* b, void* c) { UNREFERENCED_PARAMETER(a); if (b) *b = 0; UNREFERENCED_PARAMETER(c); return VK_SUCCESS; }static void bc250_vkGetPhysicalDeviceMemoryProperties2Stub(VkPhysicalDevice a, void* b) { UNREFERENCED_PARAMETER(a); UNREFERENCED_PARAMETER(b); }
 static void bc250_vkGetPhysicalDeviceFeatures2Stub(VkPhysicalDevice a, void* b) { UNREFERENCED_PARAMETER(a); UNREFERENCED_PARAMETER(b); }
 static void bc250_vkGetPhysicalDeviceFormatProperties2Stub(VkPhysicalDevice a, uint32_t b, void* c) { UNREFERENCED_PARAMETER(a); UNREFERENCED_PARAMETER(b); UNREFERENCED_PARAMETER(c); }
 static VkResult bc250_vkGetPhysicalDeviceImageFormatProperties2Stub(VkPhysicalDevice a, const void* b, void* c) { UNREFERENCED_PARAMETER(a); UNREFERENCED_PARAMETER(b); UNREFERENCED_PARAMETER(c); return VK_SUCCESS; }
@@ -142,8 +158,33 @@ __declspec(dllexport) void* VKAPI_CALL vk_icdGetDeviceProcAddr(VkDevice device, 
 
 /* Required Vulkan 1.0 stub functions */
 static VkResult bc250_vkGetPhysicalDeviceFeatures(VkPhysicalDevice a, void* b) { UNREFERENCED_PARAMETER(a); UNREFERENCED_PARAMETER(b); return VK_SUCCESS; }
-static void bc250_vkGetPhysicalDeviceFormatProperties(VkPhysicalDevice a, uint32_t b, void* c) { UNREFERENCED_PARAMETER(a); UNREFERENCED_PARAMETER(b); UNREFERENCED_PARAMETER(c); }
-static VkResult bc250_vkGetPhysicalDeviceImageFormatProperties(VkPhysicalDevice a, uint32_t b, uint32_t c, uint32_t d, uint32_t e, uint64_t f, uint32_t* g, void* h) { UNREFERENCED_PARAMETER(a); UNREFERENCED_PARAMETER(b); UNREFERENCED_PARAMETER(c); UNREFERENCED_PARAMETER(d); UNREFERENCED_PARAMETER(e); UNREFERENCED_PARAMETER(f); if (g) *g = 128; UNREFERENCED_PARAMETER(h); return VK_SUCCESS; }
+static void bc250_vkGetPhysicalDeviceFormatProperties(VkPhysicalDevice a, uint32_t b, void* c) {
+    UNREFERENCED_PARAMETER(a); UNREFERENCED_PARAMETER(b);
+    /* VkFormatProperties = 3x VkFormatFeatureFlags. Zero = format
+     * unsupported -> vulkaninfo skips it. MUST write: caller passes
+     * uninitialized stack memory, garbage feature bits crash consumers. */
+    if (c) memset(c, 0, 3 * sizeof(uint32_t));
+}
+static VkResult bc250_vkGetPhysicalDeviceImageFormatProperties(VkPhysicalDevice a, uint32_t b, uint32_t c, uint32_t d, uint32_t e, uint64_t f, void* g, void* h) {
+    UNREFERENCED_PARAMETER(a); UNREFERENCED_PARAMETER(b); UNREFERENCED_PARAMETER(c);
+    UNREFERENCED_PARAMETER(d); UNREFERENCED_PARAMETER(e); UNREFERENCED_PARAMETER(f);
+    UNREFERENCED_PARAMETER(h);
+    /* VkImageFormatProperties = extent(12) + mipLevels(4) + arrayLayers(4)
+     * + sampleCounts(4) + resourceSize(8) = 32 bytes. Sane values so
+     * vulkaninfo never chokes on garbage (was: depth=3524901744 etc). */
+    if (g) {
+        uint8_t* o = (uint8_t*)g;
+        memset(o, 0, 32);
+        *(uint32_t*)(o + 0) = 16384;  /* maxExtent.width */
+        *(uint32_t*)(o + 4) = 16384;  /* maxExtent.height */
+        *(uint32_t*)(o + 8) = 2048;   /* maxExtent.depth */
+        *(uint32_t*)(o + 12) = 15;    /* maxMipLevels */
+        *(uint32_t*)(o + 16) = 2048;  /* maxArrayLayers */
+        *(uint32_t*)(o + 20) = 0x1 | 0x4; /* sampleCounts = 1|4 BIT */
+        *(uint64_t*)(o + 24) = 1ULL * 1024 * 1024 * 1024; /* maxResourceSize 1GB */
+    }
+    return VK_SUCCESS;
+}
 static void bc250_vkGetPhysicalDevicePropertiesStub(VkPhysicalDevice a, void* b) { UNREFERENCED_PARAMETER(a); UNREFERENCED_PARAMETER(b); }
 static void bc250_vkGetPhysicalDeviceQueueFamilyPropertiesStub(VkPhysicalDevice a, uint32_t* b, void* c) { UNREFERENCED_PARAMETER(a); if (b) *b = 1; UNREFERENCED_PARAMETER(c); }
 static void bc250_vkGetPhysicalDeviceMemoryPropertiesStub(VkPhysicalDevice a, void* b) { UNREFERENCED_PARAMETER(a); UNREFERENCED_PARAMETER(b); }
@@ -212,6 +253,7 @@ static VkResult bc250_vkAcquireNextImageKHRStub(VkDevice a, void* b, uint64_t c,
 static VkResult bc250_init_device(VkDevice device)
 {
     BC250_VK_DEVICE* dev = (BC250_VK_DEVICE*)device;
+    BC250_TRACE_IN(device);
     
     dev->kmdDevice = bc250_open_kmd();
     if (dev->kmdDevice == INVALID_HANDLE_VALUE) {
@@ -230,6 +272,7 @@ static VkResult bc250_init_device(VkDevice device)
     dev->fenceValue = 1;
     
     OutputDebugStringA("BC-250 Vulkan: Device initialized\n");
+    BC250_TRACE_OUT(device);
     return VK_SUCCESS;
 }
 
@@ -241,9 +284,11 @@ VkResult VKAPI_CALL bc250_vkCreateInstance(
     VkInstance* pInstance)
 {
     VkResult result = bc250_init_instance();
+    BC250_TRACE_IN(pCreateInfo);
     if (result == VK_SUCCESS) {
         *pInstance = (VkInstance)1; /* Dummy handle */
     }
+    BC250_TRACE_OUT(pInstance);
     return result;
 }
 
@@ -251,7 +296,9 @@ void VKAPI_CALL bc250_vkDestroyInstance(VkInstance instance, const void* pAlloca
 {
     UNREFERENCED_PARAMETER(instance);
     UNREFERENCED_PARAMETER(pAllocator);
+    BC250_TRACE_IN(instance);
     OutputDebugStringA("BC-250 Vulkan: Instance destroyed\n");
+    BC250_TRACE_OUT(instance);
 }
 
 VkResult VKAPI_CALL bc250_vkEnumeratePhysicalDevices(
@@ -260,16 +307,21 @@ VkResult VKAPI_CALL bc250_vkEnumeratePhysicalDevices(
     VkPhysicalDevice* pPhysicalDevices)
 {
     UNREFERENCED_PARAMETER(instance);
-    
+    BC250_TRACE_IN(pPhysicalDeviceCount);
     if (pPhysicalDevices == NULL) {
         *pPhysicalDeviceCount = 1;
+        BC250_TRACE_OUT(pPhysicalDeviceCount);
         return VK_SUCCESS;
     }
     
     if (*pPhysicalDeviceCount >= 1) {
-        *pPhysicalDevices = (VkPhysicalDevice)1;
+        /* Must be a valid BC250_VK_DEVICE pointer: MemoryProperties
+         * dereferences it for the KMD VRAM query. (VkPhysicalDevice)1
+         * AV'd vulkaninfo (0xC0000005). */
+        *pPhysicalDevices = (VkPhysicalDevice)&g_Device;
         *pPhysicalDeviceCount = 1;
     }
+    BC250_TRACE_OUT(pPhysicalDevices);
     return VK_SUCCESS;
 }
 
@@ -285,26 +337,31 @@ VkResult VKAPI_CALL bc250_vkCreateDevice(
     
     BC250_VK_DEVICE* dev = (BC250_VK_DEVICE*)HeapAlloc(
         GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(BC250_VK_DEVICE));
+    BC250_TRACE_IN(physicalDevice);
     
     if (!dev) return VK_ERROR_OUT_OF_HOST_MEMORY;
     
     VkResult result = bc250_init_device((VkDevice)dev);
     if (result != VK_SUCCESS) {
         HeapFree(GetProcessHeap(), 0, dev);
+        BC250_TRACE_OUT(pDevice);
         return result;
     }
     
     *pDevice = (VkDevice)dev;
+    BC250_TRACE_OUT(pDevice);
     return VK_SUCCESS;
 }
 
 void VKAPI_CALL bc250_vkDestroyDevice(VkDevice device, const void* pAllocator)
 {
     UNREFERENCED_PARAMETER(pAllocator);
+    BC250_TRACE_IN(device);
     if (device) {
         bc250_DestroyDevice(device);
         HeapFree(GetProcessHeap(), 0, (void*)device);
     }
+    BC250_TRACE_OUT(device);
 }
 
 /* Physical Device Properties */
@@ -313,6 +370,7 @@ VkResult VKAPI_CALL bc250_vkGetPhysicalDeviceProperties(
     void* pProperties)
 {
     UNREFERENCED_PARAMETER(physicalDevice);
+    BC250_TRACE_IN(pProperties);
     
     /* BC-250 (Cyan Skillfish) - RDNA2-based, 24 CUs, GFX1013 */
     VkPhysicalDeviceProperties* props = (VkPhysicalDeviceProperties*)pProperties;
@@ -451,6 +509,7 @@ VkResult VKAPI_CALL bc250_vkGetPhysicalDeviceMemoryProperties(
     void* pMemoryProperties)
 {
     BC250_VK_DEVICE* dev = (BC250_VK_DEVICE*)physicalDevice;
+    BC250_TRACE_IN(physicalDevice);
 
     /* Query VRAM from KMD via GET_VRAM_INFO (0x80000804) */
     UINT64 totalVram = 16ULL * 1024 * 1024 * 1024; /* 16GB fallback */
@@ -488,24 +547,47 @@ VkResult VKAPI_CALL bc250_vkGetPhysicalDeviceQueueFamilyProperties(
     void* pQueueFamilyProperties)
 {
     UNREFERENCED_PARAMETER(physicalDevice);
-    
+    BC250_TRACE_IN(pQueueFamilyPropertyCount);
+
+    /* VkQueueFamilyProperties is 24 bytes:
+     * queueFlags(4) + queueCount(4) + timestampValidBits(4) + granularity(12).
+     * Never write past *pQueueFamilyPropertyCount entries. */
+    typedef struct {
+        uint32_t queueFlags;
+        uint32_t queueCount;
+        uint32_t timestampValidBits;
+        uint32_t minImageTransferGranularity[3];
+    } BC250_QueueFamilyProperties;
+
     if (pQueueFamilyProperties == NULL) {
         *pQueueFamilyPropertyCount = 2; /* Graphics + Transfer */
+        BC250_TRACE_OUT(pQueueFamilyPropertyCount);
         return VK_SUCCESS;
     }
-    
-    /* Queue family 0: Graphics + Compute + Transfer */
-    memset(pQueueFamilyProperties, 0, sizeof(void*) * 8);
-    /* Set queue flags: graphics | compute | transfer */
-    ((uint32_t*)pQueueFamilyProperties)[0] = 
-        VK_QUEUE_GRAPHICS_BIT | VK_QUEUE_COMPUTE_BIT | VK_QUEUE_TRANSFER_BIT;
-    ((uint32_t*)pQueueFamilyProperties)[1] = 1; /* queueCount */
-    
-    /* Queue family 1: Transfer only */
-    ((uint32_t*)pQueueFamilyProperties)[4] = VK_QUEUE_TRANSFER_BIT;
-    ((uint32_t*)pQueueFamilyProperties)[5] = 1;
-    
-    *pQueueFamilyPropertyCount = 2;
+
+    {
+        uint32_t avail = *pQueueFamilyPropertyCount;
+        uint32_t want = avail < 2 ? avail : 2;
+        BC250_QueueFamilyProperties* q = (BC250_QueueFamilyProperties*)pQueueFamilyProperties;
+        if (want > 0) {
+            q[0].queueFlags = 0x1 | 0x2 | 0x4; /* GRAPHICS | COMPUTE | TRANSFER */
+            q[0].queueCount = 1;
+            q[0].timestampValidBits = 64;
+            q[0].minImageTransferGranularity[0] = 1;
+            q[0].minImageTransferGranularity[1] = 1;
+            q[0].minImageTransferGranularity[2] = 1;
+        }
+        if (want > 1) {
+            q[1].queueFlags = 0x4; /* TRANSFER */
+            q[1].queueCount = 1;
+            q[1].timestampValidBits = 64;
+            q[1].minImageTransferGranularity[0] = 1;
+            q[1].minImageTransferGranularity[1] = 1;
+            q[1].minImageTransferGranularity[2] = 1;
+        }
+        *pQueueFamilyPropertyCount = want;
+    }
+    BC250_TRACE_OUT(pQueueFamilyProperties);
     return VK_SUCCESS;
 }
 
@@ -513,14 +595,36 @@ VkResult VKAPI_CALL bc250_vkGetPhysicalDeviceMemoryProperties2(
     VkPhysicalDevice physicalDevice,
     void* pMemoryProperties)
 {
-    return bc250_vkGetPhysicalDeviceMemoryProperties(physicalDevice, pMemoryProperties);
+    /* Same pNext-clobber hazard as Properties2: preserve sType/pNext,
+     * write at offset 16. */
+    uint8_t* base = (uint8_t*)pMemoryProperties;
+    uint32_t saved_sType = *(uint32_t*)(base + 0);
+    void* saved_pNext = *(void**)(base + 8);
+    VkResult r = bc250_vkGetPhysicalDeviceMemoryProperties(physicalDevice, base + 16);
+    *(uint32_t*)(base + 0) = saved_sType;
+    *(void**)(base + 8) = saved_pNext;
+    return r;
 }
 
 VkResult VKAPI_CALL bc250_vkGetPhysicalDeviceProperties2(
     VkPhysicalDevice physicalDevice,
     void* pProperties)
 {
-    return bc250_vkGetPhysicalDeviceProperties(physicalDevice, pProperties);
+    /* VkPhysicalDeviceProperties2 = sType(4)+pad(4)+pNext(8)+properties.
+     * Writing Properties at offset 0 clobbers the caller's pNext chain
+     * pointer -> vulkaninfo follows garbage pNext at print time -> AV.
+     * Preserve sType/pNext, write at offset 16. */
+    uint8_t* base = (uint8_t*)pProperties;
+    uint32_t saved_sType = *(uint32_t*)(base + 0);
+    void* saved_pNext = *(void**)(base + 8);
+    BC250_TRACE_IN(pProperties);
+    bc250_vkGetPhysicalDeviceProperties(physicalDevice, base + 16);
+    *(uint32_t*)(base + 0) = saved_sType;
+    *(void**)(base + 8) = saved_pNext;
+    /* Chained structs (Vulkan11/12/13, driver, ID props) stay as the
+     * caller left them (vulkaninfo zero-inits) -> reported as 0/false. */
+    BC250_TRACE_OUT(pProperties);
+    return VK_SUCCESS;
 }
 
 /* Device Query Functions */
@@ -532,7 +636,9 @@ VkResult VKAPI_CALL bc250_vkGetDeviceQueue(
 {
     UNREFERENCED_PARAMETER(queueFamilyIndex);
     UNREFERENCED_PARAMETER(queueIndex);
+    BC250_TRACE_IN(device);
     *pQueue = (VkQueue)device;
+    BC250_TRACE_OUT(pQueue);
     return VK_SUCCESS;
 }
 
@@ -1348,6 +1454,27 @@ __declspec(dllexport) void* VKAPI_CALL vk_icdGetInstanceProcAddr(VkInstance inst
     UNREFERENCED_PARAMETER(instance);
     
     if (!pName) return NULL;
+
+    {
+        /* Validate readability first: a garbage pName from the caller
+         * must not take us down inside fprintf. */
+        __try {
+            volatile char c = pName[0];
+            size_t n = 0;
+            while (n < 512 && pName[n]) n++;
+            (void)c;
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            FILE *fe = fopen("C:\\AMD-BC-250\\AMD-BC-250-Windows-Driver-main\\output\\icd-log.txt", "a");
+            if (fe) { fprintf(fe, "TRACE GetInstanceProcAddr BAD-PTR %p\n", pName); fflush(fe); fclose(fe); }
+            return NULL;
+        }
+        FILE *f = fopen("C:\\AMD-BC-250\\AMD-BC-250-Windows-Driver-main\\output\\icd-log.txt", "a");
+        if (f) { fprintf(f, "TRACE GetInstanceProcAddr %s\n", pName); fflush(f); fclose(f); }
+    }
+
+    /* SEH guard: if our own dispatch crashes on a particular name,
+     * log it and return NULL instead of taking the process down. */
+    __try {
     
     /* Global-level functions */
     if (!strcmp(pName, "vkCreateInstance"))            return (void*)bc250_vkCreateInstance;
@@ -1450,7 +1577,7 @@ __declspec(dllexport) void* VKAPI_CALL vk_icdGetInstanceProcAddr(VkInstance inst
     if (!strcmp(pName, "vkGetPhysicalDeviceFormatProperties2")) return (void*)bc250_vkGetPhysicalDeviceFormatProperties2Stub;
     if (!strcmp(pName, "vkGetPhysicalDeviceImageFormatProperties2")) return (void*)bc250_vkGetPhysicalDeviceImageFormatProperties2Stub;
     if (!strcmp(pName, "vkGetPhysicalDeviceProperties2")) return (void*)bc250_vkGetPhysicalDeviceProperties2;
-    if (!strcmp(pName, "vkGetPhysicalDeviceSurfaceSupportKHR")) return (void*)bc250_vkGetPhysicalDeviceSurfaceSupportStub;
+    if (!strcmp(pName, "vkGetPhysicalDeviceToolProperties")) return (void*)bc250_vkGetPhysicalDeviceToolPropertiesStub;    if (!strcmp(pName, "vkGetPhysicalDeviceSurfaceSupportKHR")) return (void*)bc250_vkGetPhysicalDeviceSurfaceSupportStub;
     if (!strcmp(pName, "vkGetPhysicalDeviceSurfaceCapabilitiesKHR")) return (void*)bc250_vkGetPhysicalDeviceSurfaceCapabilitiesStub;
     if (!strcmp(pName, "vkGetPhysicalDeviceSurfaceFormatsKHR")) return (void*)bc250_vkGetPhysicalDeviceSurfaceFormatsStub;
     if (!strcmp(pName, "vkGetPhysicalDeviceSurfacePresentModesKHR")) return (void*)bc250_vkGetPhysicalDeviceSurfacePresentModesStub;
@@ -1478,12 +1605,37 @@ __declspec(dllexport) void* VKAPI_CALL vk_icdGetInstanceProcAddr(VkInstance inst
     
     OutputDebugStringA("BC-250 Vulkan: Unknown function requested\n");
     return NULL;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        FILE *f = fopen("C:\\AMD-BC-250\\AMD-BC-250-Windows-Driver-main\\output\\icd-log.txt", "a");
+        if (f) { fprintf(f, "TRACE SEH-CAUGHT in dispatch pName=%s code=%08lX\n",
+                         pName ? pName : "(null)", (unsigned long)GetExceptionCode());
+                 fflush(f); fclose(f); }
+        return NULL;
+    }
 }
 
 __declspec(dllexport) void* VKAPI_CALL vk_icdGetDeviceProcAddr(VkDevice device, const char* pName)
 {
     UNREFERENCED_PARAMETER(device);
-    return vk_icdGetInstanceProcAddr(NULL, pName);
+    if (!pName) return NULL;
+    __try {
+        volatile char c = pName[0];
+        size_t n = 0;
+        while (n < 512 && pName[n]) n++;
+        (void)c;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return NULL;
+    }
+    {
+        FILE *f = fopen("C:\\AMD-BC-250\\AMD-BC-250-Windows-Driver-main\\output\\icd-log.txt", "a");
+        if (f) { fprintf(f, "TRACE GetDeviceProcAddr %s\n", pName); fflush(f); fclose(f); }
+    }
+    void* r = vk_icdGetInstanceProcAddr(NULL, pName);
+    {
+        FILE *f = fopen("C:\\AMD-BC-250\\AMD-BC-250-Windows-Driver-main\\output\\icd-log.txt", "a");
+        if (f) { fprintf(f, "TRACE GetDeviceProcAddr %s -> %p\n", pName ? pName : "(null)", r); fflush(f); fclose(f); }
+    }
+    return r;
 }
 
 /* Standard Vulkan entry points (called by loader) */
