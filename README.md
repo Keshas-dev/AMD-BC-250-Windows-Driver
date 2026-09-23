@@ -4,9 +4,83 @@ GPU driver for AMD BC-250 (Cyan Skillfish) on Windows 11 26100. WDM IOCTL driver
 
 **Goal:** fully working GPU driver for BC-250 on Windows.
 
+**Current build:** `4.3.0.11` (2026-09-23) — **INIT_HARDWARE deadlock fixed + full test suite PASS**.
+
 ---
 
-## Current Status (2026-09-15) — POST TESTS
+## Deadlock fix (2026-09-23) — verified on hardware
+
+### Root cause
+`IOCTL_AMDBC250_INIT_HARDWARE` (full-init, `Flags=0`) held `DeviceMutex` while calling `DreamV3HwInitialize` → `Amdbc250PspKiqInit` → `PspProxyInit` → PSP `GET_GPU_INFO` → GPU proxy `0x900` re-acquired the **same non-recursive FastMutex** → **permanent hang** (process stuck in kernel; only reboot could kill it).
+
+### Fix (`src/kmd/amdbc250_dream_kmd.c` case `0x80000B80`)
+1. **NBIO_MAP path** (`Flags & AMDBC250_INIT_FLAG_NBIO_MAP`): `Amdbc250PspKiqInit` removed entirely; `KiqAvailable=FALSE` — PSP proxy works via `0x900` without KIQ.
+2. **Full INIT path** (`Flags=0`): set `HwInitInProgress=TRUE` under mutex → **release** before `DreamV3HwInitialize` → **re-acquire** after to set `HardwareInitialized=TRUE`, clear flag, release.
+3. Concurrent INIT while full init in progress → `STATUS_DEVICE_BUSY` (re-entry guard).
+4. `HwInitInProgress` flag added in `inc/amdbc250_dream_kmd.h`.
+
+### Verified (2026-09-23, all on installed 4.3.0.11)
+```
+gpu-init-explicit.exe   ✅  INIT OK br=32, GPU_ID=0x9FFF9700, GRBM=0x00000000, process exits
+full-init-test.exe      ✅  SUCCESS — no TDR, Step_HwInit=11, process exits
+test-psp-driver.exe -s  ✅  PSP Alive YES, C2PMSG_64=0x80000000, C2PMSG_81=0x002C7A89
+spi-pg-nbio-test.exe -r ✅  SPI_PG=0 [gated, expected], SMU Q0 0x3D=0xDD602C7D, 1500MHz
+bar5-smn-test.exe       ✅  SMU 88.6.0, Features=0xDD602C7D, ActiveWgp=0
+smu-all-msgs-test.exe   ✅  16/16 (7 reads + 9 writes, no wedge)
+psp-ring-submit-test    ✅  RING_INIT Result=1, GET_FW_ATTESTATION SUCCESS, WPTR advances
+```
+
+**Installed SHA256:** `0E69D7D3FC8E934E6ACDA5467BD543A13D1600BCEEBB0EA313305851A8B30D4B` (matches `output\atikmdag.sys`).
+
+---
+
+## PSP / CCP notes from Linux (2026-09-23)
+
+BC-250 carries **AMD Secure Processor at PCI `1022:143E`**. Upstream Linux `ccp` patch series (Mattia Tadini, Sep 2026) binds it with a **device-read register map** — useful for our Windows PSP path:
+
+| Fact | Detail |
+|------|--------|
+| Layout | **pspv3/pspv4** (not pspv1, not pspv5–v7) |
+| BAR windows | `fe700000` 1MB + `fe884000` 8KB (Linux binds via **BAR2**) |
+| Mailbox cmdresp | BAR2+`0x10544` = `0x80000000` (live) |
+| Bootloader | BAR2+`0x109EC` (C2PMSG_59) = `0x001C0102` → version **00.1c.01.02** |
+| Feature reg | BAR2+`0x109FC` (C2PMSG_63) = `0x00000002` |
+| Inten / Intsts | BAR2+`0x10690` / `0x10694` (P2CMSG_*) |
+| CCP engine | **None** — version @ `0x100` reads `0xFFFFFFFF` |
+| TEE | Capability bit set, but **`PSP_CMD_TEE_RING_INIT` times out** — no TEE ring |
+| SEV | Absent |
+| Working path | **Platform access only** — mailbox **`pa_v1` = C2PMSG_28..30**, independent of TEE |
+| DBC (dyn boost) | Msg `0x65` rejected (`PSP error 0x4`) — probe continues |
+| HSTI | Empty (security reporting bit clear) |
+| After bind (Linux dmesg) | `platform access enabled` → `psp enabled` → bootloader sysfs OK |
+
+**Why it matters:** PSP platform mailbox can answer without TEE; on this APU (CPU+GPU+VRAM on one die) it may be able to activate register/fabric/power domains that SMU feature bits alone did not open (WGP/VCN locks). Windows work: map `pspv_bc250` offsets + probe **C2PMSG_28..30**, skip TEE ring wait.
+
+**External references:**
+- LKML: `[PATCH 0/3] crypto: ccp - two PSP init fixes, and the AMD BC-250` (2026-09-19)
+- GitHub: [blackbearreloaded/ps5-gpu-research](https://github.com/blackbearreloaded/ps5-gpu-research) — PS5 RDNA2 Mesa GL/compute research (arch reference)
+- Mesa: work item [11982](https://gitlab.freedesktop.org/mesa/mesa/-/work_items/11982), MRs [33109](https://gitlab.freedesktop.org/mesa/mesa/-/merge_requests/33109), [33116](https://gitlab.freedesktop.org/mesa/mesa/-/merge_requests/33116) (browser-only; Anubis blocks agents)
+
+---
+
+## PSP ↔ GPU coexistence (2026-09-23)
+
+Two PCI devices must not fight over GPU BAR5:
+
+| Device | BAR | Owner |
+|--------|-----|-------|
+| GPU `1002:13FE` | BAR5 **`0xFE800000`** | **atikmdag only** (`DeviceMutex`) |
+| PSP `1022:143E` | BAR0 **`0xFE700000`** | **PspDriver** (own window; future pa_v1 C2PMSG_28..30) |
+
+**Bug:** PSP `IOCTL_PSP_INIT_HW` dual-mapped GPU BAR5 → **4× BSOD 0x1E** (A/B confirmed).  
+**Fix (this repo):** proxy cases **`0x900`/`0x901`** in `amdbc250_dream_kmd.c` now take **`ExAcquireFastMutex(&DevExt->DeviceMutex)`** so PSP MMIO serializes with GPU's own BAR5 access.  
+**Fix (PSP repo):** never maps `0xFE800000`; all GPU access via proxy. See PSP `README.md` / `AGENTS.md` (2026-09-23).
+
+Install order: **GPU first**, then PSP. Full notes: `AGENTS.md` "PSP ↔ GPU coexistence".
+
+---
+
+## Current Status (2026-09-23) — deadlock fix verified
 
 ### ✅ Verified Working (all tested on hardware)
 
@@ -37,13 +111,16 @@ GPU driver for AMD BC-250 (Cyan Skillfish) on Windows 11 26100. WDM IOCTL driver
 | **SDMA** | Ring not initialized, firmware broken (stock v0x34). navi12_sdma.bin works on Linux. |
 | **Compute rings** | KIQ_SIZE=0 (read-only), ring BASE registers SOS-locked |
 
-### Test Results (2026-09-15)
+### Test Results (2026-09-15 + re-run 2026-09-23)
 
 ```
-smu-all-msgs-test.exe     ✅  16/16 PASS, 0 wedge
+smu-all-msgs-test.exe     ✅  16/16 PASS, 0 wedge (re-run 2026-09-23)
 vk-minimal-test.exe       ✅  VK_SUCCESS, GPU0 AMD BC-250 API 1.2.0
-smu-cpu-msg-test.exe      ✅  8 cores @ 3500MHz, 1175mV
+smu-cpu-msg-test.exe      ✅  8 cores @ 3500MHz (re-run 2026-09-23: 1212mV, all OK)
 smu-stress-test.exe       ✅  50 iterations, 0 failures
+psp-ring-submit-test.exe  ✅  RING_INIT + GET_FW_ATTESTATION SUCCESS (re-run 2026-09-23)
+gpu-init-explicit.exe     ✅  NBIO_MAP INIT OK, no deadlock (2026-09-23)
+full-init-test.exe        ✅  Flags=0 SUCCESS, no TDR (2026-09-23)
 vulkaninfoSDK.exe         ✅  vendor 0x1002, device 0x13fe, discrete GPU
 ```
 
@@ -52,8 +129,8 @@ vulkaninfoSDK.exe         ✅  vendor 0x1002, device 0x13fe, discrete GPU
 ## Build & Install
 
 ### Prerequisites
-- Visual Studio 2022 (auto-detected on C:/D:/E:)
-- Windows WDK 10.0.26100.0
+- Visual Studio 2022 (auto-detected; **F:** on this host — `F:\Program Files\Microsoft Visual Studio\2022\Community`)
+- Windows WDK 10.0.26100.0 (`F:\Program Files (x86)\Windows Kits\10`)
 - Test signing: `bcdedit /set testsigning on` (Admin), Secure Boot OFF
 
 ### Build
@@ -88,7 +165,8 @@ output\vk-minimal-test.exe            # Vulkan pipeline
 - **GC_BASE:** 0x1260 (BC-250 shifted offsets vs Navi10)
 - **GPU BAR5:** 0xFE800000 (512KB MMIO)
 - **SMU version:** 88.6.0 (driver_if=8)
-- **PSP IP:** v11.0.8 (CYAN_SKILLFISH2)
+- **PSP IP:** v11.0.8 (CYAN_SKILLFISH2) — GPU-side MP0 ring @ BAR5 `0x58000`
+- **PSP/CCP PCI:** `1022:143E` @ 01:00.2 — pspv3 layout, platform mailbox `pa_v1` (C2PMSG_28..30), bootloader `00.1c.01.02`, no CCP engine, no TEE ring
 - **BIOS:** P4.00G, **IOMMU must be OFF**
 
 ---

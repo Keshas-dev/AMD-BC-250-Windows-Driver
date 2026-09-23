@@ -395,6 +395,7 @@ typedef struct _DREAM_V3_DEVICE_EXTENSION {
 
     /* Hardware State */
     BOOLEAN             HardwareInitialized;
+    BOOLEAN             HwInitInProgress;    /* full INIT runs without DeviceMutex — re-entry guard */
     BOOLEAN             DeviceStarted;
     BOOLEAN             GpuResetInProgress;
     ULONG               GpuClockMhz;

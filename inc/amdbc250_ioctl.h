@@ -261,6 +261,15 @@ typedef struct _AMDBC250_IOCTL_SMU_CPU_MSG {
 #define AMDBC250_SMU_Q3_UNGATED_SMN_WRITE     0x98
 #define AMDBC250_SMU_Q3_SEC_SET_WRITE_PTR     0x28
 #define AMDBC250_SMU_Q3_SEC_WRITE_THROUGH     0x29
+/* Q0: GFX frequency control (governor sequence) */
+#define AMDBC250_SMU_Q0_QUERY_GFXCLK         0x0F
+#define AMDBC250_SMU_Q0_QUERY_ACTIVE_WGP      0x1E
+#define AMDBC250_SMU_Q0_GET_GFX_FREQUENCY     0x37
+#define AMDBC250_SMU_Q0_GET_GFX_VID           0x38
+#define AMDBC250_SMU_Q0_FORCE_GFX_FREQ        0x39
+#define AMDBC250_SMU_Q0_UNFORCE_GFX_FREQ      0x3A
+#define AMDBC250_SMU_Q0_FORCE_GFX_VID         0x3B
+#define AMDBC250_SMU_Q0_UNFORCE_GFX_VID       0x3C
 
 /* Safe feature bits for Q3 0x3C EnableSmuFeatures (cyan_skillfish PMFW 88.6.0).
  * These are the only bits validated by our whitelist; unknown bits are rejected. */

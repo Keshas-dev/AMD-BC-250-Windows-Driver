@@ -1,5 +1,141 @@
 # AMD BC-250 Windows Driver — Agent Notes
 
+## ⭐⭐⭐ DEADLOCK FIX VERIFIED + FULL TEST SUITE (2026-09-23) — README FIRST
+
+### Driver 4.3.0.11 installed, ALL tests PASS
+- **SHA256:** `0E69D7D3FC8E934E6ACDA5467BD543A13D1600BCEEBB0EA313305851A8B30D4B` (installed == output)
+- **Device:** AMD Radeon BC-250 Graphics (Dream drivers), Degraded/CM_PROB_NONE (cosmetic), oem2.inf `DriverVer=09/23/2026,4.3.0.11`
+- Service atikmdag RUNNING, PID 1732 gone (reboot), no hung init processes
+
+### ROOT CAUSE DEADLOCK (fixed + APPROVED by Code Reviewer)
+`IOCTL_AMDBC250_INIT_HARDWARE` full-init path held `DeviceMutex` while calling `DreamV3HwInitialize` → `Amdbc250PspKiqInit` → `PspProxyInit` → PSP `GET_GPU_INFO` → GPU `0x900` re-acquired same non-recursive FastMutex → **permanent hang**. Sources: hw_init.c:992, fw_load.c:240, psp.c:459.
+
+**Fix (GPU `src/kmd/amdbc250_dream_kmd.c` case 0x80000B80):**
+1. **NBIO_MAP path:** removed `Amdbc250PspKiqInit` entirely + `KiqAvailable=FALSE` (PSP proxy works via `0x900` without KIQ).
+2. **Full INIT path:** set `HwInitInProgress=TRUE` under mutex → **release** before `DreamV3HwInitialize` → **re-acquire** after to set `HardwareInitialized=TRUE` + clear flag + release.
+3. Concurrent INIT while full init in progress → `STATUS_DEVICE_BUSY` (re-entry guard ~4510-4518).
+4. `HwInitInProgress` flag added in `inc/amdbc250_dream_kmd.h:398`.
+
+### Verified test results (2026-09-23, ALL PASS)
+| Test | Result | Key output |
+|------|--------|-----------|
+| `gpu-init-explicit.exe` (NBIO_MAP) | ✅ | `INIT OK br=32`, GPU_ID=`0x9FFF9700`, GRBM=`0x00000000`, **process exits** |
+| `full-init-test.exe` (Flags=0) | ✅ | `SUCCESS — no TDR`, `Step_HwInit=11`, **process exits** |
+| follow-up NBIO_MAP re-read | ✅ | same values, BAR5 still mapped |
+| `test-psp-driver.exe -s` | ✅ | PSP Alive: YES, C2PMSG_64=`0x80000000`, C2PMSG_81=`0x002C7A89`, GRBM=`0x00000000` UNLOCKED, NBIO SIGs OK |
+| `spi-pg-nbio-test.exe -r` | ✅ read-only run | NBIO unlock failed gle=31 (SIGs already present from boot); **SPI_PG=0 [gated]** (expected — still SOS-gated), SMU Q0 0x1E OK, Q0 0x3D=`0xDD602C7D`, Q0 0x37=1500MHz |
+| `bar5-smn-test.exe` | ✅ | SMU v88.6.0, GfxFreq 1500MHz, Features `0xDD602C7D`, ActiveWgp=0, soft min/max cclk accepted |
+| `smu-cpu-msg-test.exe QUERY` | ✅ | CPU 1212mV, cores 0/2/3/4/5/7=3500MHz, cores 1/6=1555MHz (pdown) |
+| `psp-ring-submit-test.exe` | ✅ | RING_INIT Result=1, GET_FW_ATTESTATION SUCCESS, WPTR 0→0x10→0x20→0x30 |
+| `smu-all-msgs-test.exe` | ✅ **16/16** | 7 reads + 9 writes all OK, no wedge |
+
+### Compile tooling note
+- Old `test-tools\compile-*.bat` hardcode **E:** drive (gone). F: paths work: VS2022 = `F:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat`, WDK = `F:\Program Files (x86)\Windows Kits\10` (10.0.26100.0).
+- Use temp bat: call vcvars64 → set INCLUDE/LIB from WDK → `cl /nologo /O2 /utf-8 /W3 /Fe..\output\x.exe x.c /link /subsystem:console`.
+- Inf2Cat only in `bin\10.0.26100.0\x86\`; signtool in x64; sign `/sha1 34AFF96C57E9ADE68B23B4828859CF9B7F4EF442`.
+
+### Remaining open items
+- **SPI_PG (0x5C3C) still 0** — SOS-locked; NBIO unlock alone insufficient (gle=31 when re-issued; boot already has SIGs). WGP unlock = EFI/Linux only route.
+- No 0x1E BSOD in this session; if returns check `C:\Windows\MEMORY.DMP`.
+- Deadlock fix code-complete + hardware-verified; **committed 2026-09-23** (this section + PSP AGENTS/README).
+
+### PSP ↔ GPU coexistence architecture (user-approved, 2026-09-23)
+
+### Two devices / two owners (user-approved architecture)
+| Device | BAR | Owner |
+|--------|-----|-------|
+| GPU `1002:13FE` | BAR5 **`0xFE800000`** | **atikmdag (this repo) only** — `DeviceMutex` |
+| PSP `1022:143E` | BAR0 **`0xFE700000`** | **PspDriver** own window (pa_v1 C2PMSG_28..30 future unlock) |
+
+**Conflict fixed:** PSP dual-mapped GPU BAR5 (`g_Bar5Mapping`) → **4× BSOD 0x1E** A/B confirmed. PSP now **never** maps `0xFE800000`; all PSP→GPU MMIO = proxy raw **`0x900`/`0x901`**.
+
+### GPU-side change (this repo, `src/kmd/amdbc250_dream_kmd.c`)
+- Cases **`0x900`/`0x901`** (`IOCTL_AMDBC250_BAR5_READ_PROXY` / `WRITE_PROXY`) wrapped in **`ExAcquireFastMutex(&DevExt->DeviceMutex)`** (+ `__except` release) so PSP proxy serializes with GPU's own BAR5 MMIO.
+- Null `DevExt` guard before mutex.
+
+### PSP-side change (sibling repo `C:\AMD-BC-250\AMD-BC-250-PSP-Windows-Driver`)
+- Proxy-only read/write; INIT_HW/NBIO/BOOT/GET_STATUS/GET_GPU_INFO/REG_PROG/LOAD_TOC/READ_REG/WRITE_REG converted; legacy dual-map released on auto-init.
+- PSP repo: `AGENTS.md` + `README.md` updated (architecture + coexistence verification, 2026-09-23).
+
+### Rules
+1. **Do not** make PSP map GPU BAR5 again; do not dual-write NBIO sigs `0xC100`/`0xC180` outside `DeviceMutex`.
+2. Install **GPU first**, then PSP.
+3. Crash-4 dump lost — if 0x1E returns, check `C:\Windows\MEMORY.DMP` (Admin).
+4. Code Reviewer before every build; user runs Admin reinstall/reboot scripts.
+
+### External (2026-09-23): Linux PSP BC-250 + PS5 GPU research
+- LKML `pspv_bc250`: BAR2 offsets, bootloader `00.1c.01.02`, **platform mailbox pa_v1 = C2PMSG_28..30**, no TEE wait, no CCP engine.
+- Sibling links (user): `blackbearreloaded/ps5-gpu-research`, Mesa work `11982`, MRs `33109`/`33116` (browser-only).
+- Full detail: GPU `AGENTS.md` "EXTERNAL: Linux CCP/PSP BC-250" section.
+
+## ⭐⭐ EXTERNAL: Linux CCP/PSP BC-250 support + PS5 GPU research (2026-09-23) — README FIRST
+
+### Linux kernel patch series — AMD BC-250 Secure Processor (Mattia Tadini, 2026-09-19, lkml)
+- **Source:** `[PATCH 0/3] crypto: ccp - two PSP init fixes, and the AMD BC-250` (Message-ID `178984289056.12336.17662860552012704364@mtsistemi.it`), series against **v7.2.6**, touches only `drivers/crypto/ccp/`. Also: `[PATCH 3/3] ... add support for the AMD BC-250 secure processor`.
+- **Device:** AMD PSP/CCP at **PCI 1022:143E** (bus1 dev0 func2). Before patch: unbound, memory windows disabled (`Memory at fe700000 [disabled] [size=1M]`, `Memory at fe884000 [disabled] [size=8K]`). After: `enabling device (0000 -> 0002)`, **platform access enabled**, **psp enabled**, `bootloader_version = 00.1c.01.02`.
+- **Register layout READ OFF DEVICE** (BAR2, not assumed) — this is the **pspv3/pspv4** layout:
+  | Offset (BAR2) | Name | Value on BC-250 | Meaning |
+  |---|---|---|---|
+  | `0x100` | CCP version | **0xFFFFFFFF** | **no CCP crypto engine** behind this function |
+  | `0x10544` | cmdresp | **0x80000000** | pspv3/pspv4 mailbox — **LIVE** |
+  | `0x109EC` | bootloader (C2PMSG_59) | **0x001C0102** | bootloader 00.1c.01.02 |
+  | `0x109FC` | feature_reg (C2PMSG_63) | **0x00000002** | capability bits |
+  | `0x10690` | inten (P2CMSG_INTEN) | **0x00000001** | interrupt enable |
+  | `0x10694` | intsts (P2CMSG_INTSTS) | — | interrupt status |
+  | pspv1 offsets | — | all zero | wrong layout |
+  | pspv5–v7 offsets | — | all 0xFFFFFFFF | wrong layout |
+- **`pspv_bc250` vdata (Linux):** `platform_access = &pa_v1`, `bootloader_info_reg = 0x109ec`, `feature_reg = 0x109fc`, `inten_reg = 0x10690`, `intsts_reg = 0x10694`, `platform_features = PLATFORM_FEATURE_DBC | PLATFORM_FEATURE_HSTI`. PCI ID added: `{ PCI_VDEVICE(AMD, 0x143e), .driver_data = &dev_vdata[10] }`.
+- **TEE is advertised but NEVER comes up:** `tee: ring init command timed out, disabling TEE support` (`PSP_CMD_TEE_RING_INIT` never completes). **SEV absent** (server feature). Board gets **platform access only** — uses its **own mailbox `pa_v1` (C2PMSG_28..30)**, unaffected by missing TEE ring. Patch 2 fix: require both HW capability AND `vdata->tee` before starting TEE subdev, else platform access/DBC/HSTI are lost too. Patch 1: NULL deref in `psp_firmware_is_visible()` when cap bit set but no vdata.
+- **Dynamic boost (DBC):** probed, **firmware rejects** `msg 0x65` with `PSP error: 0x4` — handled without failing probe. **HSTI empty** (security reporting capability bit clear). **No CCP engine** (version reg 0x100 = all ones).
+- **Implication for us:** Windows PSP path must use **pspv3 BAR2 offsets + platform mailbox C2PMSG_28..30 (pa_v1)**, NOT assume pspv1/pspv5 layout and NOT wait for TEE ring. Linux `ccp` proves platform mailbox answers after memory decode enable. Our older notes that "PSP BAR0=0xFE700000 / C2PMSG base 0x58000 MP0 ring" are a **different window** (GPU-side MP0); the **PCI function 1022:143E BAR2 window** is the CCP/PSP device the Linux patch binds.
+- **User hypothesis (2026-09-23):** through PSP one may activate certain registers / possibly SOS; BC-250 is a single **APU (CPU + GPU + VRAM)** — PSP platform access may gate fabric/power domains that SMU alone cannot open (aligns with VCN/WGP lock research). **Not yet tested on Windows with pspv_bc250 offsets.**
+
+### Related external links (2026-09-23, from user)
+- `https://github.com/blackbearreloaded/ps5-gpu-research` — independent **PS5 GPU** research (Mesa GL 4.6 Core, native compute, transformer inference on console GPU; firmware 6.02). Proves same RDNA2-class shader/submission model works with open Mesa stack. Docs-only repo (GPL-3.0), no firmware/SDK. Relevant as architectural reference for RADV/ACO Windows port (not a drop-in BC-250 driver).
+- `https://gitlab.freedesktop.org/mesa/mesa/-/work_items/11982` — Mesa work item (Anubis-blocked from this environment; open in browser).
+- `https://gitlab.freedesktop.org/mesa/mesa/-/merge_requests/33109` — Mesa MR (Anubis-blocked; open in browser).
+- `https://gitlab.freedesktop.org/mesa/mesa/-/merge_requests/33116` — Mesa MR (Anubis-blocked; known historically as RADV/`RADV_DEBUG=nocompute` related — see older AGENTS notes; open in browser for current state).
+- `https://lore.kernel.org/lkml/178984289056.12336.17662860552012704364@mtsistemi.it/` — full patch thread (Anubis-blocked; content pasted above).
+
+### Action items from this external intel
+1. Map Linux `pspv_bc250` BAR2 offsets → our Windows PSP BAR0 (`0xFE700000`) + test **platform mailbox C2PMSG_28/29/30 (pa_v1)** for live commands (bootloader already readable as `0x001C0102` on Linux).
+2. Do **not** treat TEE ring init timeout as fatal — skip TEE, keep platform access (mirrors Patch 2).
+3. Probe whether platform-access commands can unlock SOS-gated GPU regs (SPI_PG/WGP/VCN) — user's hypothesis.
+4. Optionally fetch Mesa MRs in a real browser (Anubis) and summarize into this file.
+
+## ⭐ EXTERNAL: simpmix/bc250-encoding-decoding-fix — VCN permanently locked + Vulkan encode (2026-09-23)
+
+### Repo
+`https://github.com/simpmix/bc250-encoding-decoding-fix` — Linux VA-API driver (`bc250_drv_video.so`), 26★, 338 commits, GPL-3.0. Contributors: **Mattia Tadini @MTSistemi** (same author as LKML `pspv_bc250`/CCP BC-250 patches), Shalasere. Docs: `docs/vcn-registers.md`, `docs/hardware-notes.md`, `docs/troubleshooting.md`, `docs/sunshine-guide.md`.
+
+### VCN 2.0.3 is PERMANENTLY locked (architectural proof — supersedes "VCN unlock via SMU/Q3" optimism)
+- Silicon present (`UVD_VERSION = 0x0002001B`) but unprovisioned behind **PSP `SEC_GASKET~0x24` table**: encrypted `PSP_BL` runs **926 signed (address,value) writes before x86 leaves reset**; **~816 program Data Fabric ACL** (`0x09xxxxxx`):
+  - Host PCI config `0xB8/0xBC`: writes silently dropped, reads → `0xFFFFFFFF`
+  - SMU mailbox (`sec_smn_write32`): **wedges 5s timeout**
+  - GPU `regs_pcie`: writes silently dropped
+- Latches **`CC_UVD_HARVESTING = 0x3` at SMN `0x1f81c`** and **`[0x1f820] = 0x00185103`** (policy write absent on functional VCN devices e.g. Steam Deck).
+- ⚠️⚠️ **HAZARD: direct host read of SMN `0x1f81c` = immediate unrecoverable PCIe/DF bus lockup → AC power cycle required.** NEVER probe `0x1f81c` from Windows BAR5/SMN tools.
+- **Alex Deucher (AMD) confirmed:** SMU 11.8 PMFW has zero VCN power/clock messages; VBIOS zero VCN tables; **no signed `vcn_2_0_3.bin` ever created**; Linux amdgpu `case IP_VERSION(2,0,3): break;`.
+- Community exploit research (Sept 2026): all PSP_BL/ABL4 vectors closed; modifying SPI `$KDB` key DB **permanently bricks** board.
+- **Conclusion:** physical VCN cannot be revived by BIOS/kernel/SMU/PSP runtime. Our Path A (Q3 0x98 / SMN) and Path B (flash) align with this — fabric ACL is pre-x86 and PSP-only bypass (`svc #0x7c`).
+
+### Working alternative = Vulkan compute encode (not VCN)
+- H.264 Vulkan compute on 40 CUs: 640×480 267fps, 720p 179fps, **1080p 100–134fps**, 1440p 67–80fps; Sunshine overhead **~4.5%** GPU.
+- HEVC multi-slice (`BC250_HEVC_SLICES=4`): **1080p 111+ fps**; bit-exact Table 8-10 chroma QP.
+- Decode (`VAEntrypointVLD`): **CPU Zen2** bit-exact 302/302 conformance — H.264 68–181fps, HEVC 66–97fps 1080p.
+- Streaming: Sunshine/Moonlight presets; WiVRn VR ~36ms M2P, ~190Mbps; `OMP_WAIT_POLICY=PASSIVE` + `GOMP_SPINCOUNT=0` cuts CPU 1300%→350%.
+- Dynamic 4-tier governor: GPU Full ME → Fast ME → CPU SIMD ME (opt-in) → failover P-Skip; Sunshine auto-tunes Tier3 15.5→45ms.
+- Shaders: `motion_estimation.comp`, `dct_transform.comp`, `entropy_encode.comp`, `deblock_filter.comp`, etc. under `approach1-compute-encoder/shaders/`.
+
+### DP/HDMI "drunk audio" fix
+- Wrong audio DTO divisor in amdgpu `dc` for Cyan Skillfish. Fix writes DCCG regs **`0x05E0`, `0x05E4`, `0x05E8`** (DKMS module `bc250_audio_fix.ko` or mainline patch `dccg_update_audio_dto` quirk `FAMILY_YELLOW_CARP` + `CYAN_SKILLFISH_REV`). HDA device `1002:1637` @ `00:00.1` / `01:00.1`.
+
+### Windows implications
+1. Do **not** chase VCN unlock further on Windows (Q3 0x3C fabric-open ≠ power — already observed; SEC_GASKET is the real wall).
+2. **Never read SMN `0x1f81c`** — AC cycle only recovery.
+3. Video encode path on Windows would need software/Vulkan-compute equivalent (our ICD stub → future RADV), not VCN MMIO.
+4. Audio clock DCCG 0x05E0–E8 may be writable via BAR5 display path if DP/HDMI audio is ever needed on Windows KMDOD.
+
 ## ⭐ UPDATE 2026-09-15 (POST REINSTALL + DRIVER WHITELIST EXPANSION)
 
 ### Driver rebuilt + installed (2026-09-15, post cold boot)

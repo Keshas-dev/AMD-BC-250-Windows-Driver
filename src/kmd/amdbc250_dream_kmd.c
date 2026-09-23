@@ -3097,6 +3097,17 @@ DreamV3DeviceControl(
     ULONG outputLen = irpSp->Parameters.DeviceIoControl.OutputBufferLength;
     ULONG ioctlCode = irpSp->Parameters.DeviceIoControl.IoControlCode;
 
+    /* METHOD_BUFFERED: SystemBuffer is NULL when both InputBufferLength and
+     * OutputBufferLength are 0. Writing through a NULL outputBuffer = BSOD. */
+    if (outputBuffer == NULL && outputLen != 0) {
+        status = STATUS_INVALID_USER_BUFFER;
+        goto Cleanup;
+    }
+    if (inputBuffer == NULL && inputLen != 0) {
+        status = STATUS_INVALID_USER_BUFFER;
+        goto Cleanup;
+    }
+
     /* IMMEDIATE MARKER n++ write before anything else */
     {
         static BOOLEAN once = FALSE;
@@ -3156,7 +3167,8 @@ DreamV3DeviceControl(
     /* If hardware not initialized, return safe dummy data */
     if (!DevExt->HardwareInitialized) {
         switch (ioctlCode) {
-        case 0x80000800: /* GET_CAPS */
+        case 0x80000800: /* GET_CAPS (legacy 0x200-based) */
+        case IOCTL_AMDBC250_GET_CAPS: /* GET_CAPS (header macro 0x9C0) */
             if (outputLen >= sizeof(ULONG) * 7) {
                 PULONG d = (PULONG)outputBuffer;
                 d[0] = 430;                                  /* Version */
@@ -3183,7 +3195,8 @@ DreamV3DeviceControl(
             }
             status = STATUS_SUCCESS;
             goto Cleanup;
-        case 0x80000840: { /* ALLOC_VIDMEM - MDL allocation (supports both old ULONG[3] and new struct) */
+        case 0x80000840: /* ALLOC_VIDMEM (legacy 0x200-based) */
+        case IOCTL_AMDBC250_ALLOC_VIDMEM: { /* ALLOC_VIDMEM (header macro 0xA00) */
             if (inputLen >= sizeof(AMDBC250_IOCTL_ALLOC_VIDMEM) && outputLen >= sizeof(AMDBC250_IOCTL_ALLOC_VIDMEM_RESULT)) {
                 PAMDBC250_IOCTL_ALLOC_VIDMEM in = (PAMDBC250_IOCTL_ALLOC_VIDMEM)inputBuffer;
                 PAMDBC250_IOCTL_ALLOC_VIDMEM_RESULT out = (PAMDBC250_IOCTL_ALLOC_VIDMEM_RESULT)outputBuffer;
@@ -3346,7 +3359,8 @@ DreamV3DeviceControl(
     switch (ioctlCode) {
 
     /* --- Get Caps --- */
-    case 0x80000800: { /* IOCTL_AMDBC250_GET_CAPS */
+    case 0x80000800: /* IOCTL_AMDBC250_GET_CAPS (legacy 0x200-based) */
+    case IOCTL_AMDBC250_GET_CAPS: { /* header macro (0x9C0-based) */
         if (outputLen >= sizeof(ULONG) * 7) {
             PULONG Data = (PULONG)outputBuffer;
             Data[0] = AMDBC250_DREAM_V3_VERSION_MAJOR * 100 +
@@ -3385,7 +3399,8 @@ DreamV3DeviceControl(
     }
 
     /* --- Get Temp Info --- */
-    case 0x80000808: { /* IOCTL_AMDBC250_GET_TEMP_INFO */
+    case 0x80000808: /* IOCTL_AMDBC250_GET_TEMP_INFO (legacy 0x200-based) */
+    case IOCTL_AMDBC250_GET_TEMP_INFO: { /* header macro (0x9C8-based) */
         if (outputLen >= sizeof(ULONG) * 4 + sizeof(BOOLEAN)) {
             PLONG TempData = (PLONG)outputBuffer;
             TempData[0] = DevExt->CurrentTemperatureC; /* Edge */
@@ -3403,7 +3418,8 @@ DreamV3DeviceControl(
     }
 
     /* --- Allocate Video Memory --- */
-    case 0x80000840: { /* IOCTL_AMDBC250_ALLOC_VIDMEM */
+    case 0x80000840: /* IOCTL_AMDBC250_ALLOC_VIDMEM (legacy 0x200-based) */
+    case IOCTL_AMDBC250_ALLOC_VIDMEM: { /* header macro (0xA00-based) */
         /* Mark that we reached this case */
         {
             UNICODE_STRING devPath;
@@ -4070,6 +4086,9 @@ DreamV3DeviceControl(
             SMU_ARG_SMN_ADDR,    /* known-safe SMN address only (Q3 0x98 ungated write) */
             SMU_ARG_ADDR32,      /* 32-bit DRAM address high/low for table DMA */
             SMU_ARG_SRAM_ADDR,   /* DWORD-aligned SMU SRAM offset (lower SRAM only) */
+            SMU_ARG_GFX_FREQ,    /* 350..2500 MHz (GPU force freq) */
+            SMU_ARG_GFX_VID,     /* 0..255 (GPU VID, 96=950mV) */
+            SMU_ARG_GFX_QUERY,   /* GPU query (arg must be 0) */
         } SMU_CPU_ARG_TYPE;
         typedef struct _SMU_CPU_MSG_DESC {
             ULONG Queue;
@@ -4104,6 +4123,15 @@ DreamV3DeviceControl(
             { 0, AMDBC250_SMU_Q0_SET_DRV_TBL_ADDR_LO,   SMU_ARG_ADDR32 },
             { 0, AMDBC250_SMU_Q0_TRANSFER_TBL_SMU2DRAM, SMU_ARG_NONE },
             { 0, AMDBC250_SMU_Q0_TRANSFER_TBL_DRAM2SMU, SMU_ARG_NONE },
+            /* Q0: GFX frequency control (governor sequence) */
+            { 0, AMDBC250_SMU_Q0_QUERY_GFXCLK,         SMU_ARG_GFX_QUERY },
+            { 0, AMDBC250_SMU_Q0_QUERY_ACTIVE_WGP,      SMU_ARG_GFX_QUERY },
+            { 0, AMDBC250_SMU_Q0_GET_GFX_FREQUENCY,     SMU_ARG_GFX_QUERY },
+            { 0, AMDBC250_SMU_Q0_GET_GFX_VID,           SMU_ARG_GFX_QUERY },
+            { 0, AMDBC250_SMU_Q0_FORCE_GFX_FREQ,        SMU_ARG_GFX_FREQ },
+            { 0, AMDBC250_SMU_Q0_UNFORCE_GFX_FREQ,      SMU_ARG_GFX_QUERY },
+            { 0, AMDBC250_SMU_Q0_FORCE_GFX_VID,         SMU_ARG_GFX_VID },
+            { 0, AMDBC250_SMU_Q0_UNFORCE_GFX_VID,       SMU_ARG_GFX_QUERY },
         };
 
         /* Find + validate the message against the whitelist. */
@@ -4135,6 +4163,9 @@ DreamV3DeviceControl(
             case SMU_ARG_SMN_ADDR: allowed = (a == AMDBC250_SAFE_SMN_ADDR_CORE_MASK); break;
             case SMU_ARG_ADDR32:    allowed = ((a & 0xFFF) == 0); break;  /* 4KB-aligned */
             case SMU_ARG_SRAM_ADDR: allowed = ((a & 3) == 0) && (a <= 0x000FFFFF); break; /* DWORD-aligned SMU SRAM */
+            case SMU_ARG_GFX_FREQ:  allowed = (a >= 350 && a <= 2500); break;  /* GPU MHz */
+            case SMU_ARG_GFX_VID:   allowed = (a <= 255); break;               /* GPU VID */
+            case SMU_ARG_GFX_QUERY: allowed = (a == 0); break;                 /* query, arg=0 */
             default:               allowed = FALSE; break;
             }
             break;
@@ -4465,7 +4496,7 @@ DreamV3DeviceControl(
     /* --- Init Hardware (user-mode provides MMIO base) --- */
     case 0x80000B80: { /* IOCTL_AMDBC250_INIT_HARDWARE */
         /* Require the full struct; partial buffers cause OOB reads of FbPhysicalBase/FbSize */
-        if (inputLen == sizeof(AMDBC250_IOCTL_INIT_HARDWARE)) {
+        if (inputLen >= sizeof(AMDBC250_IOCTL_INIT_HARDWARE)) {
             PAMDBC250_IOCTL_INIT_HARDWARE InitHw = (PAMDBC250_IOCTL_INIT_HARDWARE)inputBuffer;
 
             /* Serialize re-init: guard the whole map/init sequence against
@@ -4475,6 +4506,16 @@ DreamV3DeviceControl(
             KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                 "AMDBC250-DREAM-V4.3: INIT_HARDWARE requested: MMIO PA=0x%llX, Size=0x%X\n",
                 InitHw->MmioPhysicalBase, InitHw->MmioSize));
+
+            /* Full INIT holds no DeviceMutex during DreamV3HwInitialize
+             * (deadlock: KiqInit → 0x900 → DeviceMutex). Reject re-entry. */
+            if (DevExt->HwInitInProgress) {
+                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+                    "AMDBC250-DREAM-V4.3: INIT_HARDWARE concurrent re-entry — STATUS_DEVICE_BUSY\n"));
+                status = STATUS_DEVICE_BUSY;
+                ExReleaseFastMutex(&DevExt->DeviceMutex);
+                break;
+            }
 
             if (DevExt->HardwareInitialized) {
                 KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
@@ -4510,8 +4551,15 @@ DreamV3DeviceControl(
                             ULONG br = HalGetBusDataByOffset(
                                 PCIConfiguration, bus, slot, &pc, 0,
                                 sizeof(PCI_COMMON_HDR_LENGTH));
-                            if (br < sizeof(PCI_COMMON_HDR_LENGTH))
+                            if (br < sizeof(PCI_COMMON_HDR_LENGTH)) {
+                                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_TRACE_LEVEL,
+                                    "AMDBC250-DREAM-V4.3: PCI scan B%u:D%u:F%u br=%u < hdr_len\n",
+                                    bus, dev, func, br));
                                 continue;
+                            }
+                            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_TRACE_LEVEL,
+                                "AMDBC250-DREAM-V4.3: PCI scan B%u:D%u:F%u VID=0x%04X DID=0x%04X\n",
+                                bus, dev, func, pc.VendorID, pc.DeviceID));
                             if (pc.VendorID == 0x1002 && pc.DeviceID == 0x13FE) {
                                 foundPci = TRUE;
                                 fBus = bus; fDev = dev; fFunc = func;
@@ -4522,8 +4570,8 @@ DreamV3DeviceControl(
                                 if (InitHw->MmioSize == 0)
                                     InitHw->MmioSize = 0x80000; /* 512KB default */
                                 KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-                                    "AMDBC250-DREAM-V4.3: BAR5 auto-detected at B%u:D%u:F%u PA=0x%llX\n",
-                                    fBus, fDev, fFunc, InitHw->MmioPhysicalBase));
+                                    "AMDBC250-DREAM-V4.3: BAR5 auto-detected at B%u:D%u:F%u PA=0x%llX (raw BAR5=0x%08X)\n",
+                                    fBus, fDev, fFunc, InitHw->MmioPhysicalBase, bar5));
                             }
                         }
                     }
@@ -4632,25 +4680,21 @@ DreamV3DeviceControl(
                 DevExt->GpuClockMhz = AMDBC250_BOOST_CLOCK_MHZ;
                 DevExt->MemoryClockMhz = AMDBC250_MEMORY_CLOCK_MHZ;
 
-                /* Initialize KIQ ring even in NBIO_MAP mode (needed for SEND_PM4) */
-                if (NT_SUCCESS(Amdbc250PspKiqInit())) {
-                    DevExt->KiqAvailable = TRUE;
-                    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-                        "AMDBC250-DREAM-V4.3: KIQ ring initialized (NBIO_MAP mode)\n"));
-                } else {
-                    DevExt->KiqAvailable = FALSE;
-                    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
-                        "AMDBC250-DREAM-V4.3: KIQ init FAILED in NBIO_MAP mode\n"));
-                }
-
-                /* SDMA ring init SKIPPED G�� suspected BSOD 0x1a source.
-                 * Register range 0xE000-0xE018 needs probing first. */
-                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-                    "AMDBC250-DREAM-V4.3: SDMA ring init SKIPPED\n"));
+                /* NBIO_MAP: NO KiqInit here — PSP proxy (0x900/0x901) works
+                 * without KIQ. Calling Amdbc250PspKiqInit → PspProxyInit →
+                 * PSP GET_GPU_INFO → GPU 0x900 re-acquires DeviceMutex →
+                 * DEADLOCK (non-recursive FastMutex). KIQ only needed for
+                 * SEND_PM4/ring — init via separate IOCTL later. */
+                DevExt->KiqAvailable = FALSE;
 
                 bytesReturned = sizeof(AMDBC250_IOCTL_INIT_HARDWARE);
                 status = STATUS_SUCCESS;
                 ExReleaseFastMutex(&DevExt->DeviceMutex);
+
+                /* SDMA ring init SKIPPED — suspected BSOD 0x1a source.
+                 * Register range 0xE000-0xE018 needs probing first. */
+                KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                    "AMDBC250-DREAM-V4.3: NBIO_MAP done (no KIQ), SDMA skipped\n"));
                 break;
             }
 
@@ -4700,24 +4744,30 @@ DreamV3DeviceControl(
                     "AMDBC250-DREAM-V4.3: GPU reg[0x0000] AFTER PCI enable = 0x%08X\n", gpuId2));
             }
 
-            /* Initialize hardware (rings, fence, CP, etc.) */
+            /* Mark in-progress UNDER mutex, then release: DreamV3HwInitialize
+             * calls Amdbc250PspKiqInit → PspProxyInit → PSP GET_GPU_INFO →
+             * GPU 0x900 re-acquires DeviceMutex (non-recursive) → DEADLOCK. */
+            DevExt->HwInitInProgress = TRUE;
+            ExReleaseFastMutex(&DevExt->DeviceMutex);
+
             NTSTATUS hwStatus = DreamV3HwInitialize(DevExt);
             if (!NT_SUCCESS(hwStatus)) {
                 KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
                     "AMDBC250-DREAM-V4.3: HwInitialize failed: 0x%08X (continuing anyway)\n", hwStatus));
-                /* Continue n++ some things may still work */
             }
 
+            /* Re-acquire to publish result under the same serialization. */
+            ExAcquireFastMutex(&DevExt->DeviceMutex);
             DevExt->HardwareInitialized = TRUE;
+            DevExt->HwInitInProgress = FALSE;
+            ExReleaseFastMutex(&DevExt->DeviceMutex);
 
-            /* Enable interrupt handler ring if initialized */
             if (DevExt->IhRing.Initialized) {
                 KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                     "AMDBC250-DREAM-V4.3: IH ring active, PA=0x%llX\n",
                     DevExt->IhRing.PhysicalAddress.QuadPart));
             }
 
-            /* Report ring status */
             KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                 "AMDBC250-DREAM-V4.3: INIT_HARDWARE complete. GFX ring: %s (PA=0x%llX, %lluKB)\n",
                 DevExt->GfxRing.Initialized ? "OK" : "FAIL",
@@ -4726,7 +4776,6 @@ DreamV3DeviceControl(
 
             bytesReturned = sizeof(AMDBC250_IOCTL_INIT_HARDWARE);
             status = STATUS_SUCCESS;
-            ExReleaseFastMutex(&DevExt->DeviceMutex);
         } else {
             status = STATUS_BUFFER_TOO_SMALL;
         }
@@ -4749,11 +4798,9 @@ DreamV3DeviceControl(
                 status = STATUS_INVALID_PARAMETER;
                 break;
             }
-            /* Ensure the input buffer actually contains CommandCount DWORDs. */
-            if (sizeof(AMDBC250_IOCTL_SEND_PM4) + SendPm4->CommandCount * sizeof(ULONG) > inputLen) {
-                status = STATUS_BUFFER_TOO_SMALL;
-                break;
-            }
+            /* Commands[64] is inline in the struct, so sizeof(STRUCT) already
+             * covers up to 64 DWORDs. The outer check (inputLen >= sizeof)
+             * combined with CommandCount <= 64 is sufficient. */
 
             /* PATH 1: PSP KIQ ring (preferred n++ KIQ_WPTR works via PSP driver) */
             if (Amdbc250PspKiqIsInitialized()) {
@@ -5853,20 +5900,24 @@ DreamV3DeviceControl(
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
             "BAR5_PROXY_READ: inputLen=%lu outputLen=%lu DevExt=%p Mmio=%p\n",
             inputLen, outputLen, DevExt, DevExt ? DevExt->MmioVirtualBase : NULL));
-        if (inputLen >= sizeof(ULONG) && outputLen >= sizeof(ULONG)) {
+        if (inputLen >= sizeof(ULONG) && outputLen >= sizeof(ULONG) && DevExt) {
             PULONG inOffset = (PULONG)inputBuffer;
             PULONG outValue = (PULONG)outputBuffer;
             ULONG offset = *inOffset;
-            
-            if (DevExt && DevExt->MmioVirtualBase && offset <= 0x80000 - sizeof(ULONG)) {
+
+            if (DevExt->MmioVirtualBase && offset <= 0x80000 - sizeof(ULONG)) {
                 PUCHAR mmioBase = (PUCHAR)DevExt->MmioVirtualBase;
+                /* Serialize with GPU-own MMIO (UNLOCK_40CU, SMU, rings). */
+                ExAcquireFastMutex(&DevExt->DeviceMutex);
                 __try {
                     *outValue = READ_REGISTER_ULONG((PULONG)(mmioBase + offset));
                 } __except (EXCEPTION_EXECUTE_HANDLER) {
                     *outValue = 0xFFFFFFFF;
+                    ExReleaseFastMutex(&DevExt->DeviceMutex);
                     status = STATUS_DEVICE_NOT_READY;
                     break;
                 }
+                ExReleaseFastMutex(&DevExt->DeviceMutex);
                 bytesReturned = sizeof(ULONG);
                 status = STATUS_SUCCESS;
                 KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_TRACE_LEVEL,
@@ -5888,15 +5939,18 @@ DreamV3DeviceControl(
             PULONG params = (PULONG)inputBuffer;
             ULONG offset = params[0];
             ULONG value = params[1];
-            
+
             if (offset <= 0x80000 - sizeof(ULONG)) {
                 PUCHAR mmioBase = (PUCHAR)DevExt->MmioVirtualBase;
+                ExAcquireFastMutex(&DevExt->DeviceMutex);
                 __try {
                     WRITE_REGISTER_ULONG((PULONG)(mmioBase + offset), value);
                 } __except (EXCEPTION_EXECUTE_HANDLER) {
+                    ExReleaseFastMutex(&DevExt->DeviceMutex);
                     status = STATUS_DEVICE_NOT_READY;
                     break;
                 }
+                ExReleaseFastMutex(&DevExt->DeviceMutex);
                 bytesReturned = 0;
                 status = STATUS_SUCCESS;
                 KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_TRACE_LEVEL,
