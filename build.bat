@@ -278,19 +278,32 @@ echo KMD signature verification: OK
 rem --- Generate catalog file (REQUIRED: stale/missing CAT = package treated as Unsigned) ---
 if "%INF2CAT%"=="" (
     echo WARNING: Inf2Cat not found - catalog NOT generated, package will be Unsigned!
-) else (
-    rem Remove stale CAT so a failed Inf2Cat cannot leave a mismatched one behind.
-    if exist "%OUTPUT_DIR%\amdbc250_dream.cat" del /q "%OUTPUT_DIR%\amdbc250_dream.cat"
-    echo Generating catalog file...
-    "%INF2CAT%" /driver:"%OUTPUT_DIR%" /os:10_x64 /verbose > "%OUTPUT_DIR%\inf2cat.log" 2>&1
-    if errorlevel 1 (
-        echo FATAL: Inf2Cat FAILED - package would be unsigned. See output\inf2cat.log
-        type "%OUTPUT_DIR%\inf2cat.log"
-        pause
-        exit /b 1
-    )
-    echo   Catalog generated OK
+    goto :AfterCat
 )
+rem Remove stale CAT so a failed Inf2Cat cannot leave a mismatched one behind.
+if exist "%OUTPUT_DIR%\amdbc250_dream.cat" del /q "%OUTPUT_DIR%\amdbc250_dream.cat"
+rem --- Use a CLEAN temp dir for Inf2Cat (output\ has stale INFs in subdirs that cause 22.9.4 errors) ---
+set "INF2CAT_DIR=%TEMP%\bc250_inf2cat"
+if exist "%INF2CAT_DIR%" rmdir /s /q "%INF2CAT_DIR%"
+mkdir "%INF2CAT_DIR%" 2>nul
+mkdir "%INF2CAT_DIR%\firmware" 2>nul
+copy "%OUTPUT_DIR%\atikmdag.sys" "%INF2CAT_DIR%\" >nul 2>&1
+copy "%OUTPUT_DIR%\amdbc250_dream.inf" "%INF2CAT_DIR%\" >nul 2>&1
+copy "%OUTPUT_DIR%\amdbc250umd64.dll" "%INF2CAT_DIR%\" >nul 2>&1
+copy "%OUTPUT_DIR%\firmware\*.bin" "%INF2CAT_DIR%\firmware\" >nul 2>&1
+echo Generating catalog file (clean temp)...
+"%INF2CAT%" /driver:"%INF2CAT_DIR%" /os:10_x64 > "%OUTPUT_DIR%\inf2cat.log" 2>&1
+if errorlevel 1 (
+    echo FATAL: Inf2Cat FAILED - see output\inf2cat.log
+    type "%OUTPUT_DIR%\inf2cat.log"
+    rmdir /s /q "%INF2CAT_DIR%" 2>nul
+    pause
+    exit /b 1
+)
+copy "%INF2CAT_DIR%\amdbc250_dream.cat" "%OUTPUT_DIR%\" >nul 2>&1
+rmdir /s /q "%INF2CAT_DIR%" 2>nul
+echo   Catalog generated OK
+:AfterCat
 
 rem --- Sign catalog (REQUIRED: unsigned CAT = package treated as Unsigned) ---
 if exist "%OUTPUT_DIR%\amdbc250_dream.cat" (
@@ -324,10 +337,27 @@ echo    atikmdag.sys       - GPU Kernel driver (signed)
 echo    amdbc250umd64.dll  - User driver
 echo    amdbc250_dream.inf
 echo.
-echo  Install (run as Admin):
-echo    Device Manager -^> Uninstall AMD Radeon BC-250 (check Delete driver)
-echo    Reboot
-echo    Device Manager -^> Update driver -^> Browse -^> %OUTPUT_DIR%
-echo    Reboot
+echo ==========================================
+echo  AUTO-INSTALL (run as Admin)
+echo ==========================================
+rem --- Export cert to .cer and import to Trusted Root ---
+certutil -exportPFX -p bc250sign "%CERT_FILE%" "%TEMP%\bc250_signer.cer" >nul 2>&1
+certutil -addstore Root "%TEMP%\bc250_signer.cer" >nul 2>&1
+certutil -addstore TrustedPublisher "%TEMP%\bc250_signer.cer" >nul 2>&1
+del "%TEMP%\bc250_signer.cer" 2>nul
+echo   Certificate added to Trusted Root + Trusted Publisher
+
+rem --- Install via pnputil ---
+echo Installing driver...
+pnputil /add-driver "%OUTPUT_DIR%\amdbc250_dream.inf" /install 2>&1
+if errorlevel 1 (
+    echo WARNING: pnputil failed. Install manually:
+    echo   Device Manager -^> Uninstall AMD Radeon BC-250 (check Delete driver)
+    echo   Reboot
+    echo   Device Manager -^> Update driver -^> Browse -^> %OUTPUT_DIR%
+    echo   Reboot
+) else (
+    echo   Driver installed OK - reboot to activate
+)
 echo.
 pause

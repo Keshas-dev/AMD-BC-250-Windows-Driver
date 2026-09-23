@@ -1,11 +1,11 @@
 ;++
+
 ;
-; AMD BC-250 WDDM display-only miniport INF
+; AMD BC-250 WDDM Graphics Driver INF
 ;
-; This is a KMDDOD (kernel mode display-only driver). It has NO user-mode
-; component - registering InstalledDisplayDrivers/UserModeDriverName makes
-; dxgkrnl expect a full render UMD and the desktop freezes. Matches the
-; proven-working KMDOD sample (sampledisplay.inf).
+; This is a full WDDM adapter driver with KMD + UMD components.
+; The KMD (amdbc250kmd.sys) handles GPU initialization and command submission.
+; The UMD (amdbc250umd64.dll) provides the user-mode D3D runtime interface.
 ;
 ;--
 
@@ -14,18 +14,20 @@ Signature="$Windows NT$"
 Class=Display
 ClassGUID={4d36e968-e325-11ce-bfc1-08002be10318}
 Provider=%ProviderString%
-DriverVer=08/05/2026, 1.0.108.0
+DriverVer=09/21/2026, 2.0.0.0
 CatalogFile=amdbc250.cat
 PnpLockdown=1
 
 [DestinationDirs]
 amdbc250_Files_KM = 12
+DefaultDestDir = 11
 
 [SourceDisksNames]
 1=%DiskDescription%,,,.
 
 [SourceDisksFiles]
 amdbc250kmd.sys = 1
+amdbc250umd64.dll = 1
 
 [Manufacturer]
 %ManufacturerName%=AMD,NTamd64
@@ -43,7 +45,7 @@ amdbc250kmd.sys = 1
 
 [amdbc250_Inst]
 FeatureScore=F0
-CopyFiles = amdbc250_Files_KM
+CopyFiles = amdbc250_Files_KM, amdbc250_Files_UM
 
 ;
 ;   Install driver service
@@ -57,8 +59,21 @@ StartType = 0x3
 ErrorControl = 0x0
 ServiceBinary = %12%\amdbc250kmd.sys
 
+;
+;   User-mode component registration
+;
+[amdbc250_Inst.SoftwareSettings]
+AddReg = amdbc250_UMD_Reg
+
+[amdbc250_UMD_Reg]
+HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\0000",InstalledDisplayDrivers,,"amdbc250umd64"
+HKLM,"SYSTEM\CurrentControlSet\Control\Class\{4d36e968-e325-11ce-bfc1-08002be10318}\0000",UserModeDriverName,,"%11%\amdbc250umd64.dll"
+
 [amdbc250_Files_KM]
 amdbc250kmd.sys
+
+[amdbc250_Files_UM]
+amdbc250umd64.dll
 
 [Strings]
 ProviderString="AMD BC-250 Driver Project"

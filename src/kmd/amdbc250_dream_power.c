@@ -63,6 +63,7 @@ static ULONG SmnRead(
     )
 {
     DreamV3WriteRegister(DevExt, 0x38, SmnAddr);
+    KeMemoryBarrier();
     return DreamV3ReadRegister(DevExt, 0x3C);
 }
 
@@ -73,7 +74,9 @@ static void SmnWrite(
     )
 {
     DreamV3WriteRegister(DevExt, 0x38, SmnAddr);
+    KeMemoryBarrier();
     DreamV3WriteRegister(DevExt, 0x3C, Value);
+    KeMemoryBarrier();
 }
 
 /* ============================================================================

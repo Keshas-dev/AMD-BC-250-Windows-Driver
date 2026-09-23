@@ -7,7 +7,7 @@ set VK_LOADER_LAYERS_DISABLE=~all~
 set VK_LOADER_DRIVERS_SELECT=amdbc250_icd.json
 set VK_LOADER_LAYERS_ALLOW=
 if "%1"=="cube" (
-  "F:\VulkanSDK\1.4.357.0\Bin\vkcube.exe" --gpu_number 0
+  "F:\VulkanSDK\1.4.357.0\Bin\vkcube.exe"
 ) else (
   "F:\VulkanSDK\1.4.357.0\Bin\vulkaninfoSDK.exe" --summary
 )

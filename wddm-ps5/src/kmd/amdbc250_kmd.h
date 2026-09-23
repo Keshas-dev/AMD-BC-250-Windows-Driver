@@ -32,10 +32,10 @@ Environment:
   Driver Version Information
 ===========================================================================*/
 
-#define AMDBC250_DRIVER_MAJOR_VERSION   1
+#define AMDBC250_DRIVER_MAJOR_VERSION   2
 #define AMDBC250_DRIVER_MINOR_VERSION   0
-#define AMDBC250_DRIVER_BUILD_NUMBER    101
-#define AMDBC250_DRIVER_VERSION_STRING  L"1.0.101.0"
+#define AMDBC250_DRIVER_BUILD_NUMBER    0
+#define AMDBC250_DRIVER_VERSION_STRING  L"2.0.0.0"
 
 /*===========================================================================
   Pool Tags (for memory allocation tracking)
@@ -721,6 +721,14 @@ APIENTRY
 Bc250DdiRender(
     _In_    CONST HANDLE        hContext,
     _Inout_ DXGKARG_RENDER      *pRender
+    );
+
+/* DxgkDdiEscape */
+NTSTATUS
+APIENTRY
+Bc250DdiEscape(
+    _In_ CONST HANDLE              hAdapter,
+    _In_ IN_CONST_PDXGKARG_ESCAPE  pEscape
     );
 
 /* DxgkDdiPresentDisplayOnly (display-only adapter present path) */

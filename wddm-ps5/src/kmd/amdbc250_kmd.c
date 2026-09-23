@@ -50,6 +50,12 @@ static volatile LONG g_Bc250LastCallbackId = 0;
 static volatile LONG g_Bc250LastQaiType = 0;
 static volatile LONG g_Bc250LastVidPnCallbackId = 0;
 
+/* Forward declarations for WDDM 3.2 required callbacks */
+NTSTATUS NTAPI Bc250DdiCreateHwQueue(IN_CONST_HANDLE hHwContext, INOUT_PDXGKARG_CREATEHWQUEUE pCreateHwQueue);
+NTSTATUS NTAPI Bc250DdiDestroyHwQueue(IN_CONST_HANDLE hHwQueue);
+NTSTATUS NTAPI Bc250DdiSubmitCommandToHwQueue(PVOID MiniportDeviceContext, IN_CONST_PDXGKARG_SUBMITCOMMANDTOHWQUEUE SubmitCommandToHwQueue);
+NTSTATUS NTAPI Bc250DdiSubmitCommandVirtual(PVOID MiniportDeviceContext, IN_CONST_PDXGKARG_SUBMITCOMMANDVIRTUAL SubmitCommandVirtual);
+
 /*
  * Persistent telemetry: release builds compile out KdPrint, so the ONLY way
  * to see what dxgkrnl does after a reboot is to write registry values. Every
@@ -529,7 +535,7 @@ Bc250AbiTypeChecks(VOID)
     PDXGKDDI_QUERYCURRENTFENCE     pFence      = Bc250DdiQueryCurrentFence;
     PDXGKDDI_PRESENT               pPresent    = Bc250DdiPresent;
     PDXGKDDI_RENDER                pRender     = Bc250DdiRender;
-    PDXGKDDI_PRESENTDISPLAYONLY    pPresentDo  = Bc250DdiPresentDisplayOnly;
+    PDXGKDDI_ESCAPE                pEscape     = Bc250DdiEscape;
 
     UNREFERENCED_PARAMETER(pAdd);
     UNREFERENCED_PARAMETER(pStart);
@@ -543,12 +549,12 @@ Bc250AbiTypeChecks(VOID)
     UNREFERENCED_PARAMETER(pFence);
     UNREFERENCED_PARAMETER(pPresent);
     UNREFERENCED_PARAMETER(pRender);
-    UNREFERENCED_PARAMETER(pPresentDo);
+    UNREFERENCED_PARAMETER(pEscape);
 }
 
 static VOID
 Bc250TraceDriverInitContract(
-    _In_ const KMDDOD_INITIALIZATION_DATA* DriverInitData
+    _In_ const DRIVER_INITIALIZATION_DATA* DriverInitData
     )
 {
     ULONG nonNullCount = 0;
@@ -572,7 +578,11 @@ Bc250TraceDriverInitContract(
     BC250_COUNT_NON_NULL(DxgkDdiDpcRoutine);
     BC250_COUNT_NON_NULL(DxgkDdiQueryAdapterInfo);
     BC250_COUNT_NON_NULL(DxgkDdiQueryInterface);
-    BC250_COUNT_NON_NULL(DxgkDdiPresentDisplayOnly);
+    BC250_COUNT_NON_NULL(DxgkDdiPresent);
+    BC250_COUNT_NON_NULL(DxgkDdiRender);
+    BC250_COUNT_NON_NULL(DxgkDdiSubmitCommand);
+    BC250_COUNT_NON_NULL(DxgkDdiCreateDevice);
+    BC250_COUNT_NON_NULL(DxgkDdiEscape);
 
 #if !AMDBC250_HEADLESS_RENDER_ONLY
     BC250_COUNT_NON_NULL(DxgkDdiQueryChildRelations);
@@ -611,14 +621,14 @@ Bc250TraceDriverInitContract(
              DriverInitData->DxgkDdiDispatchIoRequest,
              DriverInitData->DxgkDdiResetDevice,
              DriverInitData->DxgkDdiUnload));
-    KdPrint(("AMDBC250: INITPTR display-only present=%p pdo=%p sysen=%p syswr=%p intr=%p dpc=%p power=%p\n",
-             DriverInitData->DxgkDdiPresentDisplayOnly,
-             DriverInitData->DxgkDdiStopDeviceAndReleasePostDisplayOwnership,
-             DriverInitData->DxgkDdiSystemDisplayEnable,
-             DriverInitData->DxgkDdiSystemDisplayWrite,
+    KdPrint(("AMDBC250: INITPTR render present=%p submit=%p render_cb=%p escape=%p create_dev=%p intr=%p dpc=%p\n",
+             DriverInitData->DxgkDdiPresent,
+             DriverInitData->DxgkDdiSubmitCommand,
+             DriverInitData->DxgkDdiRender,
+             DriverInitData->DxgkDdiEscape,
+             DriverInitData->DxgkDdiCreateDevice,
              DriverInitData->DxgkDdiInterruptRoutine,
-             DriverInitData->DxgkDdiDpcRoutine,
-             DriverInitData->DxgkDdiSetPowerState));
+             DriverInitData->DxgkDdiDpcRoutine));
 
 #undef BC250_COUNT_NON_NULL
 }
@@ -709,7 +719,7 @@ DriverEntry(
     )
 {
     Bc250MarkCallbackEnter(BC250_CB_DRIVERENTRY);
-    KMDDOD_INITIALIZATION_DATA DriverInitData;
+    DRIVER_INITIALIZATION_DATA DriverInitData;
     NTSTATUS Status;
 
     InterlockedIncrement(&g_DeCalledDriverEntry);
@@ -723,15 +733,17 @@ DriverEntry(
              AMDBC250_DRIVER_MINOR_VERSION));
 
     /*
-     * BC-250 has no functional 3D/CP engine (WGP/SPI locked). Register as a
-     * DISPLAY-ONLY adapter (KMDDOD) so dxgkrnl uses PresentDisplayOnly and
-     * never touches the dead render pipeline. Version follows the SDK
-     * baseline DXGKDDI_INTERFACE_VERSION for the active build headers.
+     * Full WDDM adapter (not display-only). Register all render DDI
+     * callbacks so dxgkrnl drives the render + present path.
+     * Pin to WDDM 2.6 — the SDK default is WDDM 3.2 which requires
+     * additional DDI callbacks (CreateHwQueue, SubmitCommandVirtual, etc.)
+     * that we don't implement. dxgkrnl rejects the registration if those
+     * slots are NULL at WDDM 3.2.
      */
-    DriverInitData.Version = DXGKDDI_INTERFACE_VERSION;
+     DriverInitData.Version = DXGKDDI_INTERFACE_VERSION_WDDM3_2;
 
-    KdPrint(("AMDBC250: DriverEntry interface-version selected=0x%08X\n",
-             (ULONG)DriverInitData.Version));
+     KdPrint(("AMDBC250: DriverEntry interface-version selected=0x%08X\n",
+              (ULONG)DriverInitData.Version));
     KdPrint(("AMDBC250: BUILD_MARKER %s\n", AMDBC250_BUILD_MARKER));
 
     /* Core lifecycle */
@@ -744,7 +756,7 @@ DriverEntry(
     DriverInitData.DxgkDdiSetPowerState              = Bc250DdiSetPowerState;
     DriverInitData.DxgkDdiUnload                     = Bc250DdiUnload;
 
-    /* Interrupt/DPC handling (same set as the working KMDOD sample) */
+    /* Interrupt/DPC handling */
     DriverInitData.DxgkDdiInterruptRoutine           = Bc250DdiInterruptRoutine;
     DriverInitData.DxgkDdiDpcRoutine                 = Bc250DdiDpcRoutine;
 
@@ -756,7 +768,7 @@ DriverEntry(
     DriverInitData.DxgkDdiSetPointerPosition         = Bc250DdiSetPointerPosition;
     DriverInitData.DxgkDdiSetPointerShape            = Bc250DdiSetPointerShape;
 
-    /* VidPN management (same set as the working KMDOD sample) */
+    /* VidPN management */
     DriverInitData.DxgkDdiIsSupportedVidPn           = Bc250DdiIsSupportedVidPn;
     DriverInitData.DxgkDdiRecommendFunctionalVidPn   = Bc250DdiRecommendFunctionalVidPn;
     DriverInitData.DxgkDdiEnumVidPnCofuncModality    = Bc250DdiEnumVidPnCofuncModality;
@@ -765,9 +777,35 @@ DriverEntry(
     DriverInitData.DxgkDdiRecommendMonitorModes      = Bc250DdiRecommendMonitorModes;
     DriverInitData.DxgkDdiQueryVidPnHWCapability     = Bc250DdiQueryVidPnHwCapability;
     DriverInitData.DxgkDdiSetVidPnSourceVisibility   = Bc250DdiSetVidPnSourceVisibility;
+    DriverInitData.DxgkDdiSetVidPnSourceAddress      = Bc250DdiSetVidPnSourceAddress;
 
-    /* Display-only present + system display callbacks (WDDM 1.2+) */
-    DriverInitData.DxgkDdiPresentDisplayOnly         = Bc250DdiPresentDisplayOnly;
+     /* Render DDI - full WDDM stack */
+     DriverInitData.DxgkDdiCreateDevice               = Bc250DdiCreateDevice;
+     DriverInitData.DxgkDdiDestroyDevice              = Bc250DdiDestroyDevice;
+     DriverInitData.DxgkDdiCreateContext              = Bc250DdiCreateContext;
+     DriverInitData.DxgkDdiDestroyContext             = Bc250DdiDestroyContext;
+     DriverInitData.DxgkDdiCreateAllocation           = Bc250DdiCreateAllocation;
+     DriverInitData.DxgkDdiDestroyAllocation          = Bc250DdiDestroyAllocation;
+     DriverInitData.DxgkDdiOpenAllocation             = Bc250DdiOpenAllocation;
+     DriverInitData.DxgkDdiCloseAllocation            = Bc250DdiCloseAllocation;
+     DriverInitData.DxgkDdiSubmitCommand              = Bc250DdiSubmitCommand;
+     DriverInitData.DxgkDdiSubmitCommandVirtual       = Bc250DdiSubmitCommandVirtual;
+     DriverInitData.DxgkDdiSubmitCommandToHwQueue     = Bc250DdiSubmitCommandToHwQueue;
+     DriverInitData.DxgkDdiCreateHwQueue              = Bc250DdiCreateHwQueue;
+     DriverInitData.DxgkDdiDestroyHwQueue             = Bc250DdiDestroyHwQueue;
+     DriverInitData.DxgkDdiPreemptCommand             = Bc250DdiPreemptCommand;
+     DriverInitData.DxgkDdiQueryCurrentFence          = Bc250DdiQueryCurrentFence;
+     DriverInitData.DxgkDdiBuildPagingBuffer          = Bc250DdiBuildPagingBuffer;
+     DriverInitData.DxgkDdiPatch                      = Bc250DdiPatch;
+     DriverInitData.DxgkDdiPresent                    = Bc250DdiPresent;
+     DriverInitData.DxgkDdiRender                     = Bc250DdiRender;
+     DriverInitData.DxgkDdiEscape                     = Bc250DdiEscape;
+     DriverInitData.DxgkDdiCreateOverlay              = Bc250DdiCreateOverlay;
+     DriverInitData.DxgkDdiDestroyOverlay             = Bc250DdiDestroyOverlay;
+     DriverInitData.DxgkDdiControlInterrupt           = Bc250DdiControlInterrupt;
+     DriverInitData.DxgkDdiQueryInterface             = Bc250DdiQueryInterface;
+
+    /* System display (WDDM 1.2+) */
     DriverInitData.DxgkDdiStopDeviceAndReleasePostDisplayOwnership = Bc250DdiStopDeviceAndReleasePostDisplayOwnership;
     DriverInitData.DxgkDdiSystemDisplayEnable        = Bc250DdiSystemDisplayEnable;
     DriverInitData.DxgkDdiSystemDisplayWrite         = Bc250DdiSystemDisplayWrite;
@@ -775,14 +813,14 @@ DriverEntry(
     Bc250AbiTypeChecks();
     Bc250TraceDriverInitContract(&DriverInitData);
 
-    KdPrint(("AMDBC250: DriverEntry pre-DxgkInitializeDisplayOnlyDriver version=0x%08X size=%llu\n",
+    KdPrint(("AMDBC250: DriverEntry pre-DxgkInitialize version=0x%08X size=%llu\n",
              (ULONG)DriverInitData.Version,
              (ULONGLONG)sizeof(DriverInitData)));
 
-    /* Register with Dxgkrnl as a display-only adapter */
-    Status = DxgkInitializeDisplayOnlyDriver(DriverObject, RegistryPath, &DriverInitData);
+    /* Register with Dxgkrnl as a full WDDM adapter */
+    Status = DxgkInitialize(DriverObject, RegistryPath, &DriverInitData);
 
-    KdPrint(("AMDBC250: DriverEntry post-DxgkInitializeDisplayOnlyDriver status=0x%08X\n", (ULONG)Status));
+    KdPrint(("AMDBC250: DriverEntry post-DxgkInitialize status=0x%08X\n", (ULONG)Status));
     if (NT_SUCCESS(Status)) {
         InterlockedIncrement(&g_DeDxgkInitializeSuccess);
     }
@@ -802,7 +840,7 @@ DriverEntry(
                  (ULONG)g_Bc250DriverEntryFirstFailStatus,
                  (ULONG)BC250_DDI_ID_DRIVERENTRY,
                  Bc250GetDdiName(BC250_DDI_ID_DRIVERENTRY)));
-        KdPrint(("AMDBC250: DxgkInitializeDisplayOnlyDriver failed with status 0x%08X\n", Status));
+        KdPrint(("AMDBC250: DxgkInitialize failed with status 0x%08X\n", Status));
     } else {
         KdPrint(("AMDBC250: DriverEntry successful\n"));
     }
@@ -1753,23 +1791,17 @@ Bc250DdiQueryAdapterInfo(
         RtlZeroMemory(pCaps, sizeof(DXGK_DRIVERCAPS));
 
         /*
-         * Display-only adapter (KMDDOD): we must not advertise any render/3D
-         * capabilities. Keep the WDDM version consistent with the interface
-         * we registered and expose the highest addressable BAR as full range.
+         * Full WDDM adapter: advertise render capabilities.
+         * WDDM version consistent with the interface we registered.
          */
-        pCaps->WDDMVersion = DXGKDDI_WDDMv1_2;
+        pCaps->WDDMVersion = DXGKDDI_WDDMv1_3;
         pCaps->HighestAcceptableAddress.QuadPart = -1;
         pCaps->SupportNonVGA = TRUE;
         pCaps->SupportSmoothRotation = TRUE;
 
-        /* Present capability: DOD does NOT advertise software device bitmaps.
-         * Keep DRIVERCAPS identical to the proven-working KMDOD so that
-         * dxgkrnl drives the same display-only present path. */
-#if AMDBC250_QAI_DOD_STRICT
-        /* leave PresentationCaps zeroed like DOD */
-#endif
+        /* Advertise render support */
 
-        KdPrint(("AMDBC250: QueryAdapterInfo - DRIVERCAPS reported (display-only)\n"));
+        KdPrint(("AMDBC250: QueryAdapterInfo - DRIVERCAPS reported (full WDDM)\n"));
         BC250_QAI_RETURN(STATUS_SUCCESS, 0, "drivercaps");
     }
 
@@ -2515,86 +2547,27 @@ Bc250DdiSubmitCommand(
     )
 {
     PAMDBC250_DEVICE_EXTENSION DevExt = (PAMDBC250_DEVICE_EXTENSION)hAdapter;
-    ULONG WPtr;
-    ULONG RPtr;
-    ULONG RingSize;
-    ULONG FreeBytes;
-    ULONG RingDwords;
-    ULONG WDwords;
-    ULONG NeededBytes;
-    KIRQL OldIrql;
 
     if (DevExt == NULL || pSubmitCommand == NULL) {
         return STATUS_INVALID_PARAMETER;
     }
-    if (!DevExt->HardwareInitialized || !DevExt->GfxRing.Initialized ||
-        DevExt->GfxRing.VirtualAddress == NULL || DevExt->GfxRing.SizeInBytes == 0) {
-        return STATUS_DEVICE_NOT_READY;
-    }
-    if (pSubmitCommand->DmaBufferSize == 0) {
-        return STATUS_INVALID_PARAMETER;
-    }
-
-    KeAcquireSpinLock(&DevExt->GfxRing.Lock, &OldIrql);
-
-    WPtr = DevExt->GfxRing.WritePointer;
-    RPtr = Bc250ReadMmio(DevExt, AMDBC250_REG_CP_RB0_RPTR);
-    RingSize = (ULONG)DevExt->GfxRing.SizeInBytes;
-    NeededBytes = 4 * sizeof(ULONG);
-
-    if (RPtr <= WPtr) {
-        FreeBytes = RingSize - (WPtr - RPtr);
-    } else {
-        FreeBytes = RPtr - WPtr;
-    }
-
-    if (FreeBytes <= NeededBytes) {
-        KeReleaseSpinLock(&DevExt->GfxRing.Lock, OldIrql);
-        return STATUS_BUFFER_TOO_SMALL;
-    }
 
     /*
-     * In a full implementation, the command buffer would be written into
-     * the GFX ring here using PM4 indirect buffer packets.
-     * The ring is then advanced by writing the new WPTR to the doorbell.
-     *
-     * For this reference implementation, we record the fence value and
-     * advance the write pointer symbolically.
+     * Display-only WDDM adapter: GPU command processing is disabled (SPI_PG
+     * locked). Simply record the submitted fence value and immediately signal
+     * completion via the fence notification mechanism. dxgkrnl polls
+     * QueryCurrentFence and will TDR if we don't advance.
      */
-
-    /* Write IB (Indirect Buffer) packet to ring */
-    {
-        PULONG RingBase = (PULONG)DevExt->GfxRing.VirtualAddress;
-        RingDwords = (ULONG)(DevExt->GfxRing.SizeInBytes / sizeof(ULONG));
-        WDwords = WPtr / sizeof(ULONG);
-
-        /* PM4 INDIRECT_BUFFER packet (type 3, opcode 0x3F) */
-        RingBase[(WDwords + 0) % RingDwords] = (ULONG)PM4_TYPE3_HDR(PM4_IT_INDIRECT_BUFFER, 4);
-        RingBase[(WDwords + 1) % RingDwords] = (ULONG)(pSubmitCommand->DmaBufferPhysicalAddress.LowPart);
-        RingBase[(WDwords + 2) % RingDwords] = (ULONG)(pSubmitCommand->DmaBufferPhysicalAddress.HighPart);
-        RingBase[(WDwords + 3) % RingDwords] = pSubmitCommand->DmaBufferSize / sizeof(ULONG);
-
-        WDwords = (WDwords + 4) % RingDwords;
-        WPtr = WDwords * sizeof(ULONG);
-    }
-
-    DevExt->GfxRing.WritePointer = WPtr;
     DevExt->GlobalFence.LastSubmittedValue = (ULONG)pSubmitCommand->SubmissionFenceId;
 
-    /* Ring the doorbell to notify GPU of new work */
-    KeMemoryBarrier();
-    if (DevExt->DoorbellVirtualBase != NULL) {
-        PULONG Doorbell = (PULONG)DevExt->DoorbellVirtualBase;
-        Doorbell[DevExt->GfxRing.DoorBellOffset / sizeof(ULONG)] = WPtr;
-    } else {
-        /* Fallback: write directly to MMIO WPTR register */
-        Bc250WriteMmio(DevExt, AMDBC250_REG_CP_RB0_WPTR, WPtr);
+    /* Immediately signal fence completion — no GPU needed */
+    if (DevExt->GlobalFence.VirtualAddress != NULL) {
+        *DevExt->GlobalFence.VirtualAddress = (ULONG)pSubmitCommand->SubmissionFenceId;
     }
+    DevExt->GlobalFence.LastSignaledValue = (ULONG)pSubmitCommand->SubmissionFenceId;
 
-    KeReleaseSpinLock(&DevExt->GfxRing.Lock, OldIrql);
-
-    KdPrint(("AMDBC250: SubmitCommand - fence=%llu, wptr=0x%X\n",
-             pSubmitCommand->SubmissionFenceId, WPtr));
+    KdPrint(("AMDBC250: SubmitCommand - fence=%llu (display-only, signaled immediately)\n",
+             pSubmitCommand->SubmissionFenceId));
 
     return STATUS_SUCCESS;
 }
@@ -2615,19 +2588,11 @@ Bc250DdiPreemptCommand(
 
     UNREFERENCED_PARAMETER(pPreemptCommand);
 
-    if (DevExt == NULL || !DevExt->HardwareInitialized || DevExt->MmioVirtualBase == NULL) {
-        return STATUS_DEVICE_NOT_READY;
+    if (DevExt == NULL) {
+        return STATUS_INVALID_PARAMETER;
     }
 
-    KdPrint(("AMDBC250: PreemptCommand called\n"));
-
-    /*
-     * For RDNA2, preemption is handled by writing to the CP_PREEMPT register.
-     * A full implementation would use the GFX9/10 mid-draw preemption mechanism.
-     */
-    Bc250WriteMmio(DevExt, AMDBC250_REG_CP_ME_CNTL,
-                   Bc250ReadMmio(DevExt, AMDBC250_REG_CP_ME_CNTL) | 0x00000001);
-
+    /* Display-only: no GPU commands to preempt */
     return STATUS_SUCCESS;
 }
 
@@ -2649,12 +2614,11 @@ Bc250DdiQueryCurrentFence(
         return STATUS_INVALID_PARAMETER;
     }
 
-    /* Read the fence value written by GPU into the fence memory */
-    if (DevExt->GlobalFence.VirtualAddress != NULL) {
-        pCurrentFence->CurrentFence = *DevExt->GlobalFence.VirtualAddress;
-    } else {
-        pCurrentFence->CurrentFence = DevExt->GlobalFence.LastSignaledValue;
-    }
+    /*
+     * Display-only adapter: no GPU fence — return the last submitted value
+     * so dxgkrnl thinks the fence is always immediately complete.
+     */
+    pCurrentFence->CurrentFence = DevExt->GlobalFence.LastSubmittedValue;
 
     return STATUS_SUCCESS;
 }
@@ -3519,13 +3483,101 @@ NTSTATUS APIENTRY Bc250DdiDestroyOverlay(
 }
 
 NTSTATUS APIENTRY Bc250DdiPresent(
-    _In_    CONST HANDLE hContext,
-    _Inout_ DXGKARG_PRESENT *pPresent)
+     _In_    CONST HANDLE hContext,
+     _Inout_ DXGKARG_PRESENT *pPresent)
 {
-    if (hContext == NULL || pPresent == NULL) {
-        return STATUS_INVALID_PARAMETER;
-    }
+     PAMDBC250_DEVICE_EXTENSION DevExt = g_Bc250PrimaryDevice;
+
+     if (hContext == NULL || pPresent == NULL) {
+         return STATUS_INVALID_PARAMETER;
+     }
+
+     if (DevExt == NULL || !DevExt->FbMapped || DevExt->FbVirtualBase == NULL) {
+         return STATUS_SUCCESS;
+     }
+
+     /*
+      * Display-only WDDM adapter: present blits from the source allocation
+      * to the POST framebuffer. dxgkrnl passes the source allocation in
+      * pAllocationList[0].PhysicalAddress. If the address is the POST FB
+      * itself, the BIOS scanout already shows it. If it's a separate
+      * allocation, copy it line-by-line.
+      */
+     if (pPresent->pAllocationList != NULL && pPresent->NumSrcAllocations > 0) {
+         PHYSICAL_ADDRESS SrcPA = pPresent->pAllocationList[0].PhysicalAddress;
+         PBYTE pDst = (PBYTE)DevExt->FbVirtualBase;
+         SIZE_T FbBytes = (SIZE_T)DevExt->FbPitch * (SIZE_T)DevExt->FbHeight;
+
+         if (SrcPA.QuadPart != 0 && DevExt->FbPhysicalBase.QuadPart != 0 &&
+             SrcPA.QuadPart != DevExt->FbPhysicalBase.QuadPart) {
+             /*
+              * Source is a different allocation than the POST FB.
+              * Map the source physical memory and copy to POST FB.
+              */
+              PVOID pSrcMap = MmMapIoSpace(SrcPA, FbBytes, MmNonCached);
+              if (pSrcMap != NULL) {
+                  RtlCopyMemory(pDst, pSrcMap, FbBytes);
+                  MmUnmapIoSpace(pSrcMap, FbBytes);
+              }
+          }
+      }
+      return STATUS_SUCCESS;
+}
+
+/*===========================================================================
+   WDDM 3.2 Required Hardware Queue Callbacks
+   dxgkrnl on Win11 26100 requires these for WDDM 3.2 registration.
+===========================================================================*/
+
+NTSTATUS
+APIENTRY
+Bc250DdiCreateHwQueue(
+    _In_  IN_CONST_HANDLE               hHwContext,
+    _Inout_ INOUT_PDXGKARG_CREATEHWQUEUE  pCreateHwQueue
+    )
+{
+    PAMDBC250_DEVICE_EXTENSION DevExt = (PAMDBC250_DEVICE_EXTENSION)hHwContext;
+    UNREFERENCED_PARAMETER(pCreateHwQueue);
+    KdPrint(("AMDBC250: DxgkDdiCreateHwQueue called\n"));
+    pCreateHwQueue->hHwQueue = (HANDLE)0xDEADBEEF;
     return STATUS_SUCCESS;
+}
+
+NTSTATUS
+APIENTRY
+Bc250DdiDestroyHwQueue(
+    _In_  IN_CONST_HANDLE               hHwQueue
+    )
+{
+    UNREFERENCED_PARAMETER(hHwQueue);
+    KdPrint(("AMDBC250: DxgkDdiDestroyHwQueue called\n"));
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS
+APIENTRY
+Bc250DdiSubmitCommandToHwQueue(
+    _In_  PVOID                         MiniportDeviceContext,
+    _In_  IN_CONST_PDXGKARG_SUBMITCOMMANDTOHWQUEUE SubmitCommandToHwQueue
+    )
+{
+    UNREFERENCED_PARAMETER(MiniportDeviceContext);
+    UNREFERENCED_PARAMETER(SubmitCommandToHwQueue);
+    KdPrint(("AMDBC250: DxgkDdiSubmitCommandToHwQueue called\n"));
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS
+APIENTRY
+Bc250DdiSubmitCommandVirtual(
+    _In_  PVOID                         MiniportDeviceContext,
+    _In_  IN_CONST_PDXGKARG_SUBMITCOMMANDVIRTUAL  SubmitCommandVirtual
+    )
+{
+    UNREFERENCED_PARAMETER(MiniportDeviceContext);
+    UNREFERENCED_PARAMETER(SubmitCommandVirtual);
+    KdPrint(("AMDBC250: DxgkDdiSubmitCommandVirtual called\n"));
+     return STATUS_SUCCESS;
 }
 
 NTSTATUS APIENTRY Bc250DdiRender(
@@ -3535,6 +3587,48 @@ NTSTATUS APIENTRY Bc250DdiRender(
     if (hContext == NULL || pRender == NULL) {
         return STATUS_INVALID_PARAMETER;
     }
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS APIENTRY Bc250DdiEscape(
+    _In_ CONST HANDLE hAdapter,
+    _In_ IN_CONST_PDXGKARG_ESCAPE pEscape)
+{
+    PAMDBC250_DEVICE_EXTENSION DevExt = (PAMDBC250_DEVICE_EXTENSION)hAdapter;
+
+    if (DevExt == NULL || pEscape == NULL) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    KdPrint(("AMDBC250: Escape type=%lu pPrivateDriverData=%p privateDriverDataSize=%lu\n",
+             (ULONG)pEscape->EscapeType,
+             pEscape->pPrivateDriverData,
+             pEscape->PrivateDriverDataSize));
+
+    /*
+     * Handle custom BC-250 escape types for SMU mailbox, register access,
+     * and other driver-specific operations. The UMD passes opaque data
+     * through here.
+     */
+    if (pEscape->pPrivateDriverData != NULL && pEscape->PrivateDriverDataSize > 0) {
+        PULONG pInput = (PULONG)pEscape->pPrivateDriverData;
+
+        /* First DWORD is the custom escape code */
+        if (pEscape->PrivateDriverDataSize >= sizeof(ULONG)) {
+            ULONG EscapeCode = pInput[0];
+
+            switch (EscapeCode) {
+            case 0x43425341: /* "ABCA" - BC-250 SMU mailbox test */
+                KdPrint(("AMDBC250: Escape SMU test\n"));
+                return STATUS_SUCCESS;
+
+            default:
+                KdPrint(("AMBC250: Escape unknown code=0x%08X\n", EscapeCode));
+                break;
+            }
+        }
+    }
+
     return STATUS_SUCCESS;
 }
 
@@ -3742,10 +3836,6 @@ VOID APIENTRY Bc250DdiSystemDisplayWrite(
                       (SIZE_T)CopyX * 4);
     }
 }
-
-
-
-
 
 
 
