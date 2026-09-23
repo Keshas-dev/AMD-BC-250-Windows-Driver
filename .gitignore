@@ -96,3 +96,21 @@ disable.ps1
 
 *.csv
 
+# Agent / local tooling
+.opencode/
+
+# Vulkaninfo dumps (local diagnostic)
+VP_VULKANINFO_*.json
+
+# wddm-ps5 local install/sign helpers (build.bat is tracked; these are one-shot scripts)
+wddm-ps5/_vercheck.c
+wddm-ps5/fixcat.bat
+wddm-ps5/inf2cat.bat
+wddm-ps5/install-wddm.bat
+wddm-ps5/install-wddm-phase2.bat
+wddm-ps5/reinstall.bat
+wddm-ps5/sign.bat
+wddm-ps5/truncate.ps1
+wddm-ps5/update-driver.bat
+
+
