@@ -11,6 +11,7 @@
 | 4 | **Vulkan ICD draw** | `vk-draw-test.exe` **PASS**: GIPA→`vkCreateInstance`… `DRAW_INDEX_AUTO` PM4 `0xC0022D00`, `vkQueueSubmit` OK, procs=0, EXIT=0. |
 
 ### vk-execute-test findings (this session)
+- **⚠️ WHITE SCREEN after test (2026-09-23)** — user reported white display post-run. Likely Stage 3 `EXECUTE_RING_PM4` (HQD/WPTR + ME_CNTL side-effect unhalt `0xFFFBD9FB→0`) on LIVE display path = documented display-fetch fault → **reboot recovery**. System log had no Critical/Error at time of check. **Rule: do NOT re-run vk-execute-test on live desktop; Stage 3 is display-adjacent (ring/HQD/ME).** If re-run ever needed: RDP/headless session first + `Stop-Process` check.
 - **SW PM4 executor CONFIRMED working**: MMIO baseline SCRATCH `0x4D585042` → direct SEND_PM4 WRITE_DATA → `0x4AFEBABE` (masked match). err=183 = STATUS_DEVICE_BUSY wait retry, handler still succeeded.
 - **HW ring path PROBED**: EXECUTE_RING Result=1, SwResult=0, ScratchBefore=0→ScratchAfter=0x5EADBEEF, WPTR 0→20, RPTR stays 0, HQD=1 — **SW fallback inside EXEC_RING**, not real GPU consumption. ME_CNTL went 0xFFFBD9FB→0x00000000 (unhalt side-effect) post-stage3.
 - **ICD vkQueueSubmit does NOT change SCRATCH** (pre=post=0x4D585042) — ICD submits DRAW_INDEX_AUTO to KMD, KMD routes to PSP KIQ/GfxRing/SW; none execute a WRITE_DATA to SCRATCH (correct — ICD path only sends the draw, no SW executor side-effect expected).
@@ -22,7 +23,7 @@
 - Test **`test-tools/vk-draw-test.c`** `load()` resolves via **`g_gipa`**: `vk_icdGetInstanceProcAddr` → fallback `vkGetInstanceProcAddr` → `GetProcAddress`. `vkCreateInstance` is a **string** inside ICD (not export).
 - Compile: `test-tools/compile-vk-draw-test.bat` (direct `cl` + vcvars; works even if vcvarsall path message errors).
 - New tools + compile bats: `pa-v1-diag[2].c`, `pa-v1-probe.c`, `governor-service.c`, `vk-draw-test.c`, `vk-execute-test.c`, `compile-pa-v1-*.bat`, `compile-governor-service.bat`, `compile-psp-pci-bar-find.bat`, `compile-vk-draw-test.bat`, `compile-vk-execute-test.bat`.
-- **Rerun policy:** these five tests already ran once — **never launch twice**; `Stop-Process` + procs=0 first if ever needed. (`vk-execute-test` re-run only if driver rebuilt — note SCRATCH baseline may differ after ME unhalt.)
+- **Rerun policy:** these five tests already ran once — **never launch twice**; `Stop-Process` + procs=0 first if ever needed. (`vk-execute-test` re-run only if driver rebuilt — note SCRATCH baseline may differ after ME unhalt.) **⚠️ vk-execute-test caused WHITE SCREEN (Stage 3 EXEC_RING/HQD/ME_CNTL on live display) — never re-run on live desktop; reboot if repeated.**
 - **Also one-shot (DO NOT RERUN):** `gpu-init-explicit` + PSP `test-psp-driver -s` + pa_v1 READ_REG probes (post-reinstall verification done 2026-09-23).
 
 ### PSP side (sibling repo — see its AGENTS)
