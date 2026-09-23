@@ -60,7 +60,7 @@ typedef struct {
     uint32_t        fenceValue;
 } BC250_VK_DEVICE;
 
-static BC250_VK_DEVICE g_Device = {0};
+static BC250_VK_DEVICE g_Device = { 0, 0, 0, 0, 0, 1 /* fenceValue: KMD needs >0 to append EOP */ };
 
 /* Memory allocation tracking */
 typedef struct {
@@ -430,7 +430,15 @@ VkResult VKAPI_CALL bc250_vkCreateDevice(
         BC250_TRACE_OUT(pDevice);
         return result;
     }
-    
+
+    /* Publish handle/fence to global used by QueueSubmit (avoids second
+     * open + FenceValue=0 first submit). g_Device.kmdDevice is overwritten
+     * only if this is the first/only device. */
+    if (g_Device.kmdDevice == NULL || g_Device.kmdDevice == INVALID_HANDLE_VALUE)
+        g_Device.kmdDevice = dev->kmdDevice;
+    if (g_Device.fenceValue == 0)
+        g_Device.fenceValue = 1;
+
     *pDevice = (VkDevice)dev;
     BC250_TRACE_OUT(pDevice);
     return VK_SUCCESS;
@@ -441,6 +449,9 @@ void VKAPI_CALL bc250_vkDestroyDevice(VkDevice device, const void* pAllocator)
     UNREFERENCED_PARAMETER(pAllocator);
     BC250_TRACE_IN(device);
     if (device) {
+        BC250_VK_DEVICE* dev = (BC250_VK_DEVICE*)device;
+        if (g_Device.kmdDevice == dev->kmdDevice)
+            g_Device.kmdDevice = INVALID_HANDLE_VALUE;
         bc250_DestroyDevice(device);
         HeapFree(GetProcessHeap(), 0, (void*)device);
     }
@@ -1044,7 +1055,33 @@ VkResult VKAPI_CALL bc250_vkResetFences(
     return VK_SUCCESS;
 }
 
-/* Command buffers */
+/* Command buffers — header + PM4 payload in one VirtualAlloc region. */
+#define BC250_CMD_MAGIC     0x444D4342u /* 'BCMD' */
+#define BC250_CMD_CAPACITY  (16 * 1024) /* bytes of PM4 payload (rest of 64KB alloc unused) */
+
+typedef struct {
+    uint32_t magic;
+    uint32_t used;      /* bytes of PM4 payload after this header */
+    uint32_t capacity;  /* BC250_CMD_CAPACITY */
+    uint32_t recording; /* 1 between Begin/End */
+} BC250_CMD_HDR;
+
+static BC250_CMD_HDR* bc250_cmd(VkCommandBuffer cb)
+{
+    BC250_CMD_HDR* hdr = (BC250_CMD_HDR*)cb;
+    if (!hdr || hdr->magic != BC250_CMD_MAGIC) return NULL;
+    return hdr;
+}
+
+static uint32_t* bc250_cmd_append_dwords(BC250_CMD_HDR* hdr, uint32_t n)
+{
+    if (!hdr || !hdr->recording) return NULL;
+    if (hdr->used + n * sizeof(uint32_t) > hdr->capacity) return NULL;
+    uint32_t* p = (uint32_t*)((uint8_t*)(hdr + 1) + hdr->used);
+    hdr->used += n * sizeof(uint32_t);
+    return p;
+}
+
 VkResult VKAPI_CALL bc250_vkCreateCommandPool(
     VkDevice device,
     const void* pCreateInfo,
@@ -1074,11 +1111,31 @@ VkResult VKAPI_CALL bc250_vkAllocateCommandBuffers(
     VkCommandBuffer* pCommandBuffers)
 {
     UNREFERENCED_PARAMETER(device);
-    UNREFERENCED_PARAMETER(pAllocateInfo);
-    
-    /* Allocate command buffer (64KB) */
-    pCommandBuffers[0] = (VkCommandBuffer)VirtualAlloc(NULL, 64 * 1024, MEM_COMMIT, PAGE_READWRITE);
-    return pCommandBuffers[0] ? VK_SUCCESS : VK_ERROR_OUT_OF_DEVICE_MEMORY;
+    /* pAllocateInfo: VkCommandBufferAllocateInfo — commandBufferCount @ offset after sType/pNext/pool.
+     * Minimal: assume caller wants 1 (vk-minimal-test pattern); read count if layout matches. */
+    uint32_t count = 1;
+    if (pAllocateInfo) {
+        /* VkCommandBufferAllocateInfo: sType(4)+pad(4)+pNext(8)+commandPool(8)+level(4)+count(4) = 32 */
+        const uint8_t* p = (const uint8_t*)pAllocateInfo;
+        count = *(const uint32_t*)(p + 28);
+        if (count == 0 || count > 64) count = 1;
+    }
+
+    for (uint32_t i = 0; i < count; i++) {
+        size_t total = sizeof(BC250_CMD_HDR) + BC250_CMD_CAPACITY;
+        BC250_CMD_HDR* hdr = (BC250_CMD_HDR*)VirtualAlloc(NULL, total, MEM_COMMIT, PAGE_READWRITE);
+        if (!hdr) {
+            for (uint32_t j = 0; j < i; j++)
+                if (pCommandBuffers[j]) VirtualFree((void*)pCommandBuffers[j], 0, MEM_RELEASE);
+            return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+        }
+        hdr->magic = BC250_CMD_MAGIC;
+        hdr->used = 0;
+        hdr->capacity = BC250_CMD_CAPACITY;
+        hdr->recording = 0;
+        pCommandBuffers[i] = (VkCommandBuffer)hdr;
+    }
+    return VK_SUCCESS;
 }
 
 void VKAPI_CALL bc250_vkFreeCommandBuffers(
@@ -1089,7 +1146,7 @@ void VKAPI_CALL bc250_vkFreeCommandBuffers(
 {
     UNREFERENCED_PARAMETER(device);
     UNREFERENCED_PARAMETER(commandPool);
-    
+
     for (uint32_t i = 0; i < commandBufferCount; i++) {
         if (pCommandBuffers[i]) VirtualFree((void*)pCommandBuffers[i], 0, MEM_RELEASE);
     }
@@ -1097,21 +1154,29 @@ void VKAPI_CALL bc250_vkFreeCommandBuffers(
 
 VkResult VKAPI_CALL bc250_vkBeginCommandBuffer(VkCommandBuffer commandBuffer, const void* pBeginInfo)
 {
-    UNREFERENCED_PARAMETER(commandBuffer);
+    BC250_CMD_HDR* hdr = bc250_cmd(commandBuffer);
     UNREFERENCED_PARAMETER(pBeginInfo);
+    if (!hdr) return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+    hdr->used = 0;
+    hdr->recording = 1;
     return VK_SUCCESS;
 }
 
 VkResult VKAPI_CALL bc250_vkEndCommandBuffer(VkCommandBuffer commandBuffer)
 {
-    UNREFERENCED_PARAMETER(commandBuffer);
+    BC250_CMD_HDR* hdr = bc250_cmd(commandBuffer);
+    if (!hdr) return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+    hdr->recording = 0;
     return VK_SUCCESS;
 }
 
 VkResult VKAPI_CALL bc250_vkResetCommandBuffer(VkCommandBuffer commandBuffer, VkFlags flags)
 {
-    UNREFERENCED_PARAMETER(commandBuffer);
+    BC250_CMD_HDR* hdr = bc250_cmd(commandBuffer);
     UNREFERENCED_PARAMETER(flags);
+    if (!hdr) return VK_ERROR_OUT_OF_DEVICE_MEMORY;
+    hdr->used = 0;
+    hdr->recording = 0;
     return VK_SUCCESS;
 }
 
@@ -1120,12 +1185,14 @@ VkResult VKAPI_CALL bc250_vkResetCommandBuffer(VkCommandBuffer commandBuffer, Vk
 #define PM4_TYPE3_HDR(opcode, cnt) ((3u << 30) | (((cnt) - 1) << 16) | ((opcode) << 8))
 #define IT_EVENT_WRITE_EOP  0x47
 #define IT_NOP              0x10
+#define IT_DRAW_INDEX_AUTO  0x2D
 
 /* KMD IOCTL codes */
 #define IOCTL_AMDBC250_ALLOC_DMA_BUFFER  0x80000930
 #define IOCTL_AMDBC250_FREE_DMA_BUFFER   0x80000934
 #define IOCTL_AMDBC250_SUBMIT_COMMANDS   0x80000880
 #define IOCTL_AMDBC250_WAIT_FENCE        0x80000884
+#define IOCTL_AMDBC250_SEND_PM4          0x80000B84
 
 /* Allocate DMA buffer from KMD: returns CPU VA and GPU PA */
 static PVOID bc250_alloc_dma(HANDLE kmd, ULONG size, uint64_t *outPa)
@@ -1152,9 +1219,90 @@ static void bc250_free_dma(HANDLE kmd, PVOID va)
     DeviceIoControl(kmd, IOCTL_AMDBC250_FREE_DMA_BUFFER, freeIn, sizeof(freeIn), NULL, 0, &ret, NULL);
 }
 
-/* Queue Submit — SEND_PM4 inline path (0x80000B84). No DMA-buffer VA is ever
- * touched from user mode: ALLOC_DMA_BUFFER returns a kernel VA
- * (MmAllocateContiguousMemory), writing it from here AVs the caller. */
+/* VkSubmitInfo — match Vulkan ABI (x64 natural alignment, no pack). */
+typedef struct BC250_VkSubmitInfo {
+    int32_t     sType;
+    const void* pNext;
+    uint32_t    waitSemaphoreCount;
+    const void* pWaitSemaphores;
+    const uint32_t* pWaitDstStageMask;
+    uint32_t    commandBufferCount;
+    const VkCommandBuffer* pCommandBuffers;
+    uint32_t    signalSemaphoreCount;
+    const void* pSignalSemaphores;
+} BC250_VkSubmitInfo;
+
+#define BC250_VK_STRUCTURE_TYPE_SUBMIT_INFO 4
+
+/* SEND_PM4: Commands[64]@0, Count@256, Fence(u64)@264, QueueType@272. */
+static int bc250_send_pm4(HANDLE kmd, const uint32_t* dwords, uint32_t count,
+                          uint64_t fence, int withFence)
+{
+    if (!kmd || kmd == INVALID_HANDLE_VALUE || !dwords || count == 0 || count > 64)
+        return 0;
+    /* AMDBC250_IOCTL_SEND_PM4 = Commands[64]@0 + count@256 + pad@260 +
+     * Fence@264 + QueueType@272 + pad@276 = 280 bytes. */
+    UCHAR spBuf[280];
+    ZeroMemory(spBuf, sizeof(spBuf));
+    memcpy(spBuf, dwords, count * sizeof(uint32_t));
+    *(uint32_t*)(spBuf + 256) = count;
+    *(uint64_t*)(spBuf + 264) = withFence ? fence : 0;
+    *(uint32_t*)(spBuf + 272) = 0; /* GFX queue */
+    DWORD ret = 0;
+    BOOL ok = DeviceIoControl(kmd, IOCTL_AMDBC250_SEND_PM4,
+                              spBuf, sizeof(spBuf), NULL, 0, &ret, NULL);
+    return ok ? 1 : 0;
+}
+
+/* Gather PM4 from recorded command buffers; send via SEND_PM4.
+ * Fence EOP is appended by KMD when FenceValue > 0 (GlobalFence PA) —
+ * do NOT emit a second user-mode EOP with ADDR=0 (would double-fence). */
+static int bc250_submit_cmd_buffers(HANDLE kmd, const BC250_VkSubmitInfo* sub,
+                                    uint64_t fence)
+{
+    uint32_t batch[64];
+    uint32_t n = 0;
+    int sent = 0;
+
+    if (sub->commandBufferCount > 0 && sub->pCommandBuffers) {
+        for (uint32_t i = 0; i < sub->commandBufferCount; i++) {
+            BC250_CMD_HDR* hdr = bc250_cmd(sub->pCommandBuffers[i]);
+            if (!hdr || hdr->used == 0) continue;
+            const uint32_t* src = (const uint32_t*)(hdr + 1);
+            uint32_t nd = hdr->used / sizeof(uint32_t);
+            /* KMD appends EOP (6 dwords) when FenceValue>0 — leave room. */
+            while (nd > 0) {
+                uint32_t room = 64u - n;
+                if (room <= 6) {
+                    if (!bc250_send_pm4(kmd, batch, n, 0, 0)) return 0;
+                    sent++;
+                    n = 0;
+                    room = 64;
+                }
+                uint32_t take = nd;
+                if (take > room - 6) take = room - 6;
+                memcpy(batch + n, src, take * sizeof(uint32_t));
+                n += take;
+                src += take;
+                nd -= take;
+            }
+        }
+    }
+
+    if (n == 0) {
+        /* Empty submit: still kick a fence via NOP (KMD adds EOP). */
+        batch[0] = 0x30000000; /* TYPE2 NOP */
+        n = 1;
+    }
+
+    if (!bc250_send_pm4(kmd, batch, n, fence, 1)) return 0;
+    sent++;
+    return sent > 0;
+}
+
+/* Queue Submit — recorded PM4 from command buffers via SEND_PM4 (0x80000B84).
+ * No DMA-buffer VA is ever touched from user mode: ALLOC_DMA_BUFFER returns a
+ * kernel VA (MmAllocateContiguousMemory), writing it from here AVs the caller. */
 VkResult VKAPI_CALL bc250_vkQueueSubmit(
     VkQueue queue,
     uint32_t submitCount,
@@ -1162,10 +1310,8 @@ VkResult VKAPI_CALL bc250_vkQueueSubmit(
     VkFence fence)
 {
     UNREFERENCED_PARAMETER(queue);
-    UNREFERENCED_PARAMETER(submitCount);
-    UNREFERENCED_PARAMETER(pSubmits);
     UNREFERENCED_PARAMETER(fence);
-    
+
     BC250_VK_DEVICE* dev = &g_Device;
     /* vkCreateDevice inits a heap copy; g_Device keeps NULL/INVALID until
      * first submit, so cover both and lazy-open here. If open succeeds
@@ -1188,33 +1334,30 @@ VkResult VKAPI_CALL bc250_vkQueueSubmit(
         }
     }
 
-    /* Inline SEND_PM4 buffer: Commands[64]@0, Count@256, Fence(u64)@264,
-     * QueueType@272. Padded +256B: KMD requires inputLen >=
-     * sizeof(struct)+CommandCount*4 (amdbc250_dream_kmd.c:4709). */
-    UCHAR spBuf[280 + 64 * sizeof(ULONG)];
-    ZeroMemory(spBuf, sizeof(spBuf));
-    {
-        PULONG cmds = (PULONG)(spBuf + 0);
-        cmds[0] = 0x30000000; /* PM4 TYPE2 NOP (single-DWORD padding) */
-        cmds[1] = PM4_TYPE3_HDR(IT_EVENT_WRITE_EOP, 5); /* IT_EVENT_WRITE_EOP (was 0xC0034600 = opcode 0x46 EOS, fixed to 0x47 EOP) */
-        cmds[2] = 0x00000000; /* CONTROL: interruptsel=0, data_sel=0 (disabled) */
-        cmds[3] = 0x00000000; /* ADDR_LO (no address — pure counter mode) */
-        cmds[4] = 0x00000000; /* ADDR_HI */
-        cmds[5] = (ULONG)dev->fenceValue; /* DATA_LO = fence value */
-        cmds[6] = 0x00000000; /* DATA_HI */
-        *(PULONG)(spBuf + 256) = 7;                          /* CommandCount */
-        *(PULONG64)(spBuf + 264) = (ULONG64)dev->fenceValue; /* FenceValue */
-        *(PULONG)(spBuf + 272) = 0;                          /* QueueType = GFX */
+    int anySent = 0;
+    uint64_t fenceBase = dev->fenceValue;
+
+    if (pSubmits && submitCount > 0) {
+        const BC250_VkSubmitInfo* subs = (const BC250_VkSubmitInfo*)pSubmits;
+        for (uint32_t s = 0; s < submitCount; s++) {
+            if (subs[s].sType != BC250_VK_STRUCTURE_TYPE_SUBMIT_INFO)
+                continue;
+            if (bc250_submit_cmd_buffers(dev->kmdDevice, &subs[s], fenceBase + s))
+                anySent = 1;
+        }
     }
 
-    DWORD ret = 0;
-    BOOL spOk = DeviceIoControl(dev->kmdDevice, 0x80000B84, /* SEND_PM4 */
-                    spBuf, sizeof(spBuf), NULL, 0, &ret, NULL);
-    bc250_debug_submit_status(spOk, spOk ? 0 : GetLastError(),
-                              (unsigned long)(7 * sizeof(ULONG)),
-                              0x30000000);
-    if (spOk) dev->fenceValue++;
+    if (!anySent) {
+        /* Fallback: NOP only — KMD appends EOP when FenceValue > 0. */
+        uint32_t cmds[1];
+        cmds[0] = 0x30000000; /* PM4 TYPE2 NOP */
+        anySent = bc250_send_pm4(dev->kmdDevice, cmds, 1, fenceBase, 1);
+        bc250_debug_submit_status(anySent, anySent ? 0 : GetLastError(),
+                                  (unsigned long)(sizeof(uint32_t)),
+                                  0x30000000);
+    }
 
+    if (anySent) dev->fenceValue = fenceBase + (submitCount > 0 ? submitCount : 1);
     return VK_SUCCESS;
 }
 
@@ -1569,13 +1712,20 @@ void VKAPI_CALL bc250_vkCmdDraw(
     uint32_t firstVertex,
     uint32_t firstInstance)
 {
-    UNREFERENCED_PARAMETER(commandBuffer);
-    UNREFERENCED_PARAMETER(vertexCount);
-    UNREFERENCED_PARAMETER(instanceCount);
-    UNREFERENCED_PARAMETER(firstVertex);
-    UNREFERENCED_PARAMETER(firstInstance);
-    
-    /* TODO: Emit PM4 DRAW_INDEX_AUTO packet */
+    BC250_CMD_HDR* hdr = bc250_cmd(commandBuffer);
+    (void)instanceCount;
+    (void)firstVertex;
+    (void)firstInstance;
+    if (!hdr || vertexCount == 0) return;
+
+    /* PM4 DRAW_INDEX_AUTO (0x2D): non-indexed draw, auto index 0..N-1.
+     * D1 = vertex count, D2 = prim_type | (1<<8) (matches D3D9 UMD path:
+     * D3DPT_TRIANGLELIST=4; bit8 = index-size/auto encoding used on BC-250). */
+    uint32_t* p = bc250_cmd_append_dwords(hdr, 3);
+    if (!p) return;
+    p[0] = PM4_TYPE3_HDR(IT_DRAW_INDEX_AUTO, 3);
+    p[1] = vertexCount;
+    p[2] = 4u | (1u << 8); /* D3DPT_TRIANGLELIST | auto-index bit */
 }
 
 void VKAPI_CALL bc250_vkCmdDrawIndexed(
@@ -1586,12 +1736,21 @@ void VKAPI_CALL bc250_vkCmdDrawIndexed(
     int32_t vertexOffset,
     uint32_t firstInstance)
 {
-    UNREFERENCED_PARAMETER(commandBuffer);
-    UNREFERENCED_PARAMETER(indexCount);
-    UNREFERENCED_PARAMETER(instanceCount);
-    UNREFERENCED_PARAMETER(firstIndex);
-    UNREFERENCED_PARAMETER(vertexOffset);
-    UNREFERENCED_PARAMETER(firstInstance);
+    BC250_CMD_HDR* hdr = bc250_cmd(commandBuffer);
+    (void)instanceCount;
+    (void)firstIndex;
+    (void)vertexOffset;
+    (void)firstInstance;
+    if (!hdr || indexCount == 0) return;
+
+    /* DRAW_INDEX_AUTO with explicit count — real INDEX_2 needs IB GPU PA.
+     * Emit auto with indexCount so packet is real; index fetch still needs
+     * bind-index-buffer (not implemented) for true indexed draws. */
+    uint32_t* p = bc250_cmd_append_dwords(hdr, 3);
+    if (!p) return;
+    p[0] = PM4_TYPE3_HDR(IT_DRAW_INDEX_AUTO, 3);
+    p[1] = indexCount;
+    p[2] = 4u | (1u << 8);
 }
 
 void VKAPI_CALL bc250_vkCmdDispatch(

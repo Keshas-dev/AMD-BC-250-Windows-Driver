@@ -8,6 +8,20 @@ GPU driver for AMD BC-250 (Cyan Skillfish) on Windows 11 26100. WDM IOCTL driver
 
 ---
 
+## Session 2026-09-23 (this tree): pa_v1, governor, Vulkan ICD draw
+
+| Deliverable | Tool | Result |
+|-------------|------|--------|
+| pa_v1 mailbox (PSP BAR2) | `pa-v1-diag2` | **PASS** — bootloader `0x001C0102`, feature `2`; **BAR2=`0xFE700000`**, BAR0=0 |
+| GPU governor service | `governor-service` | **OK** — set 1600 MHz + unforce (governor sequence) |
+| Vulkan ICD pipeline draw | `vk-draw-test` | **PASS** — GIPA→instance→`DRAW_INDEX_AUTO`→`vkQueueSubmit`, EXIT=0 |
+
+**ICD:** `bc250_icd_stub.dll` exposes **7 ICD exports** (`src/vulkan/bc250_vulkan.def`); `vkCreateInstance` resolved via `vk_icdGetInstanceProcAddr`. Test: `test-tools/vk-draw-test.c` + `compile-vk-draw-test.bat`.
+
+**PSP companion:** BAR2 auto-init fix in [PSP repo](https://github.com/Keshas-dev/AMD-BC-250-PSP-Windows-Driver) — reinstall PSP after that build.
+
+---
+
 ## Deadlock fix (2026-09-23) — verified on hardware
 
 ### Root cause
@@ -268,4 +282,6 @@ All under `HKLM\SYSTEM\CurrentControlSet\Services\atikmdag` (DWORD).
 
 ## License
 
-Source code for educational purposes. Use at your own risk.
+Educational purposes. Use at your own risk.
+
+## "If you need a tool and nobody has built it yet, then build it yourself."

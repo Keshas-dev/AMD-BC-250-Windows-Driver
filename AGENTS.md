@@ -1,6 +1,32 @@
 # AMD BC-250 Windows Driver — Agent Notes
 
-## ⭐⭐⭐ DEADLOCK FIX VERIFIED + FULL TEST SUITE (2026-09-23) — README FIRST
+## ⭐⭐⭐⭐ pa_v1 + governor + Vulkan ICD DRAW (2026-09-23) — README FIRST (this session)
+
+### Three next-steps DONE (tests, one-shot each — DO NOT RERUN unless noted)
+| # | Deliverable | Result |
+|---|-------------|--------|
+| 1 | **pa_v1 mailbox diag** | `pa-v1-diag2.exe` **PASS**: bootloader=`0x001C0102`, feature=`0x2`, 8/11 regs non-FF; **PSP BAR2=`0xFE700000` (BAR0=0)** @ B1.D0.F2. `pa-v1-diag.exe` FAIL (old BAR0-only path). |
+| 2 | **governor-service** | `status` OK; `set 1600` → 1500→1600 MHz; `unforce` OK — Q3 0x8C→Q0 0x3A/0x3C→Q3 0x1E→Q0 0x3B/0x39 sequence live. |
+| 3 | **Vulkan ICD draw** | `vk-draw-test.exe` **PASS**: GIPA→`vkCreateInstance`… `DRAW_INDEX_AUTO` PM4 `0xC0022D00`, `vkQueueSubmit` OK, procs=0, EXIT=0. |
+
+### ICD / vk-draw-test route (this session)
+- **`bc250_icd_stub.dll` = 7 ICD exports** (not 722): `DllMain`, `vkEnumerateInstanceVersion`, `vkGetDeviceProcAddr`, `vkGetInstanceProcAddr`, `vk_icdGetDeviceProcAddr`, `vk_icdGetInstanceProcAddr`, `vk_icdNegotiateLoaderICDInterfaceVersion` (`src/vulkan/bc250_vulkan.def`).
+- Test **`test-tools/vk-draw-test.c`** `load()` resolves via **`g_gipa`**: `vk_icdGetInstanceProcAddr` → fallback `vkGetInstanceProcAddr` → `GetProcAddress`. `vkCreateInstance` is a **string** inside ICD (not export).
+- Compile: `test-tools/compile-vk-draw-test.bat` (direct `cl` + vcvars; works even if vcvarsall path message errors).
+- New tools + compile bats: `pa-v1-diag[2].c`, `pa-v1-probe.c`, `governor-service.c`, `vk-draw-test.c`, `compile-pa-v1-*.bat`, `compile-governor-service.bat`, `compile-psp-pci-bar-find.bat`, `compile-vk-draw-test.bat`.
+- **Rerun policy:** these four tests already ran once — **never launch twice**; `Stop-Process` + procs=0 first if ever needed.
+
+### PSP side (sibling repo — see its AGENTS)
+- PSP **BAR2 fix + map-lifetime** built SHA `D8DC9423…01FE5`, **user reinstalls** via Device Manager; after that `test-psp-driver -s` once for auto-init.
+
+### Remaining open items (carry)
+- **SPI_PG (0x5C3C) still 0** — SOS-locked; WGP unlock = EFI/Linux only.
+- GPU LICENSE file was deleted in tree (restore before commit if unintended — Apache 2.0 history `17c8795`).
+- No 0x1E BSOD this session; if returns check `C:\Windows\MEMORY.DMP`.
+
+---
+
+## ⭐⭐⭐ DEADLOCK FIX VERIFIED + FULL TEST SUITE (2026-09-23)
 
 ### Driver 4.3.0.11 installed, ALL tests PASS
 - **SHA256:** `0E69D7D3FC8E934E6ACDA5467BD543A13D1600BCEEBB0EA313305851A8B30D4B` (installed == output)
