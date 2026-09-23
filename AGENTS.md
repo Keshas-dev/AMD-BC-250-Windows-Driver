@@ -1,23 +1,33 @@
 # AMD BC-250 Windows Driver — Agent Notes
 
-## ⭐⭐⭐⭐ pa_v1 + governor + Vulkan ICD DRAW (2026-09-23) — README FIRST (this session)
+## ⭐⭐⭐⭐⭐ vk-execute-test + pa_v1 + governor + Vulkan ICD DRAW (2026-09-23) — README FIRST (this session)
 
-### Three next-steps DONE (tests, one-shot each — DO NOT RERUN unless noted)
+### Four next-steps DONE (tests, one-shot each — DO NOT RERUN unless noted)
 | # | Deliverable | Result |
 |---|-------------|--------|
-| 1 | **pa_v1 mailbox diag** | `pa-v1-diag2.exe` **PASS**: bootloader=`0x001C0102`, feature=`0x2`, 8/11 regs non-FF; **PSP BAR2=`0xFE700000` (BAR0=0)** @ B1.D0.F2. `pa-v1-diag.exe` FAIL (old BAR0-only path). |
-| 2 | **governor-service** | `status` OK; `set 1600` → 1500→1600 MHz; `unforce` OK — Q3 0x8C→Q0 0x3A/0x3C→Q3 0x1E→Q0 0x3B/0x39 sequence live. |
-| 3 | **Vulkan ICD draw** | `vk-draw-test.exe` **PASS**: GIPA→`vkCreateInstance`… `DRAW_INDEX_AUTO` PM4 `0xC0022D00`, `vkQueueSubmit` OK, procs=0, EXIT=0. |
+| 1 | **vk-execute-test** | `vk-execute-test.exe` **PASS**: Stage1 ICD full path (CreateInstance→CreateDevice→record→vkQueueSubmit OK, submit dw0=0x30000000), Stage2 direct SEND_PM4 WRITE_DATA → SCRATCH `0x4AFEBABE` match **SW PM4 executor ALIVE**, Stage3 EXECUTE_RING Result=1 WPTR 0→20 RPTR=0 SW fallback OK (ScratchAfter=0x5EADBEEF), **HW ring FAIL expected (WGP/SOS gate)**. Verdict: ICD path + KMD SW executor verified, HW execute blocked. |
+| 2 | **pa_v1 mailbox diag** | `pa-v1-diag2.exe` **PASS**: bootloader=`0x001C0102`, feature=`0x2`, 8/11 regs non-FF; **PSP BAR2=`0xFE700000` (BAR0=0)** @ B1.D0.F2. `pa-v1-diag.exe` FAIL (old BAR0-only path). |
+| 3 | **governor-service** | `status` OK; `set 1600` → 1500→1600 MHz; `unforce` OK — Q3 0x8C→Q0 0x3A/0x3C→Q3 0x1E→Q0 0x3B/0x39 sequence live. |
+| 4 | **Vulkan ICD draw** | `vk-draw-test.exe` **PASS**: GIPA→`vkCreateInstance`… `DRAW_INDEX_AUTO` PM4 `0xC0022D00`, `vkQueueSubmit` OK, procs=0, EXIT=0. |
+
+### vk-execute-test findings (this session)
+- **SW PM4 executor CONFIRMED working**: MMIO baseline SCRATCH `0x4D585042` → direct SEND_PM4 WRITE_DATA → `0x4AFEBABE` (masked match). err=183 = STATUS_DEVICE_BUSY wait retry, handler still succeeded.
+- **HW ring path PROBED**: EXECUTE_RING Result=1, SwResult=0, ScratchBefore=0→ScratchAfter=0x5EADBEEF, WPTR 0→20, RPTR stays 0, HQD=1 — **SW fallback inside EXEC_RING**, not real GPU consumption. ME_CNTL went 0xFFFBD9FB→0x00000000 (unhalt side-effect) post-stage3.
+- **ICD vkQueueSubmit does NOT change SCRATCH** (pre=post=0x4D585042) — ICD submits DRAW_INDEX_AUTO to KMD, KMD routes to PSP KIQ/GfxRing/SW; none execute a WRITE_DATA to SCRATCH (correct — ICD path only sends the draw, no SW executor side-effect expected).
+- **Compile gotcha:** Windows SDK `dlgs.h` defines `scr1=0x0490`/`scr2=0x0491` macros — cannot use as variable names (C2059); use `scrB/scrM/scrP`. Unclosed `/*` comment eats declarations (C2065 cascade).
+- Tools: `test-tools/vk-execute-test.c` + `compile-vk-execute-test.bat` → `output\vk-execute-test.exe` (18432 B, 2026-09-23 19:51).
 
 ### ICD / vk-draw-test route (this session)
 - **`bc250_icd_stub.dll` = 7 ICD exports** (not 722): `DllMain`, `vkEnumerateInstanceVersion`, `vkGetDeviceProcAddr`, `vkGetInstanceProcAddr`, `vk_icdGetDeviceProcAddr`, `vk_icdGetInstanceProcAddr`, `vk_icdNegotiateLoaderICDInterfaceVersion` (`src/vulkan/bc250_vulkan.def`).
 - Test **`test-tools/vk-draw-test.c`** `load()` resolves via **`g_gipa`**: `vk_icdGetInstanceProcAddr` → fallback `vkGetInstanceProcAddr` → `GetProcAddress`. `vkCreateInstance` is a **string** inside ICD (not export).
 - Compile: `test-tools/compile-vk-draw-test.bat` (direct `cl` + vcvars; works even if vcvarsall path message errors).
-- New tools + compile bats: `pa-v1-diag[2].c`, `pa-v1-probe.c`, `governor-service.c`, `vk-draw-test.c`, `compile-pa-v1-*.bat`, `compile-governor-service.bat`, `compile-psp-pci-bar-find.bat`, `compile-vk-draw-test.bat`.
-- **Rerun policy:** these four tests already ran once — **never launch twice**; `Stop-Process` + procs=0 first if ever needed.
+- New tools + compile bats: `pa-v1-diag[2].c`, `pa-v1-probe.c`, `governor-service.c`, `vk-draw-test.c`, `vk-execute-test.c`, `compile-pa-v1-*.bat`, `compile-governor-service.bat`, `compile-psp-pci-bar-find.bat`, `compile-vk-draw-test.bat`, `compile-vk-execute-test.bat`.
+- **Rerun policy:** these five tests already ran once — **never launch twice**; `Stop-Process` + procs=0 first if ever needed. (`vk-execute-test` re-run only if driver rebuilt — note SCRATCH baseline may differ after ME unhalt.)
+- **Also one-shot (DO NOT RERUN):** `gpu-init-explicit` + PSP `test-psp-driver -s` + pa_v1 READ_REG probes (post-reinstall verification done 2026-09-23).
 
 ### PSP side (sibling repo — see its AGENTS)
-- PSP **BAR2 fix + map-lifetime** built SHA `D8DC9423…01FE5`, **user reinstalls** via Device Manager; after that `test-psp-driver -s` once for auto-init.
+- PSP **BAR2 fix + map-lifetime** built SHA `D8DC9423…01FE5` — **INSTALLED + VERIFIED** (user Device Manager reinstall).
+- **Post-reinstall:** first PSP `-s` before GPU map = all FF (proxy down post-reboot, expected). After `gpu-init-explicit` NBIO_MAP → PSP `-s` **PASS**: Alive YES, NBIO SIGs `0xFEDCBAEF/EF`, GRBM UNLOCKED, MMIO VA=1MB. Direct pa_v1: bootloader=`0x001C0102`, feature=`0x2`, cmdresp=`0x80000000`, inten=`0x1`. C2PMSG_35/36=FF = bootloader gone (normal). **Rule: after reboot run gpu-init-explicit FIRST, then PSP -s once.**
 
 ### Remaining open items (carry)
 - **SPI_PG (0x5C3C) still 0** — SOS-locked; WGP unlock = EFI/Linux only.
