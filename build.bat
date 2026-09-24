@@ -8,11 +8,9 @@ set "INC_DIR=%PROJECT_DIR%inc"
 set "OUTPUT_DIR=%PROJECT_DIR%output"
 set "CERT_FILE=%PROJECT_DIR%testcert.pfx"
 set "CERT_NAME=AMD-BC250-Signer"
-rem --- Optional override: set CERT_SHA1 to pin a specific thumbprint (e.g. on a
-rem     machine with multiple same-name certs). Leave empty to auto-detect by name.
-rem     Auto-detect (below) picks the first matching cert in CurrentUser\My, then
-rem     LocalMachine\My — works on any fresh setup after New-SelfSignedCertificate. ---
-if not defined CERT_SHA1 set "CERT_SHA1="
+rem --- Only AMD-BC250-Signer with this SHA1 is installed in Root+TrustedPublisher.
+rem     Multiple same-name certs exist in My store; /a auto-select is ambiguous. ---
+set "CERT_SHA1=34AFF96C57E9ADE68B23B4828859CF9B7F4EF442"
 
 rem --- Detect Visual Studio on D:, E:, or C: drive ---
 set "VSWHERE="
@@ -179,7 +177,7 @@ if errorlevel 1 (
 
 rem echo.
 rem echo ==========================================
-rem echo  BUILDING PSP (PSP Driver — DISABLED, integrated into dream driver)
+rem echo  BUILDING PSP (PSP Driver ??? DISABLED, integrated into dream driver)
 rem echo ==========================================
 rem echo.
 rem
@@ -256,33 +254,6 @@ echo.
 echo ==========================================
 echo  SIGNING DRIVERS
 echo ==========================================
-
-rem --- Resolve signing certificate thumbprint (issue #1: was hardcoded to author's cert).
-rem     Looks up CN=%CERT_NAME% in CurrentUser\My then LocalMachine\My. ---
-if "%CERT_SHA1%"=="" (
-    echo Looking up certificate "%CERT_NAME%"...
-    for /f "usebackq tokens=1 delims=" %%T in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "$c = Get-ChildItem Cert:\CurrentUser\My,Cert:\LocalMachine\My -ErrorAction SilentlyContinue | Where-Object { $_.Subject -eq ('CN=' + $env:CERT_NAME) -and $_.HasPrivateKey } | Sort-Object NotAfter -Descending | Select-Object -First 1; if ($c) { $c.Thumbprint }"`) do set "CERT_SHA1=%%T"
-)
-if "%CERT_SHA1%"=="" (
-    echo FATAL: No certificate named "%CERT_NAME%" with a private key found.
-    echo.
-    echo Create one (elevated PowerShell):
-    echo   New-SelfSignedCertificate -Type Custom -Subject "CN=%CERT_NAME%" \^
-    echo     -KeyUsage DigitalSignature -KeyLength 2048 -KeyAlgorithm RSA \^
-    echo     -HashAlgorithm SHA256 -CertStoreLocation Cert:\CurrentUser\My \^
-    echo     -NotAfter (Get-Date).AddYears(10)
-    echo   # trust it for test-signing:
-    echo   $c = Get-ChildItem Cert:\CurrentUser\My ^| Where-Object Subject -eq "CN=%CERT_NAME%"
-    echo   Export-Certificate -Cert $c -FilePath %TEMP%\%CERT_NAME%.cer
-    echo   certutil -addstore -f TrustedPublisher %TEMP%\%CERT_NAME%.cer
-    echo   certutil -addstore -f Root %TEMP%\%CERT_NAME%.cer
-    echo.
-    echo Then re-run build.bat. (Alternatively set CERT_SHA1=your_thumbprint before running.)
-    pause
-    exit /b 1
-)
-echo Using certificate thumbprint %CERT_SHA1%
-
 rem --- Sign kernel driver FIRST (most important) ---
 :SignKmd
 echo Signing atikmdag.sys...
@@ -292,12 +263,8 @@ if errorlevel 1 (
     type "%OUTPUT_DIR%\sign-kmd.log"
     echo FATAL: KMD signing FAILED!
     echo.
-    echo Checked: CN=%CERT_NAME% thumbprint %CERT_SHA1%
-    echo Diagnostics:
-    echo   powershell -c "Get-ChildItem Cert:\CurrentUser\My,Cert:\LocalMachine\My ^| Where-Object Subject -eq 'CN=%CERT_NAME%' ^| Format-List Subject,Thumbprint,HasPrivateKey,NotAfter"
-    echo   "%SIGNTOOLS%\signtool.exe" verify /pa "%OUTPUT_DIR%\atikmdag.sys"
-    echo If multiple same-name certs exist, set CERT_SHA1 to the desired thumbprint.
-    echo Requires elevated (Administrator) prompt for Root/TrustedPublisher stores.
+    echo Try: Run build.bat as Administrator, or sign manually:
+    echo   signtool sign /fd SHA256 /a /s My /n AMD-BC250-Signer output\atikmdag.sys
     pause
     exit /b 1
 ) else (

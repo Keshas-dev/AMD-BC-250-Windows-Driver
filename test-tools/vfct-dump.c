@@ -1,48 +1,78 @@
+/* vfct-dump.c — read-only ACPI VFCT table (contains GPU VBIOS) via firmware API.
+ * Saves raw table to vfct.bin + scans for ATOM BIOS markers in memory. */
 #include <windows.h>
 #include <stdio.h>
-#include <string.h>
 
-/* Enumerate ACPI tables, dump VFCT (contains GPU ATOMBIOS / VBIOS image). */
-static const char *Sig(DWORD d) {
-    static char s[5];
-    s[0]=(char)(d&0xFF); s[1]=(char)((d>>8)&0xFF);
-    s[2]=(char)((d>>16)&0xFF); s[3]=(char)((d>>24)&0xFF); s[4]=0;
-    return s;
-}
+int main(void)
+{
+    DWORD need = 0;
+    UINT tbl = 0;
+    enum { ACPI_SIG = 'A' | ('C' << 8) | ('P' << 16) | ('I' << 24) };
+    enum { VFCT_SIG = 'V' | ('F' << 8) | ('C' << 16) | ('T' << 24) };
+    BYTE *buf = NULL;
+    DWORD got = 0;
+    FILE *fp = NULL;
+    int i, found = 0;
 
-int main(void) {
-    DWORD n = EnumSystemFirmwareTables('ACPI', NULL, 0);
-    if (n == 0) { printf("EnumSystemFirmwareTables ACPI failed (0x%08X)\n", GetLastError()); return 1; }
-    BYTE *list = (BYTE*)malloc(n);
-    if (EnumSystemFirmwareTables('ACPI', list, n) != n) { printf("enum fail\n"); free(list); return 1; }
-
-    DWORD vfct = 0;
-    printf("ACPI tables (%lu bytes of signatures):\n", n);
-    for (DWORD i = 0; i + 4 <= n; i += 4) {
-        DWORD sig = *(DWORD*)(list + i);
-        printf("  %s\n", Sig(sig));
-        if (memcmp(list + i, "VFCT", 4) == 0) vfct = sig;
+    if (!EnumSystemFirmwareTables(ACPI_SIG, NULL, 0)) {
+        printf("EnumSystemFirmwareTables size query gle=%lu\n", GetLastError());
     }
-
-    if (vfct == 0) { printf("No VFCT table present on this system.\n"); free(list); return 0; }
-
-    DWORD size = GetSystemFirmwareTable('ACPI', vfct, NULL, 0);
-    BYTE *buf = (BYTE*)malloc(size);
-    if (GetSystemFirmwareTable('ACPI', vfct, buf, size) != size) {
-        printf("GetSystemFirmwareTable VFCT failed (0x%08X)\n", GetLastError()); free(buf); free(list); return 1;
+    need = EnumSystemFirmwareTables(ACPI_SIG, NULL, 0);
+    printf("ACPI tables total bytes: %lu\n", need);
+    if (need > 0 && need < 1024 * 1024) {
+        BYTE *list = (BYTE *)malloc(need);
+        if (list && EnumSystemFirmwareTables(ACPI_SIG, list, need)) {
+            printf("table count: %lu\n", need / 4);
+            for (i = 0; i + 4 <= (int)need; i += 4) {
+                UINT s = *(UINT *)(list + i);
+                printf("  %c%c%c%c%s\n",
+                    (char)(s & 0xFF), (char)((s >> 8) & 0xFF),
+                    (char)((s >> 16) & 0xFF), (char)((s >> 24) & 0xFF),
+                    (s == VFCT_SIG) ? "  <-- VFCT" : "");
+                if (s == VFCT_SIG) tbl = 1;
+            }
+        }
+        free(list);
     }
-    printf("\nVFCT table: %lu bytes\n", size);
-    int atom = 0;
-    for (DWORD i = 0; i + 4 < size; i++)
-        if (buf[i]=='A'&&buf[i+1]=='T'&&buf[i+2]=='O'&&buf[i+3]=='M') { printf("  ATOM signature at 0x%lX\n", i); atom = 1; }
-    for (DWORD i = 0; i < size && i < 256; i += 16) {
-        printf("  [0x%06lX] ", i);
-        for (int j = 0; j < 16 && (i+j) < size; j++) printf("%02X ", buf[i+j]);
-        printf(" ");
-        for (int j = 0; j < 16 && (i+j) < size; j++) printf("%c", (buf[i+j]>=32&&buf[i+j]<=126)?buf[i+j]:'.');
-        printf("\n");
+    if (!tbl) {
+        printf("NO VFCT table exposed. Done.\n");
+        return 1;
     }
-    if (!atom) printf("  (no ATOM signature in raw VFCT)\n");
-    free(buf); free(list);
-    return 0;
+    need = GetSystemFirmwareTable(ACPI_SIG, VFCT_SIG, NULL, 0);
+    printf("VFCT size: %lu\n", need);
+    if (need == 0 || need > 4 * 1024 * 1024) {
+        printf("VFCT size bogus, abort.\n");
+        return 1;
+    }
+    buf = (BYTE *)malloc(need);
+    if (!buf) return 1;
+    got = GetSystemFirmwareTable(ACPI_SIG, VFCT_SIG, buf, need);
+    printf("VFCT read: %lu bytes\n", got);
+    if (got != need) { free(buf); return 1; }
+
+    fp = fopen("vfct.bin", "wb");
+    if (fp) { fwrite(buf, 1, got, fp); fclose(fp); printf("saved vfct.bin\n"); }
+
+    /* scan for ATOM BIOS markers */
+    for (i = 0; i + 8 <= (int)got; i++) {
+        if (buf[i] == 'A' && buf[i+1] == 'T' && buf[i+2] == 'O' && buf[i+3] == 'M') {
+            printf("ATOM magic @0x%X\n", i);
+            found++;
+        }
+        if (buf[i] == '1' && buf[i+1] == '1' && buf[i+2] == '3' && buf[i+3] == '-') {
+            char tmp[32];
+            int n = (int)got - i < 31 ? (int)got - i : 31;
+            memcpy(tmp, buf + i, n);
+            tmp[n] = 0;
+            printf("113- string @0x%X: %s\n", i, tmp);
+            found++;
+        }
+        if (buf[i] == 0x55 && buf[i+1] == 0xAA && (i % 512) == 0) {
+            printf("55AA ROM header @0x%X\n", i);
+            found++;
+        }
+    }
+    printf("markers found: %d\n", found);
+    free(buf);
+    return found ? 0 : 2;
 }

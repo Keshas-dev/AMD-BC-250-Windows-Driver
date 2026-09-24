@@ -31,8 +31,8 @@ mm FE858200 -w 4 -n
 echo ""
 
 echo "Step 5: Reading GRBM_STATUS (GPU Core Lock Check)..."
-echo "Address: FE802004"
-mm FE802004 -w 4 -n
+echo "Address: FE803260 (GC-shifted; raw 2004 is unmapped on BC-250)"
+mm FE803260 -w 4 -n
 echo ""
 
 echo "========================================================"

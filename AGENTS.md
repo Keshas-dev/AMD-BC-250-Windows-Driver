@@ -1,6 +1,166 @@
 # AMD BC-250 Windows Driver — Agent Notes
 
-## ⭐⭐⭐⭐⭐ vk-execute-test + pa_v1 + governor + Vulkan ICD DRAW (2026-09-23) — README FIRST (this session)
+## ⭐⭐⭐⭐ Linux boot etalonas + 0xB8 quirk (2026-09-24) — INIT-ORDER REFERENCE — README FIRST
+
+### Šaltinis
+`third-party/linuxinfo/naujas/` — stock CachyOS boot (be duggasco patch: `bc250_cc_write_mode ignored` → 24 CU baseline). Pilnas dmesg: `dmesage.txt` (117KB); amdgpu-only: `amdgpu_boot.log`.
+
+### Etaloninė init seka (amdgpu 3.64.0, laikai iš logo)
+| t | Žingsnis | Adresas / detalė |
+|---|----------|------------------|
+| 5.539 | PCI enable `0006→0007`, MMIO map | BAR5 `0xFE800000`/512KB |
+| 5.541 | 8 IP blokai + VBIOS iš **VFCT** | `113-AMDRBN-003` (ne PCI ROM) |
+| 5.564 | VRAM **512M** `@0xF400000000`, GART 512M | GART lentelė `@0xF41FE000000` (2MB žemiau VRAM viršaus) |
+| 5.587 | PSP TMR 4MB | `@0xF41F800000` |
+| 5.623 | **SMU initialized OK** | — |
+| 5.624 | DCN 2.0.1 + HPD dummy klaidos (headless) | fb0 + DP-1 (`-22` infoframe) vis tiek kyla |
+| 5.693 | KIQ `mec 2 pipe 1 q 0` | — |
+| 6.19–6.70 | sdma0 fence fallback ×2 (atsigauna) | — |
+| 6.701 | **24 CU**, visi 13 ring'ų (gfx + 8×comp + kiq + 2×sdma) | `SE 2, SH/SE 2, CU/SH 10` |
+| 9.64 | `DTM TA is not initialized` (topologija nekyla — kasyklinė) | HDA audio `01:00.1` bind OK |
+
+### ⭐ 0xB8 quirk — trečios pusės įrodymas, kad PCI SMN kelias teisingas
+```
+[ 10.510569] pci 0000:00:00.0: cyan-skillfish-: Unexpected write
+               to kernel-exclusive config offset b8
+```
+- t=10.5s (po desktop/servisų starto) = userspace governor'is liečia SMN per `/sys/.../config`.
+- Kernelis turi **`cyan-skillfish-` quirk**, saugantį Host Bridge `0xB8` kaip „kernel-exclusive" = **SMN index portą**.
+- Windows HAL'e tokio sargo nėra → mūsų `-8core status` (PSP repo, `IOCTL_PSP_PCI_SMN_UNLOCK` 0x826) praėjo teisingu keliu.
+- Susiję faktai: PSP funkcija `01:00.2 [1022:143e]` class `0x108000` (= mūsų B1.D0.F2); `ppfeaturemask=0xfff7bfff`; `fw_load_type` knob (`0=direct 1=psp 2=smu 3=rlc-backdoor`).
+
+### Išvada Windows darbui
+- Video NEVALDOMAS per PCI config — ten tik enable + BAR map. Display = MMIO (DCN), clocks = SMU mailbox. Abu keliai pas mus jau yra (KMDOD + SMU mailbox).
+- Jei kada bus init-order WGP eksperimentas — seka aukščiau yra etalonas (GART → TMR → SMU → DCN → KIQ → rings). GART/VM Windows praleidžia (0x1A istorija) — tai ir yra skirtumas.
+- Gemini pokalbiai tame pačiame kataloge (`inicilizacija/bioso_naudojimas/pokalbis.txt`) — generika, yra faktinė klaida („GC 10.3.3", realiai 10.1.3); kaip šaltinis silpna.
+
+---
+
+## ⭐⭐⭐⭐ BIOS dump analizė — VEIKIANTIS BIOS + $PSP žemėlapis (2026-09-24)
+
+### Pastaba apie patį AGENTS.md (vartotojo sprendimas)
+Šis failas — **rekomendacijų rinkinys su datomis, ne teiginių sąrašas**. Sena informacija žemiau gali būti pasenusi; tikėti tik datuotomis sekcijomis iš viršaus. Pavyzdys: teiginys „SOS type 1 @0x8E0400" **paneigtas** (žemiau) — tokio įrašo nėra nei viename ROM.
+
+### Veikiantis BIOS (2026-09-24)
+- **`third-party/Bios/BC250_3.00_M.ROM` == `BC250_3.00_MeiMeiDXEv3.ROM`** (SHA256 `3D982841…A24736` abiejų) — 16MB, 8-core unlock aktyvus (16 CPU matomi, kaukė `0xFF`).
+- Neatskirta ar kaukę stato BIOS, ar tai warm-persist: cold-boot testas (`status` po pilno išjungimo) atskirtų — jei `0x77`, vadinasi BIOS unlock neveikia ir viskas laikėsi ant warm.
+- „UNLOCK" eilutės ROM'e = AMD `DBG_UNLOCK_MODULE` (HDT debug unlock derybos), NE core unlock. `Bc250CoreUnlockDxe` vardo string'o nėra — unlock mechanizmas (ACPI/SMU-default patch) neidentifikuotas, ir nereikia (veikia).
+
+### $PSP direktorija (BIOS 3.00_M @0x8E0000, 18 įrašų) — beveik identiška BIOS 5.00
+| Type | Dydis (B3 / B5) | Vieta | Komentaras |
+|---|---|---|---|
+| 0x02 | 82768 / 78672 | 0x8EAC00/0x8EBA00 | ? (SOS kandidatas, bet ne 42KB) |
+| **0x08** | 262656 / 262656 | **0x8FF000** | **SYSDRV** (= mūsų `Sysdrv.bin`) |
+| 0x09 | 1088 | 0x93F200/0x93F000 | SMU config? |
+| 0x12 | 262656 | 0x93F700/0x93F500 | SMU PMFW kandidatas |
+| **0x24** | 11856 | **0x982000** | **SEC_GASKET** (simpmix match, abi BIOS) |
+| 0x28 | 108400 | 0x984F00 | ABL? |
+| 0x30–0x34 | 1–49KB | … | TA/ASD/KDB šeima — **neliesti** |
+- Skirtumai B3↔B5 tik dydžiuose (0x02, 0x31, 0x32…), adresai tie patys. Visi blob'ai šifruoti (random heads) — versijų iš ROM neištrauksi.
+- ⚠️ **Correction:** nei B3, nei B5 neturi type-1 įrašo; `firmware_data.h` teiginys „Sos iš 0x8E0400" neteisingas abiem. Embedded `Sos=262144` dydžiu artimas 0x08/0x12 — šaltinis perverifyintinas PSP repo (nekritiška: kraunasi, veikia).
+
+### Kas NĖRA flash'e (abi BIOS)
+- **ATOM VBIOS nėra** (nei `ATOM`, nei `113-`, nei 55AA ROM). Windows iš PCI ROM irgi nieko nepaims → DCN init tik rankinis (POST-framebuffer kelias lieka vienintelis). `BiosString` lieka statinis.
+- Discovery `@0x981A00` identiška: VCN įrašas tame pačiame `0x981D10` (v2.0.3, harvest=0), GC 10.1.3 (`0x981B6C`). IP žemėlapis stabilus per BIOS versijas.
+
+### Naudinga mums (sąrašas)
+- ✅ SEC_GASKET adresas (0x982000, 11856 B) — pre-x86 ACL įrodymas, tik skaityti
+- ✅ $PSP žemėlapis firmware šaltinių validacijai
+- ✅ VBIOS nebuvimas → jokių ATOM script'ų, DCN tik rankiniu
+- ✅ BIOS-5 SMU-exploit offset'ai iš ROM **neišvedami** (šifruota) — reikia gyvo SRAM dump'o iš Linux (dar vienas „ne dabar" argumentas)
+
+### CMOS „debug" kelias (2026-09-24) — veikia, read-only
+- Senas DOS-debug triukas (CMOS portai) pas mus jau yra: `IOCTL_AMDBC250_PORT_IO (0x80000BC8)` → bet koks portas 1/2/4B, SEH-apsaugota.
+- `output\bios-cmos-dump-test.exe` (praplėstas): full 256B extended (`0x72/0x73`) + 128B classic (`0x70/0x71`, NMI-safe, tik `0x00–0x7F`) — viskas read-only, jokių rašymų.
+- Gyvi duomenys: Clock 1750, tCL 24, tRAS 52, tRCDRD 27, tRCDWR 19, tRCAb 78, tRPAb 26, tRRDS/RRDL 8, tRTP 2, tFAW 32, tREF 9975, RFCPb 210, tRFC 280, **UMA 512MB** ✓. Signatūra `0x42534D43` (CMOS_BAD code), bet checksum **MATCH** — plokštė sveika, tiesiog ne APCB parašas.
+- SPI flash per portus NEPASIEKIAMAS (modernus SPI ≠ CMOS) — tam tik programmeris. Slaptažodžio nėra (klasikinė zona švari, be to UEFI naudoja NVRAM).
+
+### MeiMeiDXEv3 turinys (2026-09-24, community docs + ROM scan)
+- P3.00 bazė + chipset menu + **`Bc250CoreUnlockDxe`** (SMU `0x98` seka pre-OS kiekvienam boot'e) + ACPI fix injekcija + custom boot logo + menu toggle (`8 core Unlock`, `ACPI Injection`).
+- GUID `2F3D426D-6A54-4A6B-82D0-1207CC5B6D92` (GabriWar RE: 4 KiB `.text`) — **nerastas** mūsų M.ROM raw scan'e; SMU konstantų (`0x0115A870`, `0x03B10A20/80/88`) raw baitų taip pat nėra **nei B3, nei B5** — tikėtina (DXE volumes LZMA-compressed, be FV parser'io nematyti). Absence ≠ įrodymas: unlock veikia (16 CPU), mechanizmas patvirtintas community RE.
+- **40CU „PCI patch" šiame mod'e NEEGZISTUOJA.** 40CU = duggasco Linux kernel patch (CC+SPI per `bc250_cc_write_mode=3` driver init metu, amdgpu domenas, NE SMU). Jokio BIOS toggle CU nėra; GabriWar įrankis tik valdo config'ą jau patch'intam kernel'iui.
+- Cold-boot klausimas išspręstas iš šalies: antra lenta (Bazzite) patvirtino BIOS-toggle route **išgyvena pilną power-off** — jei menu toggle Enabled, mūsų `0xFF` stato BIOS kiekvienam boot'e, ne warm-persist.
+
+### RescueMei/BC250-DXE-SMU-Core-Unlock — originalus DXE šaltinis (2026-09-24, v1, SUPERSEDED by V2/V3)
+- Pilnas EDK II C šaltinis (`Bc250CoreUnlockPkg/.../Bc250CoreUnlockDxe.c`): skaito `0x0115A870` per PCI `00:00.0` → `0x77` siunčia Q3 `0x98` → verify `0xFF` → **warm reboot**; `0xFF` exit; kita kaukė exit (defective-core guard).
+- **Mūsų `-8core` logika atitinka 1:1** (gate `0x98/0x0115A870`, atsisakom svetimų kaukių), BET sąmoningai be auto-reboot (v1 auto-reboot bootloop'ino lentas; GabriWar irgi išėmė — konsensusas: niekada neboot'inti už vartotoją).
+- Patvirtina GPU-clock reporting lūžimą po unlock (pas juos irgi — tik monitoring bug).
+- Nieko naujo port'inti: seka ta pati, mechanika ta pati. Vertė — validacija + C etalonas, jei kada reikės DXE-fazės detalių.
+
+---
+
+## ⭐⭐⭐⭐⭐ WGP medžioklės VERDIKTAS (2026-09-24) — IŠSEMTA, vartai pre-x86
+
+### Trys švarūs neigiami šią sesiją (visi be crash, visi restored)
+| # | Testas | Rezultatas |
+|---|---|---|
+| 1 | **EFI** (v2 DWORD script'ai, 0 `mm` klaidų) | BAR5 gyvas (`0x9FFF9700`), SOS gyvas, rašymai visuose bankuose + broadcast **neprilipo** (SPI_PG=0). Vartai uždaryti jau EFI Shell fazėje |
+| 2 | **PSP ring-gate** (`spi-ring-probe.exe` + gyvas GPCOM ring WPTR→0x30) | 0/4 bankai — identiška kaip be ring. Ring'o buvimas nieko nekeičia |
+| 3 | **Halt-gate** (naujas IOCTL `0x80000BEC`: ME/CE/PFP + MEC ME1/ME2 halt → probe → restore) | 0/4. ME jau halted stock (`0xFFFBD9FB`), MEC `0x4B14` juoda skylė (rašymai ignoruojami), GRBM `0xBA062100` išsaugotas, display saugus |
+
+### Išvada
+Vartai **statomi pre-x86**: PSP_BL programuoja DF ACL (~926 rašymai) iki x86 reset release (simpmix įrodymas + SEC_GASKET `0x24 @0x982000` mūsų ROM'e). Joks host state (halt/ring/GART/aperture/EFI) jų neatidaro — todėl **AGP-apertūros fazė PRALEISTA** (ta pati ACL + 0x1A rizika be teorijos).
+- Host keliai (BAR5 / PCI-SMN / EFI / halt / ring): **UŽDARYTA, 12+ metodų**
+- Vienintelis apeinantis rašytojas: SMU firmware pats (fw-window rašymai limpa — vcn komandos įrodymas). Bet SPI_PG adreso SMU kontekste niekas nežino → reikia BIOS-5 SRAM dump + Ghidra (exploit projektas, ne dabar; sąlygos: bendruomenės BIOS-5 offset'ai arba aukojama lenta)
+- Q3 sweep irgi neduotų adresų (siunčia žinutes, neatskleidžia) — atidėtas tuo pačiu pagrindu
+
+### Kas toliau (produktyvu, vartai nebereikalingi)
+Display + SMU + CPU (viskas veikia) → governor, KMDOD polish, lavapipe registracija, commit'ai. WGP tema nebegrįžtama be naujų faktų (BIOS-5 offset'ų).
+
+---
+
+## ⭐⭐⭐⭐⭐ EXEC_RING white-screen FIX (2026-09-23) — VERIFIED ON HARDWARE — README FIRST
+
+### Status ✅ DONE
+- **Driver rebuilt + signed + installed** `atikmdag.sys` 142184 B 2026-09-23 20:48:18 (Valid, SHA1 34AFF96C…), Inf2Cat + CAT OK; user Device Manager reinstall done.
+- **Code Reviewer** first pass: REQUEST_CHANGES → all CRITICAL/HIGH/MED applied.
+- **ONE-SHOT vk-execute-test PASS (2026-09-23, EXIT=0)** after reinstall:
+  - **No white screen** — Stage 3 live-safe now.
+  - **ME_CNTL `0xFFFBD9FB` → restored OK** (was left at `0` pre-fix).
+  - **GRBM before=after=`0x00000000`** — thrash fixed (was 1ms KIQ↔broadcast × 200ms).
+  - Stage 1 ICD OK; Stage 2 SW PM4 SCRATCH `0x4AFEBABE` match OK; Stage 3 SW fallback ScratchAfter=`0x5EADBEEF` OK.
+  - HW ring FAIL (WGP/SOS gate) + DispatchResult=0 — **expected** (TimeoutMs bit31 clear → DISPATCH OFF).
+  - procs=0 after test.
+- **build.bat signing klaida išspręsta**: commit `46d4635` PowerShell `)` close bet kurio `if (`/`in (` → grąžinta sena versija su hardcodintu CERT_SHA1 eil.13 (`git show 46d4635^:build.bat`).
+- **Also verified:** `gpu-init-explicit` INIT OK GPU_ID=`0x9FFF9700`; `test-psp-driver.exe` MISSING from output\ (not this repo).
+- Test tool: `output\vk-execute-test.exe` 18944 B 20:35 — **DONE, DO NOT RERUN** (one-shot policy; Stage 3 hardware-verified once).
+
+### White-screen root cause (Stage 3 EXECUTE_RING_PM4 on live display)
+1. **GRBM_GFX_INDEX thrash**: KIQ select ↔ broadcast every 1ms × 200ms (display path reads wrong bank).
+2. **ME_CNTL unhal** `0xFFFBD9FB→0` never restored (observed post-test).
+3. MEC_CNTL / RLC_CP_SCHEDULERS left modified; **HQD_ACTIVE=1** left armed.
+4. DISPATCH_DIRECT (PGM_LO/HI + DISPATCH_INITIATOR) always ran.
+Stage 1 (ICD) + Stage 2 (SW PM4→SCRATCH) were safe — only Stage 3 caused the fault.
+
+### Driver fix (case 0x80000BE8)
+| Change | Detail |
+|--------|--------|
+| Guard | `HardwareInitialized` + `MmioVirtualBase` → `STATUS_DEVICE_NOT_READY` |
+| Mutex | `DeviceMutex` held for whole case; `HwInitInProgress` → `STATUS_DEVICE_BUSY`; released on ring-alloc fail + before `break` |
+| Save | `ME_CNTL`, `MEC_CNTL_GC`, `RLC_CP_SCHEDULERS`, `GRBM_GFX_INDEX` before first HW write |
+| GRBM | Set **KIQ once** for HW section; poll RPTR **without** re-writing GRBM |
+| Poll | `pollMs = TimeoutMs & 0x7FFFFFFF`, **hard cap 50ms** (was 200ms thrash) |
+| Cleanup **before** SW fallback | HQD_ACTIVE=0, WPTR=0, restore ME/MEC/sched/**GRBM last** |
+| SW fallback | Runs with **restored** GRBM (SCRATCH write needs default index) |
+| DISPATCH_DIRECT | **Only if TimeoutMs bit31** (default OFF); save/restore PGM_LO/**PGM_HI**/TMG/GRBM; PGM_LO = `addr>>8` (matches MQD); PGM_HI = `addr>>32` |
+| Output | `rp->TimeoutMs` = effective pollMs (was echoing uncapped user value) |
+
+### Test tool (vk-execute-test.c)
+- Stage 3: print `ME_CNTL pre/post` with restored OK / NOT restored verdict.
+- `TimeoutMs=3000` → bit31 clear → DISPATCH stays OFF (correct for live-safe retest).
+
+### Next steps
+1. ~~Rebuild + reinstall~~ **DONE** (2026-09-23 20:48).
+2. ~~ONE-SHOT vk-execute-test~~ **PASS** (no white screen, ME_CNTL restored OK).
+3. **Commit + push** pending user approval (kmd fix + test tool + build.bat revert + AGENTS).
+
+### Rules (unchanged)
+- **NEVER** re-run one-shot tests twice; `vk-execute-test` DONE — do not relaunch.
+- SPI_PG(0x5C3C)=0 SOS-gated — HW ring execute still fails (expected, independent of this fix).
+
+---
+
+## ⭐⭐⭐⭐⭐ vk-execute-test + pa_v1 + governor + Vulkan ICD DRAW (2026-09-23) — (prior this session)
 
 ### Four next-steps DONE (tests, one-shot each — DO NOT RERUN unless noted)
 | # | Deliverable | Result |
@@ -11,7 +171,7 @@
 | 4 | **Vulkan ICD draw** | `vk-draw-test.exe` **PASS**: GIPA→`vkCreateInstance`… `DRAW_INDEX_AUTO` PM4 `0xC0022D00`, `vkQueueSubmit` OK, procs=0, EXIT=0. |
 
 ### vk-execute-test findings (this session)
-- **⚠️ WHITE SCREEN after test (2026-09-23)** — user reported white display post-run. Likely Stage 3 `EXECUTE_RING_PM4` (HQD/WPTR + ME_CNTL side-effect unhalt `0xFFFBD9FB→0`) on LIVE display path = documented display-fetch fault → **reboot recovery**. System log had no Critical/Error at time of check. **Rule: do NOT re-run vk-execute-test on live desktop; Stage 3 is display-adjacent (ring/HQD/ME).** If re-run ever needed: RDP/headless session first + `Stop-Process` check.
+- **⚠️ WHITE SCREEN after test (2026-09-23, PRE-FIX run)** — Stage 3 `EXECUTE_RING_PM4` (HQD/WPTR + ME_CNTL unhal `0xFFFBD9FB→0`) on LIVE display = display-fetch fault → reboot recovery. **FIXED same day** in `case 0x80000BE8` (save/restore ME/MEC/RLC/GRBM, 50ms poll cap, cleanup before SW fallback, DISPATCH opt-in bit31). **Post-fix ONE-SHOT: no white screen, ME_CNTL restored OK** — see top section. One-shot policy still applies (do not relaunch).
 - **SW PM4 executor CONFIRMED working**: MMIO baseline SCRATCH `0x4D585042` → direct SEND_PM4 WRITE_DATA → `0x4AFEBABE` (masked match). err=183 = STATUS_DEVICE_BUSY wait retry, handler still succeeded.
 - **HW ring path PROBED**: EXECUTE_RING Result=1, SwResult=0, ScratchBefore=0→ScratchAfter=0x5EADBEEF, WPTR 0→20, RPTR stays 0, HQD=1 — **SW fallback inside EXEC_RING**, not real GPU consumption. ME_CNTL went 0xFFFBD9FB→0x00000000 (unhalt side-effect) post-stage3.
 - **ICD vkQueueSubmit does NOT change SCRATCH** (pre=post=0x4D585042) — ICD submits DRAW_INDEX_AUTO to KMD, KMD routes to PSP KIQ/GfxRing/SW; none execute a WRITE_DATA to SCRATCH (correct — ICD path only sends the draw, no SW executor side-effect expected).
@@ -23,17 +183,18 @@
 - Test **`test-tools/vk-draw-test.c`** `load()` resolves via **`g_gipa`**: `vk_icdGetInstanceProcAddr` → fallback `vkGetInstanceProcAddr` → `GetProcAddress`. `vkCreateInstance` is a **string** inside ICD (not export).
 - Compile: `test-tools/compile-vk-draw-test.bat` (direct `cl` + vcvars; works even if vcvarsall path message errors).
 - New tools + compile bats: `pa-v1-diag[2].c`, `pa-v1-probe.c`, `governor-service.c`, `vk-draw-test.c`, `vk-execute-test.c`, `compile-pa-v1-*.bat`, `compile-governor-service.bat`, `compile-psp-pci-bar-find.bat`, `compile-vk-draw-test.bat`, `compile-vk-execute-test.bat`.
-- **Rerun policy:** these five tests already ran once — **never launch twice**; `Stop-Process` + procs=0 first if ever needed. (`vk-execute-test` re-run only if driver rebuilt — note SCRATCH baseline may differ after ME unhalt.) **⚠️ vk-execute-test caused WHITE SCREEN (Stage 3 EXEC_RING/HQD/ME_CNTL on live display) — never re-run on live desktop; reboot if repeated.**
-- **Also one-shot (DO NOT RERUN):** `gpu-init-explicit` + PSP `test-psp-driver -s` + pa_v1 READ_REG probes (post-reinstall verification done 2026-09-23).
+- **Rerun policy:** these tests already ran — **never launch twice**; `Stop-Process` + procs=0 first if ever needed. `vk-execute-test` **DONE post-fix PASS 2026-09-23** (white-screen FIXED in `case 0x80000BE8`; ME_CNTL restored OK) — still one-shot, do not relaunch.
+- **Also one-shot (DO NOT RERUN):** `gpu-init-explicit` (re-verified OK post-reinstall) + PSP `test-psp-driver -s` (MISSING output\ this run) + pa_v1 READ_REG probes.
 
 ### PSP side (sibling repo — see its AGENTS)
 - PSP **BAR2 fix + map-lifetime** built SHA `D8DC9423…01FE5` — **INSTALLED + VERIFIED** (user Device Manager reinstall).
 - **Post-reinstall:** first PSP `-s` before GPU map = all FF (proxy down post-reboot, expected). After `gpu-init-explicit` NBIO_MAP → PSP `-s` **PASS**: Alive YES, NBIO SIGs `0xFEDCBAEF/EF`, GRBM UNLOCKED, MMIO VA=1MB. Direct pa_v1: bootloader=`0x001C0102`, feature=`0x2`, cmdresp=`0x80000000`, inten=`0x1`. C2PMSG_35/36=FF = bootloader gone (normal). **Rule: after reboot run gpu-init-explicit FIRST, then PSP -s once.**
 
 ### Remaining open items (carry)
-- **SPI_PG (0x5C3C) still 0** — SOS-locked; WGP unlock = EFI/Linux only.
+- **SPI_PG (0x5C3C) still 0** — SOS-locked; WGP unlock = EFI/Linux only (PSP-only path closed: PROG_REG NOT_IMPLEMENTED, RequestActiveWgp no-op, mailbox PROG_REG ignored).
 - GPU LICENSE file was deleted in tree (restore before commit if unintended — Apache 2.0 history `17c8795`).
 - No 0x1E BSOD this session; if returns check `C:\Windows\MEMORY.DMP`.
+- **Uncommitted (awaiting approval):** `AGENTS.md`, `build.bat` (sena versija), `src/kmd/amdbc250_dream_kmd.c`, `test-tools/vk-execute-test.c`.
 
 ---
 
@@ -172,6 +333,27 @@
 2. **Never read SMN `0x1f81c`** — AC cycle only recovery.
 3. Video encode path on Windows would need software/Vulkan-compute equivalent (our ICD stub → future RADV), not VCN MMIO.
 4. Audio clock DCCG 0x05E0–E8 may be writable via BAR5 display path if DP/HDMI audio is ever needed on Windows KMDOD.
+
+### ⭐⭐ third-party/bc250-vcn-enable + bc250-smu-unlock — SMU exploit principas (2026-09-24, ANALYZED — NOT pursued)
+
+**Klausimas:** ar SMU exploit principu galima atrakinti MUMS reikalingus registrus (SPI_PG/WGP)? **Atsakymas: ne dabar** (analizė, ne bandymas).
+
+**Kaip veikia jų exploit (`bc250-smu-unlock/unlock.py`, BIOS-3-only):**
+1. Q2 msg `0x23` ring-overflow SRAM `0x18850` → counter perrašymas → subqueue 0 → `TR_TABLE_PTR (0x19784)`
+2. Q2 msg `0x0A` transfer engine per perrašytą pointer'į → arbitrarius SMU SRAM R/W + host-phys DMA
+3. Nulinamas `DBG_DISABLE (0x7B3C)` → secure-access → pilnas SMU R/W + code exec per msg `0x61` (thunk `0x3FF00`, slot `0x776C`)
+4. VCN atveju toliau: dom6 slot clock'ai + `navi10_vcn.bin` iš userspace per amdgpu debugfs
+
+**Sutapimai su mūsų matavimais (patikimumo ženklas):** dom6 `status=0x01010101`/`ctrl=0x02` baitas į baitą; PCI `0xB8/0xBC` rašymai ignoruojami / skaitymai gyvi; mirę skaitymai → `0x00000000`; `0x024` slice žemėlapis patvirtina GC/MP0 adresus.
+
+**Trys sienos:**
+1. **Visi offset'ai tik BIOS 3** (Robin1 PMFW 0.58.6.0); mes ant BIOS 5.00 / PMFW 88.6.0 — kiekvienas adresas vestinas iš naujo (SRAM dump + Ghidra). README: *"BIOS 3 only!"*.
+2. **Nėra adreso SPI_PG SMU kontekste.** Jų sėkmė — SMN erdvė (dom6); SPI_PG — GPU MMIO, ne SMN; kandidatas `0x024` GC slice (`0x02402C00`) — turinys nežinomas, rašyti aklas = hang.
+3. **Kiekvienas žingsnis — wedge rizika** (their measured vectors: call-thunk, route W, thunk-writes, blogi SMN) — Linux'e SSH + PSU cycle; Windows'e hard freeze su filesystem rizika, ir taip kartotinai.
+
+**Refinement 2026-09-24 (mūsų hardware įrodymas):** aukščiau esantis teiginys „Host PCI `0xB8/0xBC`: writes dropped, reads → `0xFFFFFFFF`" galioja **VCN fabric** (SEC_GASKET ACL), NE visam SMN. Įrodyta: `-8core status` skaito `0x0115A870=0xFF` (ne FF..F) per tą patį `0xB8/0xBC`; SMU mailbox 16/16 veikia. CPU/SMU erdvė atvira, VCN erdvė uždaryta.
+
+**Ką paimam:** transportas (`0xB8/0xBC` — jau turim+įrodyta) ir Q3 `0x28/0x29` (jau whitelist'e) sutampa su jų primityvais. Trūksta: Q2 `0x23`/`0x0A` + visi BIOS-5 offset'ai + SPI_PG adresas. **Revisit tik jei:** bendruomenė išves BIOS-5 offset'us arba atsiras aukojama lenta. Iki tol — žinojimas, ne veiksmų planas.
 
 ## ⭐ UPDATE 2026-09-15 (POST REINSTALL + DRIVER WHITELIST EXPANSION)
 

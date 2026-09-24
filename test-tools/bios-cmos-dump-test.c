@@ -19,6 +19,8 @@
 
 #define CMOS_INDEX_PORT 0x72   /* same as bc250_memcfg */
 #define CMOS_DATA_PORT  0x73
+#define CMOS0_INDEX_PORT 0x70  /* classic bank: RTC, password area, boot config */
+#define CMOS0_DATA_PORT  0x71
 
 static HANDLE h;
 
@@ -133,6 +135,35 @@ int main(void) {
     for (int i = 0x06; i <= 0x1B; i++) sum += m[i];
     printf("\nChecksum check: stored 0x%04X, computed(0x96..0xAB) 0x%04X -> %s\n",
         cks, sum, (cks == sum) ? "MATCH" : "MISMATCH (may use different range)");
+
+    /* Classic bank 0x70/0x71 (offsets 0x00-0x7F only: bit7 of index = NMI disable).
+     * Holds RTC clock, legacy password/checksum area, boot config. Read-only. */
+    {
+        uint8_t c0[128];
+        int ok0 = 0;
+        for (int i = 0; i < 128; i++) {
+            uint32_t idx, dat;
+            if (!port_io(CMOS0_INDEX_PORT, 1, 1, (uint32_t)i, &idx)) break;
+            if (!port_io(CMOS0_DATA_PORT, 1, 0, 0, &dat)) break;
+            c0[i] = (uint8_t)dat;
+            ok0++;
+        }
+        /* re-enable NMI path state: rewrite index 0 (bit7 clear) */
+        {
+            uint32_t dummy;
+            port_io(CMOS0_INDEX_PORT, 1, 1, 0, &dummy);
+        }
+        printf("\n--- CMOS classic bank 0x70/0x71 (0x00-0x7F): %d/128 bytes ---\n", ok0);
+        for (int row = 0; row < ok0; row += 16) {
+            printf("%04X: ", row);
+            for (int c = 0; c < 16 && row + c < ok0; c++) printf("%02X ", c0[row + c]);
+            printf("\n");
+        }
+        if (ok0 >= 0x40) {
+            printf("\nRTC: %02X%02X-%02X-%02X %02X:%02X:%02X (raw BCD-ish)\n",
+                c0[0x09], c0[0x08], c0[0x07], c0[0x06], c0[0x04], c0[0x02], c0[0x00]);
+        }
+    }
 
     CloseHandle(h);
     return 0;

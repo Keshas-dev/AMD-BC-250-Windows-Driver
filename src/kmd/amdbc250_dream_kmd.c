@@ -7815,13 +7815,31 @@ DreamV3DeviceControl(
 
     case 0x80000BE8: { /* IOCTL_AMDBC250_EXECUTE_RING_PM4 */
         PAMDBC250_IOCTL_EXECUTE_RING_PM4 rp = (PAMDBC250_IOCTL_EXECUTE_RING_PM4)inputBuffer;
-        ULONG cmdCount, pollTimeoutMs;
+        ULONG cmdCount, pollTimeoutMs, pollMs;
+        ULONG savedMeCntl = 0, savedMecCntl = 0, savedSched = 0, savedGrbmIdx = 0;
         if (inputLen < sizeof(*rp)) { status = STATUS_BUFFER_TOO_SMALL; break; }
 
         cmdCount = rp->CommandCount;
         if (cmdCount == 0 || cmdCount > 64) { status = STATUS_INVALID_PARAMETER; break; }
 
-        /* Save input fields BEFORE RtlZeroMemory clobbers them */
+        if (!DevExt->HardwareInitialized || DevExt->MmioVirtualBase == NULL) {
+            rp->Result = 2;
+            status = STATUS_DEVICE_NOT_READY;
+            break;
+        }
+
+        /* Serialize vs READ_REG-adjacent HW, PSP_RING, power, SavedPm4Cmds.
+           SMU/SW paths below do NOT re-acquire DeviceMutex (no deadlock). */
+        ExAcquireFastMutex(&DevExt->DeviceMutex);
+        if (DevExt->HwInitInProgress) {
+            ExReleaseFastMutex(&DevExt->DeviceMutex);
+            rp->Result = 2;
+            status = STATUS_DEVICE_BUSY;
+            break;
+        }
+
+        /* Save input fields BEFORE RtlZeroMemory clobbers them.
+           Bit31 of TimeoutMs = opt-in DISPATCH_DIRECT (unsafe on live display; default OFF). */
         pollTimeoutMs = rp->TimeoutMs;
         {
             ULONG i;
@@ -7830,7 +7848,9 @@ DreamV3DeviceControl(
         }
         RtlZeroMemory(rp, sizeof(*rp));
         rp->CommandCount = cmdCount;
-        rp->TimeoutMs = (pollTimeoutMs > 0) ? pollTimeoutMs : 500;
+        pollMs = pollTimeoutMs & 0x7FFFFFFF;
+        if (pollMs > 50) pollMs = 50; /* hard cap — live-display GRBM/KIQ window */
+        rp->TimeoutMs = pollMs;
 
         /* --- Allocate ring buffer (MQD stored at offset 0; PM4 at offset 256) --- */
         if (DevExt->GcvmRingBuf == NULL) {
@@ -7844,6 +7864,7 @@ DreamV3DeviceControl(
                     "AMDBC250-DREAM-V4.3: EXEC_RING: ring PA=0x%llX\n",
                     DevExt->GcvmRingBufPa));
             } else {
+                ExReleaseFastMutex(&DevExt->DeviceMutex);
                 rp->Result = 2; status = STATUS_INSUFFICIENT_RESOURCES; break;
             }
         }
@@ -7906,24 +7927,26 @@ DreamV3DeviceControl(
         DreamV3SmuSendMessage(DevExt, SMU_MSG_GetEnabledSmuFeatures, 0, &rp->SmuFeaturesMask);
         DreamV3SmuSendMessage(DevExt, SMU_MSG_GetGfxFrequency, 0, &rp->SmuGfxFreqMhz);
 
+        /* Save live-display state BEFORE any CP/GRBM write (restore in cleanup) */
+        savedMeCntl   = DreamV3ReadRegister(DevExt, AMDBC250_REG_CP_ME_CNTL);
+        savedMecCntl  = DreamV3ReadRegister(DevExt, AMDBC250_REG_CP_MEC_CNTL_GC);
+        savedSched    = DreamV3ReadRegister(DevExt, AMDBC250_REG_RLC_CP_SCHEDULERS);
+        savedGrbmIdx  = DreamV3ReadRegister(DevExt, AMDBC250_REG_GRBM_GFX_INDEX);
+
         /* --- Baseline (MQD is at ring buffer offset 0) --- */
         rp->RingPa = DevExt->GcvmRingBufPa.QuadPart;
         rp->MqdPa  = DevExt->GcvmRingBufPa.QuadPart;
         rp->ScratchBefore = DreamV3ReadRegister(DevExt, AMDBC250_REG_SCRATCH_REG0);
 
-        /* Step 1: Select ME=1 (MEC) AND unhalt ME + MEC + enable schedulers */
+        /* Step 1: Select ME=1 (MEC) once; enable schedulers; unhalt ME+MEC.
+           GRBM is left on KIQ select for the whole HW section — no per-poll
+           KIQ↔broadcast thrash (that hammered display-path index reads). */
         DreamV3WriteRegister(DevExt, AMDBC250_REG_GRBM_GFX_INDEX,
             AMDBC250_GRBM_GFX_INDEX_KIQ_VAL);
 
-        /* Write 0xFF to RLC_CP_SCHEDULERS to enable all queue slots */
         DreamV3WriteRegister(DevExt, AMDBC250_REG_RLC_CP_SCHEDULERS, 0xFF);
-
-        /* Unhalt ME (write 0 to ME_CNTL at 0x4A74) */
         DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_ME_CNTL, 0);
-
-        /* Unhalt MEC (write 0 to CP_MEC_CNTL at 0x4B14) */
         DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_MEC_CNTL_GC, 0);
-
         KeMemoryBarrier();
 
         /* NOTE: Linux gc_10_1_0_offset.h confirms ALL CP_HQD registers
@@ -7945,7 +7968,6 @@ DreamV3DeviceControl(
            0-1023  = MQD (256 dwords)
            1024+   = ring PM4 data (ring base at ringPA+1024, PQ_BASE = (ringPA+1024)>>8) */
         #define RING_DATA_OFFSET_BYTES  1024
-        #define RING_DATA_OFFSET_DWORDS 256
         ULONG64 ringDataPa = DevExt->GcvmRingBufPa.QuadPart + RING_DATA_OFFSET_BYTES;
         DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_HQD_PQ_BASE_LO,
             (ULONG)((ringDataPa >> 8) & 0xFFFFFFFF));
@@ -7994,25 +8016,31 @@ DreamV3DeviceControl(
             rp->WptrAfter = totalBytes;
         }
 
-        /* Restore GRBM */
-        DreamV3WriteRegister(DevExt, AMDBC250_REG_GRBM_GFX_INDEX,
-            AMDBC250_GRBM_GFX_INDEX_BROADCAST_VAL);
-
-        /* Short poll for RPTR advance (200ms = no TDR on WDDM 2.x) */
+        /* Short poll for RPTR advance — GRBM stays on KIQ select (no thrash).
+           pollMs capped at 50 (above): WGP locked ⇒ RPTR never moves; long hold
+           of non-default GRBM index on live display was a white-screen contributor. */
         {
             ULONG waited = 0;
-            while (waited < 200) {
-                DreamV3WriteRegister(DevExt, AMDBC250_REG_GRBM_GFX_INDEX,
-                    AMDBC250_GRBM_GFX_INDEX_KIQ_VAL);
+            while (waited < pollMs) {
                 rp->RptrAfter = DreamV3ReadRegister(DevExt, AMDBC250_REG_CP_HQD_PQ_RPTR);
-                DreamV3WriteRegister(DevExt, AMDBC250_REG_GRBM_GFX_INDEX,
-                    AMDBC250_GRBM_GFX_INDEX_BROADCAST_VAL);
                 if (rp->RptrAfter != 0) { rp->Result = 0; break; }
                 KeStallExecutionProcessor(1000);
                 waited++;
             }
-            if (waited >= 200) rp->Result = 1;
+            if (rp->RptrAfter == 0) rp->Result = 1;
         }
+
+        /* --- CLEANUP HW first (live-display safe): deactivate HQD, re-halt
+               ME/MEC, restore schedulers + GRBM index BEFORE SW fallback.
+               SW PM4 writes SCRATCH via absolute BAR5 — must run with the
+               original GRBM index (broadcast), not KIQ/ME select. --- */
+        DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_HQD_ACTIVE, 0);
+        DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_HQD_PQ_WPTR_LO, 0);
+        DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_ME_CNTL, savedMeCntl);
+        DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_MEC_CNTL_GC, savedMecCntl);
+        DreamV3WriteRegister(DevExt, AMDBC250_REG_RLC_CP_SCHEDULERS, savedSched);
+        DreamV3WriteRegister(DevExt, AMDBC250_REG_GRBM_GFX_INDEX, savedGrbmIdx);
+        KeMemoryBarrier();
 
         /* Fallback: Execute same PM4 via Software PM4 executor (bypasses ring entirely) */
         rp->SwResult = STATUS_UNSUCCESSFUL;
@@ -8029,44 +8057,45 @@ DreamV3DeviceControl(
             }
         }
 
-        /* --- DISPATCH_DIRECT test: write s_endpgm shader and trigger --- */
+        /* --- DISPATCH_DIRECT test: ONLY if TimeoutMs bit31 set (opt-in).
+               Default OFF — writes PGM + DISPATCH_INITIATOR on live display
+               is a documented white-screen source. Restores GRBM after. --- */
         rp->DispatchResult = 0;
         rp->GrbmStatusBefore = 0;
         rp->GrbmStatusAfter = 0;
         rp->PgmLoReadback = 0;
         rp->PgmHiReadback = 0;
         rp->TmgMaskReadback = 0;
-        if (DevExt->GcvmRingBuf != NULL) {
-            /* Shader well past MQD + ring area (offset 3072 = dword 768) */
+        if ((pollTimeoutMs & 0x80000000) != 0 && DevExt->GcvmRingBuf != NULL) {
+            ULONG pgmLoSaved, pgmHiSaved, tmgSaved;
             #define SHADER_OFFSET_BYTES  3072
             ULONG64 shaderPa = DevExt->GcvmRingBufPa.QuadPart + SHADER_OFFSET_BYTES;
             WRITE_REGISTER_ULONG((PULONG)((PUCHAR)DevExt->GcvmRingBuf + SHADER_OFFSET_BYTES), 0xBF810000UL);
             KeMemoryBarrier();
-            /* Select ME=1 (MEC) */
+
             DreamV3WriteRegister(DevExt, AMDBC250_REG_GRBM_GFX_INDEX,
                 AMDBC250_GRBM_GFX_INDEX_KIQ_VAL);
-            /* Set PGM_LO: read-modify-write to preserve bits 31:28 */
+            pgmLoSaved = DreamV3ReadRegister(DevExt, AMDBC250_REG_COMPUTE_PGM_LO);
+            pgmHiSaved = DreamV3ReadRegister(DevExt, AMDBC250_REG_COMPUTE_PGM_HI);
+            tmgSaved   = DreamV3ReadRegister(DevExt, AMDBC250_REG_COMPUTE_STATIC_THREAD_MGMT_SE0);
             {
-                ULONG pgmLoCurrent = DreamV3ReadRegister(DevExt, AMDBC250_REG_COMPUTE_PGM_LO);
-                ULONG pgmLoNew = (pgmLoCurrent & 0xF0000000) | ((ULONG)(shaderPa & 0xFFFFFFFF) & 0x0FFFFFFF);
+                /* PGM_LO encoding matches MQD buf[13] = addr >> 8 (Linux v10) */
+                ULONG pgmLoNew = (pgmLoSaved & 0xF0000000) | (ULONG)((shaderPa >> 8) & 0x0FFFFFFF);
                 DreamV3WriteRegister(DevExt, AMDBC250_REG_COMPUTE_PGM_LO, pgmLoNew);
                 rp->PgmLoReadback = DreamV3ReadRegister(DevExt, AMDBC250_REG_COMPUTE_PGM_LO);
             }
-            /* Set PGM_HI */
             DreamV3WriteRegister(DevExt, AMDBC250_REG_COMPUTE_PGM_HI, (ULONG)(shaderPa >> 32));
             rp->PgmHiReadback = DreamV3ReadRegister(DevExt, AMDBC250_REG_COMPUTE_PGM_HI);
-            /* Set STATIC_THREAD_MGMT_SE0 = allow all WGPs */
             DreamV3WriteRegister(DevExt, AMDBC250_REG_COMPUTE_STATIC_THREAD_MGMT_SE0, 0xFFFFFFFF);
             rp->TmgMaskReadback = DreamV3ReadRegister(DevExt, AMDBC250_REG_COMPUTE_STATIC_THREAD_MGMT_SE0);
             rp->DispatchResult = 1;
-            /* Save GRBM_STATUS before trigger */
             rp->GrbmStatusBefore = DreamV3ReadRegister(DevExt, AMDBC250_REG_GRBM_STATUS);
-            /* Trigger DISPATCH_DIRECT with VALID=1. Format: dimX[11:0], dimY[23:12], dimZ[31:24] */
-            ULONG packedDim = (1 & 0xFFF) | ((1 & 0xFFF) << 12) | ((1 & 0xFF) << 24);
-            DreamV3WriteRegister(DevExt, AMDBC250_REG_COMPUTE_DISPATCH_INITIATOR, packedDim);
-            DreamV3WriteRegister(DevExt, AMDBC250_REG_COMPUTE_DISPATCH_INITIATOR, 0x00075FFF);
+            {
+                ULONG packedDim = (1 & 0xFFF) | ((1 & 0xFFF) << 12) | ((1 & 0xFF) << 24);
+                DreamV3WriteRegister(DevExt, AMDBC250_REG_COMPUTE_DISPATCH_INITIATOR, packedDim);
+                DreamV3WriteRegister(DevExt, AMDBC250_REG_COMPUTE_DISPATCH_INITIATOR, 0x00075FFF);
+            }
             rp->DispatchResult = 2;
-            /* Short poll for GRBM_STATUS change */
             {
                 ULONG waited = 0;
                 while (waited < 50) {
@@ -8079,11 +8108,14 @@ DreamV3DeviceControl(
                     waited++;
                 }
             }
-            /* Restore broadcast */
-            DreamV3WriteRegister(DevExt, AMDBC250_REG_GRBM_GFX_INDEX,
-                AMDBC250_GRBM_GFX_INDEX_BROADCAST_VAL);
+            /* Restore PGM_LO/HI + TMG + GRBM so live display path is untouched */
+            DreamV3WriteRegister(DevExt, AMDBC250_REG_COMPUTE_PGM_LO, pgmLoSaved);
+            DreamV3WriteRegister(DevExt, AMDBC250_REG_COMPUTE_PGM_HI, pgmHiSaved);
+            DreamV3WriteRegister(DevExt, AMDBC250_REG_COMPUTE_STATIC_THREAD_MGMT_SE0, tmgSaved);
+            DreamV3WriteRegister(DevExt, AMDBC250_REG_GRBM_GFX_INDEX, savedGrbmIdx);
         }
 
+        ExReleaseFastMutex(&DevExt->DeviceMutex);
         bytesReturned = sizeof(*rp);
         status = STATUS_SUCCESS;
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
@@ -8093,6 +8125,82 @@ DreamV3DeviceControl(
             rp->PqCtrlBefore, rp->PqCtrlAfter,
             rp->PqBaseReadback, rp->HqdActive,
             rp->SwResult, rp->ScratchAfter));
+        break;
+    }
+
+    /* --- WGP halt-probe: halt CP/MEC engines, try SPI_PG per-bank, restore ---
+     * Theory: the SPI_PG host-write gate may key on engine halt state (Linux
+     * writes it during early init with engines halted; our ME_CNTL stock
+     * 0xFFFBD9FB already has HALT bits set). No SMU/rings/VM/display touched.
+     * Save/restore everything (white-screen-fix discipline); GRBM set once per
+     * bank, broadcast restored, ME/MEC restored to entry values. */
+    case 0x80000BEC: { /* IOCTL_AMDBC250_WGP_HALT_PROBE = CTL_CODE_AMDBC250(0x8B) */
+        PAMDBC250_IOCTL_WGP_HALT_PROBE wp = (PAMDBC250_IOCTL_WGP_HALT_PROBE)inputBuffer;
+        ULONG savedMe = 0, savedMec = 0, savedGrbm = 0;
+        ULONG i;
+        static const ULONG bankSel[4] = {0x00000000, 0x00000100, 0x00010000, 0x00010100};
+        if (inputLen < sizeof(*wp) || outputLen < sizeof(*wp)) { status = STATUS_BUFFER_TOO_SMALL; break; }
+        if (wp->Magic != 0x57475000) { status = STATUS_INVALID_PARAMETER; break; }
+
+        if (!DevExt->HardwareInitialized || DevExt->MmioVirtualBase == NULL) {
+            status = STATUS_DEVICE_NOT_READY;
+            break;
+        }
+
+        ExAcquireFastMutex(&DevExt->DeviceMutex);
+        if (DevExt->HwInitInProgress) {
+            ExReleaseFastMutex(&DevExt->DeviceMutex);
+            status = STATUS_DEVICE_BUSY;
+            break;
+        }
+
+        /* Magic consumed; clear rest for clean OUT (METHOD_BUFFERED shares buffer). */
+        RtlZeroMemory(wp, sizeof(*wp));
+
+        /* Save entry state. */
+        savedMe = DreamV3ReadRegister(DevExt, AMDBC250_REG_CP_ME_CNTL);
+        savedMec = DreamV3ReadRegister(DevExt, AMDBC250_REG_CP_MEC_CNTL_GC);
+        savedGrbm = DreamV3ReadRegister(DevExt, AMDBC250_REG_GRBM_GFX_INDEX);
+        wp->MeCntlBefore = savedMe;
+        wp->MecCntlBefore = savedMec;
+        wp->GrbmBefore = savedGrbm;
+
+        /* Halt GFX (ME+CE+PFP) and MEC (ME1+ME2). Bits OR-ed onto entry value;
+         * restore below returns exact entry state even if bit polarity differs. */
+        DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_ME_CNTL,
+            savedMe | CP_ME_CNTL__ME_HALT | CP_ME_CNTL__CE_HALT | CP_ME_CNTL__PFP_HALT);
+        DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_MEC_CNTL_GC,
+            savedMec | AMDBC250_CP_MEC_ME1_HALT | AMDBC250_CP_MEC_ME2_HALT);
+        KeStallExecutionProcessor(1000);
+        wp->MeCntlHalted = DreamV3ReadRegister(DevExt, AMDBC250_REG_CP_ME_CNTL);
+        wp->MecCntlHalted = DreamV3ReadRegister(DevExt, AMDBC250_REG_CP_MEC_CNTL_GC);
+
+        /* Per-bank SPI_PG write probe (canonical Linux GRBM layout). */
+        wp->BanksStuck = 0;
+        for (i = 0; i < 4; i++) {
+            DreamV3WriteRegister(DevExt, AMDBC250_REG_GRBM_GFX_INDEX, bankSel[i]);
+            wp->SpiBefore[i] = DreamV3ReadRegister(DevExt, AMDBC250_REG_SPI_PG_ENABLE_STATIC_WGP_MASK);
+            DreamV3WriteRegister(DevExt, AMDBC250_REG_SPI_PG_ENABLE_STATIC_WGP_MASK, 0x1F);
+            wp->SpiAfter[i] = DreamV3ReadRegister(DevExt, AMDBC250_REG_SPI_PG_ENABLE_STATIC_WGP_MASK);
+            if (wp->SpiAfter[i] == 0x1F) wp->BanksStuck++;
+        }
+
+        /* Restore: GRBM broadcast, MEC, ME, then verify. GRBM last. */
+        DreamV3WriteRegister(DevExt, AMDBC250_REG_GRBM_GFX_INDEX, AMDBC250_GRBM_GFX_INDEX_BROADCAST_VAL);
+        DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_MEC_CNTL_GC, savedMec);
+        DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_ME_CNTL, savedMe);
+        wp->MeCntlAfter = DreamV3ReadRegister(DevExt, AMDBC250_REG_CP_ME_CNTL);
+        wp->MecCntlAfter = DreamV3ReadRegister(DevExt, AMDBC250_REG_CP_MEC_CNTL_GC);
+        DreamV3WriteRegister(DevExt, AMDBC250_REG_GRBM_GFX_INDEX, savedGrbm);
+        wp->GrbmAfter = DreamV3ReadRegister(DevExt, AMDBC250_REG_GRBM_GFX_INDEX);
+
+        ExReleaseFastMutex(&DevExt->DeviceMutex);
+        bytesReturned = sizeof(*wp);
+        status = STATUS_SUCCESS;
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+            "AMDBC250-DREAM-V4.3: WGP_HALT_PROBE stuck=%u/4 me=%08X->%08X mec=%08X->%08X\n",
+            wp->BanksStuck, wp->MeCntlBefore, wp->MeCntlAfter,
+            wp->MecCntlBefore, wp->MecCntlAfter));
         break;
     }
 

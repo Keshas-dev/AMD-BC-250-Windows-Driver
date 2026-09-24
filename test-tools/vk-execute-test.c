@@ -459,7 +459,9 @@ int main(void)
     }
     dump_state("post-swpm4");
 
-    /* --- Stage 3: EXECUTE_RING_PM4 (hardware ring path) --- */
+    /* --- Stage 3: EXECUTE_RING_PM4 (hardware ring path) ---
+       TimeoutMs=3000: bit31 CLEAR = DISPATCH_DIRECT skipped (driver default;
+       bit31 would opt into unsafe live-display dispatch). */
     printf("\n--- Stage 3: EXECUTE_RING_PM4 (HW ring path) ---\n");
     ZeroMemory(&rp, sizeof(rp));
     rp.Commands[0] = 0xC0033700; /* TYPE3 WRITE_DATA count=4 */
@@ -470,18 +472,28 @@ int main(void)
     rp.CommandCount = 5;
     rp.TimeoutMs = 3000;
 
-    W(0x32D4, 0x00000000);
-    scrPre = R(0x32D4);
-    printf("  SCRATCH pre-reset=0x%08X\n", scrPre);
+    {
+        ULONG mePre = R(0x4A74);
+        W(0x32D4, 0x00000000);
+        scrPre = R(0x32D4);
+        printf("  SCRATCH pre-reset=0x%08X ME_CNTL pre=0x%08X\n", scrPre, mePre);
 
-    br = 0;
-    ok = DeviceIoControl(gH, IOCTL_EXEC_RING, &rp, sizeof(rp), &rp, sizeof(rp), &br, NULL);
-    printf("  EXEC_RING: ok=%d gle=%lu\n", ok, GetLastError());
-    printf("  Result=%u SwResult=%u ScratchBefore=0x%08X ScratchAfter=0x%08X\n",
-           rp.Result, rp.SwResult, rp.ScratchBefore, rp.ScratchAfter);
-    printf("  WPTR %u->%u  RPTR 0x%X->0x%X  HQD=0x%08X\n",
-           rp.WptrBefore, rp.WptrAfter, rp.RptrBefore, rp.RptrAfter, rp.HqdActive);
-    printf("  GRBM before=0x%08X after=0x%08X\n", rp.GrbmStatusBefore, rp.GrbmStatusAfter);
+        br = 0;
+        ok = DeviceIoControl(gH, IOCTL_EXEC_RING, &rp, sizeof(rp), &rp, sizeof(rp), &br, NULL);
+        printf("  EXEC_RING: ok=%d gle=%lu\n", ok, GetLastError());
+        printf("  Result=%u SwResult=%u ScratchBefore=0x%08X ScratchAfter=0x%08X\n",
+               rp.Result, rp.SwResult, rp.ScratchBefore, rp.ScratchAfter);
+        printf("  WPTR %u->%u  RPTR 0x%X->0x%X  HQD=0x%08X\n",
+               rp.WptrBefore, rp.WptrAfter, rp.RptrBefore, rp.RptrAfter, rp.HqdActive);
+        printf("  GRBM before=0x%08X after=0x%08X DispatchResult=%u\n",
+               rp.GrbmStatusBefore, rp.GrbmStatusAfter, rp.DispatchResult);
+
+        {
+            ULONG mePost = R(0x4A74);
+            printf("  ME_CNTL post=0x%08X %s\n", mePost,
+                   (mePost == mePre) ? "(restored OK)" : "(NOT restored — white-screen risk!)");
+        }
+    }
 
     scrPost = R(0x32D4);
     printf("  SCRATCH after: 0x%08X\n", scrPost);

@@ -900,6 +900,21 @@ typedef struct _AMDBC250_IOCTL_EXECUTE_RING_PM4 {
     UINT32 TmgMaskReadback;     /* COMPUTE_STATIC_THREAD_MGMT_SE0 readback */
 } AMDBC250_IOCTL_EXECUTE_RING_PM4, *PAMDBC250_IOCTL_EXECUTE_RING_PM4;
 
+/* --- WGP halt-probe: halt CP/MEC, try SPI_PG per-bank writes, restore --- */
+#define IOCTL_AMDBC250_WGP_HALT_PROBE  CTL_CODE_AMDBC250(0x8B, METHOD_BUFFERED, FILE_ANY_ACCESS)
+
+typedef struct _AMDBC250_IOCTL_WGP_HALT_PROBE {
+    /* IN */
+    UINT32 Magic;                /* must be 0x57475000 ("WGP") */
+    UINT32 RsvdIn[3];
+    /* OUT */
+    UINT32 MeCntlBefore, MeCntlHalted, MeCntlAfter;    /* CP_ME_CNTL 0x4A74 */
+    UINT32 MecCntlBefore, MecCntlHalted, MecCntlAfter; /* CP_MEC_CNTL 0x4B14 */
+    UINT32 GrbmBefore, GrbmAfter;                      /* GRBM_GFX_INDEX */
+    UINT32 SpiBefore[4], SpiAfter[4];                  /* per-bank SPI_PG */
+    UINT32 BanksStuck;                                 /* banks where after==0x1F */
+} AMDBC250_IOCTL_WGP_HALT_PROBE, *PAMDBC250_IOCTL_WGP_HALT_PROBE;
+
 /* --- 40 CU Unlock --- */
 #define IOCTL_AMDBC250_UNLOCK_40CU          CTL_CODE_AMDBC250(0x60, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
