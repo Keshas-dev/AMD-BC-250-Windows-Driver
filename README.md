@@ -1,3 +1,5 @@
+> **Project status: PAUSED.** Out of new ideas, and no longer willing to spend my free time on this. The project is on hold until new ideas worth my free time come along. Everything achieved so far is documented and committed — feel free to fork and continue. And don't be shy with new ideas, no matter how silly they may seem.
+
 # AMD BC-250 Windows Driver
 
 GPU driver for AMD BC-250 (Cyan Skillfish) on Windows 11 26100. WDM IOCTL driver with SMU mailbox, PSP ring, Vulkan ICD, and display support.
