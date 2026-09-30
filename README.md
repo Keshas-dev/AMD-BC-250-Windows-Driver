@@ -6,7 +6,26 @@ GPU driver for AMD BC-250 (Cyan Skillfish) on Windows 11 26100. WDM IOCTL driver
 
 **Goal:** fully working GPU driver for BC-250 on Windows.
 
-**Current build:** `4.3.0.16` (2026-09-30) — SMU Q2 mailbox + staged secure-access diagnostics + verified WGP negative result.
+**Current build:** `4.3.0.17` (2026-09-30) — SMU Q2 mailbox + staged secure-access diagnostics + verified WGP negative result + governor ceilings aligned to the real silicon limits.
+
+---
+
+## Governor ceilings are now evidence-based (4.3.0.17)
+
+The whitelist used to accept GPU frequencies up to 2500 MHz and CPU boost up to
+5000 MHz. Neither number had ever been reached on this board.
+
+| Limit | Was | Now | Evidence |
+|---|---|---|---|
+| GPU frequency | 2500 MHz | **2230 MHz** | `aidenonlinux/PS5-Arch` runs this same APU's GPU at 2230 MHz under a custom BIOS, and its `ps5_control` forces exactly that |
+| CPU boost | 5000 MHz | **4000 MHz** | Highest frequency reported stable with an explicit VID; `bc250_smu_oc` warns that CPU VID above 1.325V has bricked boards on this shared cooler |
+
+Four shader arrays behind a mining cooler will throttle or trip board protection
+long before the silicon gives up. Offering a range that has never worked only
+lets a user discover which of those happens, the expensive way.
+
+See `docs\PS5-AND-COMMUNITY-FINDINGS.md` for the full survey of what the PS5 and
+BC-250 community knows that applies here, and what does not.
 
 ---
 

@@ -4409,9 +4409,9 @@ DreamV3DeviceControl(
         typedef enum _SMU_CPU_ARG_TYPE {
             SMU_ARG_NONE = 0,    /* argument must be 0 (query) */
             SMU_ARG_MASK8,       /* 0x01..0xFF (core enable mask; 0 would kill all cores) */
-            SMU_ARG_CORE_FREQ,   /* (core_id 0..7)<<20 | freq 3500..5000 MHz */
+            SMU_ARG_CORE_FREQ,   /* (core_id 0..7)<<20 | freq 3500..4000 MHz */
             SMU_ARG_VID16,       /* signed 16-bit, -1000..+1000 (VID curve scale) */
-            SMU_ARG_BOOST,       /* 3500..5000 MHz */
+            SMU_ARG_BOOST,       /* 3500..4000 MHz */
             SMU_ARG_TEMP,        /* 30..100 C */
             SMU_ARG_BOOL,        /* 0 or 1 */
             SMU_ARG_CORE_ID,     /* 0..7 */
@@ -4419,7 +4419,7 @@ DreamV3DeviceControl(
             SMU_ARG_SMN_ADDR,    /* known-safe SMN address only (Q3 0x98 ungated write) */
             SMU_ARG_ADDR32,      /* 32-bit DRAM address high/low for table DMA */
             SMU_ARG_SRAM_ADDR,   /* DWORD-aligned SMU SRAM offset (lower SRAM only) */
-            SMU_ARG_GFX_FREQ,    /* 350..2500 MHz (GPU force freq) */
+            SMU_ARG_GFX_FREQ,    /* 350..2230 MHz (GPU force freq; PS5 APU ceiling) */
             SMU_ARG_GFX_VID,     /* 0..255 (GPU VID, 96=950mV) */
             SMU_ARG_GFX_QUERY,   /* GPU query (arg must be 0) */
             SMU_ARG_WGP_COUNT,   /* active compute-unit count, 0..18 */
@@ -4506,7 +4506,16 @@ DreamV3DeviceControl(
                 if (allowed) argSend = (ULONG)(INT32)(INT16)v;
                 break;
             }
-            case SMU_ARG_BOOST:    allowed = (a >= 3500 && a <= 5000); break;
+            /* CPU boost ceiling.
+             *
+             * The bc250_smu_oc community document warns explicitly that a CPU
+             * VID above 1.325V risks bricking the board, because the CPU and GPU
+             * share one cooler on this chassis. 5000 MHz was previously accepted
+             * here with nothing attesting that it is reachable; 4 GHz is the
+             * highest frequency anyone reports as stable with an explicit VID
+             * setting, so that is the ceiling until higher clocks are actually
+             * demonstrated rather than merely permitted. */
+            case SMU_ARG_BOOST:    allowed = (a >= 3500 && a <= 4000); break;
             case SMU_ARG_TEMP:     allowed = (a >= 30 && a <= 100); break;
             case SMU_ARG_BOOL:     allowed = (a == 0 || a == 1); break;
             case SMU_ARG_CORE_ID:  allowed = (a <= 7); break;
@@ -4514,7 +4523,19 @@ DreamV3DeviceControl(
             case SMU_ARG_SMN_ADDR: allowed = (a == AMDBC250_SAFE_SMN_ADDR_CORE_MASK); break;
             case SMU_ARG_ADDR32:    allowed = ((a & 0xFFF) == 0); break;  /* 4KB-aligned */
             case SMU_ARG_SRAM_ADDR: allowed = ((a & 3) == 0) && (a <= 0x000FFFFF); break; /* DWORD-aligned SMU SRAM */
-            case SMU_ARG_GFX_FREQ:  allowed = (a >= 350 && a <= 2500); break;  /* GPU MHz */
+            /* GPU frequency ceiling.
+             *
+             * The real PS5 APU, which this chip is cut down from, is documented
+             * running its GPU at 2230 MHz under a custom BIOS (PS5-Arch, with
+             * a CSICU-style mod), and ps5_control in the same project forces
+             * exactly that. So 2230 is a demonstrated silicon limit rather than
+             * a guess. The previous ceiling here was 2500 MHz, which nothing has
+             * ever reached: four shader arrays behind a mining cooler will drop
+             * into thermal throttle or trip the board's own protection long
+             * before the silicon gives up, and a user who is offered 2500 will
+             * find out which of those happens the expensive way.
+             * Lower end stays at the DPM idle floor. */
+            case SMU_ARG_GFX_FREQ:  allowed = (a >= 350 && a <= 2230); break;  /* GPU MHz */
             case SMU_ARG_GFX_VID:   allowed = (a <= 255); break;               /* GPU VID */
             case SMU_ARG_GFX_QUERY: allowed = (a == 0); break;                 /* query, arg=0 */
             case SMU_ARG_WGP_COUNT: allowed = (a <= AMDBC250_SMU_WGP_COUNT_MAX); break;

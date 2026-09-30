@@ -233,7 +233,7 @@ typedef struct _AMDBC250_IOCTL_SMU_CPU_MSG {
  *   0x50 scale_f_vid_curve      arg = signed 16-bit VID curve scale, -1000..+1000
  *                                (SMU field limit is +/-0x3FFF but that range can
  *                                push CPU VID past the 1.325V brick threshold)
- *   0x8F set_max_cpu_boost_clk  arg = MHz [3500..5000]
+ *   0x8F set_max_cpu_boost_clk  arg = MHz [3500..4000]
  *   0x8B set_cpu_max_temperature arg = temp C [30..100]
  *   0x8C set_gpu_max_temperature arg = temp C [30..100]
  *   0x9A disable_extra_cpu_gpu_voltage  arg = 1/0
