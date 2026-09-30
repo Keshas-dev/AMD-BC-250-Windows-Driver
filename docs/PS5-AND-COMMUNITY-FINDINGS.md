@@ -120,9 +120,85 @@ fully controlled — on a console that its own firmware trusts. It offers no
 technique for a host OS, because it never needed one. It did produce the 2230 MHz
 number and the eight-core-is-present framing, and those are what we used.
 
----
+## 7. The PS5 jailbreak route is circular — there is nothing to copy
 
-## Sources
+This was searched specifically for "which registers does a jailbroken PS5 touch,
+and where does it access them from", because it looked like the most promising
+remaining lead. It is not, and the reason is worth recording precisely.
+
+### How the PS5 GPU exploit actually works
+
+`mia/ps5-linux-loader` (`include/gpu.h`, `source/gpu.c`) is the clearest example.
+It does not touch a single GC power register. It:
+
+```c
+s_gpu.fd = open("/dev/gc", O_RDWR);
+gpu_walk_pt(vmid, rel_va, &page_size);          // walk GPU page tables
+kernel_setlong(s_gpu.victim_ptbe_va, new_ptbe);  // repoint one PTE
+gpu_submit_commands(s_gpu.fd, 0, 1, desc_va);    // PM4 DMA via /dev/gc
+```
+
+which yields `gpu_read_phys8()` / `gpu_write_phys8()` — **arbitrary physical
+memory read and write, including kernel memory.**
+
+### Why it does not transfer
+
+That capability requires four things. Three of them are exactly what this project
+does not have:
+
+| Requirement | Status |
+|---|---|
+| `/dev/gc` accepting PM4 submissions | We have the equivalent |
+| **Working WGPs so the DMA engine executes** | **This is the thing being sought** |
+| **Working GPU page tables / GART** | Blocked by the 0x1A class of crashes |
+| **Rewriting a PTE** | Needs kernel privilege |
+
+They can DMA arbitrary memory *because their GPU already runs*. We would need it
+to do it. The dependency runs in a circle.
+
+### The deeper reason: the PS5 has nothing to unlock
+
+Sony shipped the PS5 with all 36 CUs enabled. There is no harvest mask on the
+console to bypass, so no PS5 tool exists for lifting one. The BC-250's 24-of-40
+is a mining-board configuration choice — the CU mask was *turned off*, not locked
+by the vendor.
+
+This reframes the whole search: there is no "PS5 method" that could be ported,
+because nobody ever needed one. Sony's firmware already had the units enabled.
+
+The 8-core case is the same shape, and it is the honest parallel to our WGP
+effort: the PS5 has all 8 cores, a mask hides two, and lifting the mask is a
+single SMU write. Our board does have all 8 cores too, which is why
+`SMU[0x0115A870]` unlocks it. Both are policy masks over present silicon. The
+difference is that the CPU mask is reachable through the SMU, and the CU mask is
+not.
+
+### What the search did confirm about our own work
+
+The PS5 loader's DMA descriptor flags are bit-identical to what this driver
+independently derived:
+
+```c
+dma_hdr = (1u << 31)   /* cp_sync          */
+        | (2u << 25)   /* dst_cache_policy */
+        | (1u << 27)   /* dst_volatile     */
+        | (2u << 13)   /* src_cache_policy */
+        | (1u << 15);  /* src_volatile     */
+```
+
+Same header (`pm4_type3_header(DMA_DATA, 6)`) and same 16-byte command descriptor.
+See `inc/ps5_gpu_patterns.h` and `dma-move-verify`, which confirmed real byte
+movement on this board. The PM4 work is validated against a known-good
+implementation.
+
+### Summary
+
+Searching for "how a jailbroken PS5 unlocks things" returns nothing applicable,
+and now we know why rather than merely having failed to find it. The technique
+requires a working GPU; the goal is to make the GPU work; therefore the technique
+cannot be the answer. This is a closed question, not an unexplored one.
+
+---
 
 | Project | What it gave us |
 |---|---|

@@ -27,6 +27,15 @@ lets a user discover which of those happens, the expensive way.
 See `docs\PS5-AND-COMMUNITY-FINDINGS.md` for the full survey of what the PS5 and
 BC-250 community knows that applies here, and what does not.
 
+**The PS5 jailbreak route was searched and is closed.** Those exploits reach
+arbitrary physical memory by repointing a GPU page table entry and issuing PM4
+DMA through `/dev/gc`. That requires a working GPU, which is the thing this
+project is trying to achieve, so the dependency runs in a circle. More to the
+point, the PS5 has no harvest mask to begin with: Sony shipped all 36 CUs enabled,
+so no PS5 tool exists for lifting one. The BC-250's 24-of-40 is a mining-board
+configuration change, not a vendor lock. This is a closed question rather than an
+unexplored one.
+
 ---
 
 ## Session 2026-09-30: WGP unlock — a properly controlled negative
