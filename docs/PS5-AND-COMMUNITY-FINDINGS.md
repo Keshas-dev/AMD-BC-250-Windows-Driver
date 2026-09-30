@@ -156,22 +156,70 @@ does not have:
 They can DMA arbitrary memory *because their GPU already runs*. We would need it
 to do it. The dependency runs in a circle.
 
-### The deeper reason: the PS5 has nothing to unlock
+### The deeper reason: the technique cannot work for us
 
-Sony shipped the PS5 with all 36 CUs enabled. There is no harvest mask on the
-console to bypass, so no PS5 tool exists for lifting one. The BC-250's 24-of-40
-is a mining-board configuration choice — the CU mask was *turned off*, not locked
-by the vendor.
+The exploit repoints a GPU page table entry and issues PM4 DMA through `/dev/gc`,
+which yields arbitrary physical memory read and write. Three of the four things
+that requires are exactly what this project does not have:
 
-This reframes the whole search: there is no "PS5 method" that could be ported,
-because nobody ever needed one. Sony's firmware already had the units enabled.
+| Requirement | Status |
+|---|---|
+| `/dev/gc` accepting PM4 submissions | We have the equivalent |
+| **Working WGPs so the DMA engine executes** | **This is the thing being sought** |
+| **Working GPU page tables / GART** | Blocked by the 0x1A class of crashes |
+| **Rewriting a PTE** | Needs kernel privilege |
 
-The 8-core case is the same shape, and it is the honest parallel to our WGP
-effort: the PS5 has all 8 cores, a mask hides two, and lifting the mask is a
-single SMU write. Our board does have all 8 cores too, which is why
-`SMU[0x0115A870]` unlocks it. Both are policy masks over present silicon. The
-difference is that the CPU mask is reachable through the SMU, and the CU mask is
-not.
+They can DMA arbitrary memory *because their GPU already runs*. We would need it
+to do it. The dependency runs in a circle.
+
+### Correction: the PS5 *does* have harvested CUs
+
+An earlier draft of this document claimed the PS5 ships with all 36 CUs enabled
+and therefore has nothing to unlock. **That was wrong.** `mia/ps5-linux-patches`
+contains a ready-made unlock:
+
+```c
+static int ps5_cu_unlock = 3;   /* default: unlock all */
+MODULE_PARM_DESC(ps5_cu_unlock,
+    "PS5 harvested-CU unlock (0=off, 1=probe, 2=SE0/SH0, 3=all (default), 4=probe-all)");
+
+gfx_v10_0_select_se_sh(adev, ps5_se, ps5_sh, 0xffffffff, 0);
+WREG32_SOC15(GC, 0, mmSPI_PG_ENABLE_STATIC_WGP_MASK, 0x1f);
+```
+
+So the console has harvested CUs and people lift them routinely. The claim that
+had to go was the inference from "nothing to unlock" that no PS5 technique exists.
+
+### The PS5 and the BC-250 are the same chip
+
+This is the single most useful fact in this document. From the PS5 Linux image
+patches:
+
+> PS5 Oberon GPU (**CYAN_SKILLFISH**) takes its firmware from the linux-firmware
+> package's `amdgpu/cyan_skillfish_*.bin` set.
+
+> initialising kernel modesetting (**CYAN_SKILLFISH 0x1002:0x13FC**)
+
+`0x13FC` is the PS5 retail APU; `0x13FE` is the BC-250. Same chip family, same
+name, same firmware blobs — which this repository already ships in
+`output\firmware\cyan_skillfish2_*.bin`. Register offsets therefore match exactly,
+which is why every finding in this document transfers.
+
+### What this means for the WGP verdict
+
+The same `SPI_PG_ENABLE_STATIC_WGP_MASK = 0x1F` write that is silently dropped on
+this board is written routinely on a PS5 running Sony's own firmware. Two
+consequences:
+
+1. **Our implementation is correct.** The index encoding, the register offsets
+   and the write sequence all match a known-working implementation on identical
+   silicon. The earlier "maybe the bank index is wrong" hypothesis was not just
+   eliminated experimentally — it is eliminated by comparison against a working
+   reference on the same chip.
+2. **The block is environmental.** Sony firmware permits the write. This board
+   runs a modified BIOS, whose PSP/SOS image is the remaining variable. That
+   makes flashing the stock `BC250_3.00_CHIPSETMENU.ROM` a genuinely promising
+   experiment rather than a long shot.
 
 ### What the search did confirm about our own work
 
