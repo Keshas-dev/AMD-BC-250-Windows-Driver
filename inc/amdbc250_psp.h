@@ -61,6 +61,8 @@ NTSTATUS Amdbc250PspDirectSmuMsg(PVOID GpuBar5Va, ULONG Message, ULONG Argument,
     PULONG OutResponse, PULONG OutResponseStatus);
 NTSTATUS Amdbc250PspSmuQ3Msg(PVOID GpuBar5Va, ULONG Message, ULONG Argument,
     PULONG OutResponse, PULONG OutResponseStatus);
+NTSTATUS Amdbc250PspSmuQ2Msg(PVOID GpuBar5Va, ULONG Message, const ULONG *Args,
+    PULONG OutResponse, PULONG OutResponseStatus);
 NTSTATUS Amdbc250PspCoreUnlock(PVOID GpuBar5Va, PULONG OutCoreMaskBefore,
     PULONG OutCoreMaskAfter, PULONG OutResult);
 ULONG Amdbc250PspSmnRead(PVOID GpuBar5Va, ULONG SmnAddress);

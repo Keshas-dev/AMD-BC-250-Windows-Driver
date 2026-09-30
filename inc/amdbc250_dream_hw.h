@@ -780,7 +780,30 @@ typedef struct _DREAM_V3_DEVICE_EXTENSION *PDREAM_V3_DEVICE_EXTENSION;
 #define IT_SURFACE_SYNC                           0x43    /* Surface cache sync   */
 #define IT_WAIT_REG_MEM                           0x3C    /* Wait reg/mem value   */
 #define IT_WRITE_DATA                             0x37    /* Write data           */
+#define IT_DMA_DATA                               0x50    /* DMA data (mem->mem)  */
 #define IT_COPY_DATA                              0x40    /* Copy data            */
+
+/* PM4 IT_DMA_DATA (0x50) payload, GFX10. Byte-for-byte the layout the
+ * PS5 loader builds (ps5-linux-loader source/gpu.c pm4_build_dma_data,
+ * included as inc/ps5_gpu_patterns.h): the header may carry the
+ * SHADER_COMPUTE routing bit (bit 1), and the six payload DWORDs are
+ *   [0] DMA control flags   [1] src addr lo   [2] src addr hi
+ *   [3] dst addr lo         [4] dst addr hi   [5] byte count
+ * Flags are cp_sync(31) | dst_cache_policy(2<<25) | dst_volatile(1<<27) |
+ * src_cache_policy(2<<13) | src_volatile(1<<15); the count is 21-bit masked.
+ * The parser below accepts either routing bit, so a caller that leaves bit 1
+ * clear (plain PM4_TYPE3_HDR) decodes identically.
+ *
+ * These flags are REFERENCE constants: the software executor ignores the
+ * control word entirely, because its cache/segment policy is only meaningful
+ * to the hardware copy engine. */
+#define PM4_DMA_SHADER_COMPUTE_BIT                (1u << 1)
+#define PM4_DMA_CP_SYNC                           (1u << 31)
+#define PM4_DMA_DST_CACHE_POLICY                  (2u << 25)
+#define PM4_DMA_DST_VOLATILE                      (1u << 27)
+#define PM4_DMA_SRC_CACHE_POLICY                  (2u << 13)
+#define PM4_DMA_SRC_VOLATILE                      (1u << 15)
+#define PM4_DMA_LENGTH_MASK                       0x001FFFFFu
 #define IT_SET_CONFIG_REG                         0x68    /* Set config reg       */
 #define IT_SET_CONTEXT_REG                        0x69    /* Set context reg      */
 #define IT_SET_SH_REG                             0x76    /* Set SH register      */

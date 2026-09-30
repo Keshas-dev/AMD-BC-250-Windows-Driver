@@ -453,6 +453,18 @@ typedef struct _DREAM_V3_DEVICE_EXTENSION {
     BOOLEAN             PspAlive;            /* SOS detected alive */
     BOOLEAN             NbioUnlocked;        /* NBIO firewall bypassed */
 
+    /* SMU secure-access unlock (bc250-smu-unlock chain, BIOS 3 / PMFW 88.6.0).
+       SmuUnlockState tracks how far the staged procedure has progressed so a
+       reboot-equivalent recovery is a single state reset:
+         0 = untouched, 1 = ring hijacked, 2 = fake table staged,
+         3 = gate cleared (secure access live), 4 = verified.
+       All of the underlying state lives in volatile SMU SRAM, so clearing
+       SmuUnlockState is always safe - the SMU re-derives it at boot. */
+    ULONG               SmuUnlockState;
+    PVOID               SmuUnlockVa;         /* 4KB DMA page staged with the
+                                               fake transfer table, or NULL */
+    PHYSICAL_ADDRESS    SmuUnlockPa;
+
     /* PSP KM (GPCOM) ring - created via Linux psp_v11_0_8_ring_create protocol.
        Correct MP0 C2PMSG block is at BAR5 byte base 0x58000 (ip_discovery
        MP0 base 0x16000 is in DWORD units). */
@@ -509,8 +521,25 @@ DreamV3HwShutdown(
     _In_ PDREAM_V3_DEVICE_EXTENSION DevExt
     );
 
+/* Persistent step-marker for the fence step. Named because the bare number 40
+ * reads as a nonexistent "step 40" in a TDR dump; it encodes 4b. Shared by both
+ * init paths (hw_init.c and hw_init_extended.c), hence the header. */
+#define AMDBC250_HWINIT_STEP_FENCE 40
+
 NTSTATUS
 DreamV3HwInitGfxRing(
+    _In_ PDREAM_V3_DEVICE_EXTENSION DevExt
+    );
+
+/* Allocates the 64-bit global fence page. Called from BOTH init paths (step 4b
+ * in hw_init.c, step 0b in hw_init_extended.c - the latter is the default). It
+ * is pure host memory with no MMIO write, and must precede every step that
+ * touches GRBM_GFX_INDEX: the GFX ring step cannot be relied on to leave a fence
+ * behind, because on BC-250 its ring base is host-read-only and it frees what it
+ * allocated. The fence is the only window the PM4 IT_DMA_DATA operand resolver
+ * accepts, so without it that path has nothing to resolve against. */
+NTSTATUS
+DreamV3HwInitFence(
     _In_ PDREAM_V3_DEVICE_EXTENSION DevExt
     );
 

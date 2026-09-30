@@ -6,7 +6,98 @@ GPU driver for AMD BC-250 (Cyan Skillfish) on Windows 11 26100. WDM IOCTL driver
 
 **Goal:** fully working GPU driver for BC-250 on Windows.
 
-**Current build:** `4.3.0.11` (2026-09-23) — **INIT_HARDWARE deadlock fixed + full test suite PASS**.
+**Current build:** `4.3.0.16` (2026-09-30) — SMU Q2 mailbox + staged secure-access diagnostics + verified WGP negative result.
+
+---
+
+## Session 2026-09-30: WGP unlock — a properly controlled negative
+
+This is the most important section in the file, because it replaces two years of
+"the WGP gate is locked" verdicts that were never actually tested. Read it before
+repeating any of this work.
+
+### What was actually established
+
+| Fact | Evidence |
+|---|---|
+| This board is **BIOS 3.00**, PMFW/SMU **88.6.0** (Xtensa) | Q0 `0x02` returns `0x00580600`; `smu_fw_robin_1` in the community repo is byte-identical in version |
+| The SMU **Q2 mailbox works** through BAR5/NBIO | `probe 0x7B20` returned four distinct real values, not zeros |
+| The SMU **secure-access gate is already open at boot** | `SMU[0x7B3C] == 0` via a real read. The `bc250-smu-unlock` ring-corruption chain was therefore **not needed** |
+| **Arbitrary secure SMN read works** (Q3 `0x2A`) | `SMN[0x0115A870] = 0x000000FF` = 8 cores, matching the BIOS core unlock |
+| **MMIO read and write both work** | Positive control: `SCRATCH[0x32D4] = 0x4D585042` and `GRBM_GFX_INDEX` echoes what was written, on the same BAR5 |
+| **`SPI_PG_ENABLE_STATIC_WGP_MASK` rejects host writes** | The WGP init step executed for the first time ever, wrote `0x1F` to all four banks plus broadcast, and every readback was still `0` |
+
+### The WGP step had never actually run
+
+`HwInitMaxStep=1` — the safe cap this machine has run under for months — stopped
+the init sequence *before* the WGP step. Every "SPI_PG is locked" reading in the
+history was taken with that step disabled. The non-extended `Step 12b` in
+`amdbc250_dream_hw_init.c` is dead code on this configuration: `HwInitExtended=1`
+(the default) dispatches to `DreamV3HwInitializeExtended` in
+`amdbc250_dream_hw_init_extended.c`, which contains the real WGP step at its own
+number 12.
+
+`enable-wgp-test.bat` sets `HwInitMaxStep=12`, which runs steps 0b, 1, 2, 3, 4, 9,
+10, 6 and 12, then stops before 13 (RLC), 7/8 (rings) and 11 (display). That
+isolation matters: it reaches the WGP step while avoiding every step historically
+associated with 0x1A `MEMORY_MANAGEMENT` crashes and black screens.
+
+Result: `Step_HwInit = 0xC`, `full-init-test.exe` returned SUCCESS with no TDR and
+no black screen, and `SPI_PG` still read `0`.
+
+### Hypotheses that were tested and eliminated
+
+| Hypothesis | Verdict |
+|---|---|
+| Wrong `GRBM_GFX_INDEX` bank encoding | Eliminated. Nine encodings tried, including the Linux form with `INSTANCE_BROADCAST_WRITES` (bit 24). All read `0` |
+| MMIO writes do not land | Eliminated by positive control |
+| The WGP step had never executed | Was true until 2026-09-30; now proven to have run |
+| `RequestActiveWgp` (Q0 `0x18`) is the path | No. Accepted (`0x01 OK`) but the active count stays `0`. Cyan Skillfish does not implement that message — it is a Van Gogh leftover. Harvested CUs are not power gated either: `RLC_PG_CNTL = 0` |
+| A GC register exists in SMN space | Eliminated. `SMN[0x02405ED4]` (the SCRATCH beacon slot) reads `0` with status `OK` |
+| Feature 6 gates WGP requests | Feature 6 is **already set** (`features = 0xDD602C7D`). It was never the blocker |
+
+### The remaining lead: this board runs a modified BIOS
+
+```
+BC250_3.00_MeiMeiDXEv3.ROM   SHA256 3D982841…   <- installed, modified
+BC250_3.00_M.ROM             SHA256 3D982841…   <- identical to the above
+BC250_3.00_CHIPSETMENU.ROM   SHA256 48FBE5D3…   <- stock, different
+```
+
+The community's 40 CU unlock performs the same MMIO write from Linux amdgpu and it
+works there, so the block is not purely electrical — something about the
+environment differs. A modified BIOS carries a different PSP/SOS image and
+therefore a different data-fabric ACL. That is the one concrete hypothesis left,
+and it is testable by flashing the stock image.
+
+### ⛔ Hard safety rule learned the expensive way
+
+**Never read the SMU's own mailbox block (`SMN 0x03B1xxxx`) through Q3 `0x2A`.**
+`0x03B10A08` is C2PMSG_66 itself. Reading it is self-referential and hung the SMU:
+Q0, Q2 and every Q3 message stopped answering, `probe` returned `gle=31`, and
+recovery required an **AC power cycle**. A soft restart did not recover it and left
+a black screen. Use Q2 `0x0A` for SRAM access instead — it never failed once.
+
+### New tooling
+
+`test-tools\smu-unlock-staged.c` → `output\smu-unlock-staged.exe`:
+
+| Command | Purpose |
+|---|---|
+| `probe [addr]` | Read-only. SMU version, gate byte, and four dwords of SMU SRAM |
+| `verify` | Read-only. Gate state plus one secure-SMN probe |
+| `fstatus` | Read-only. Feature mask and active WGP count |
+| `wgp <0..18>` | Sets the active compute-unit count via Q0 `0x18` |
+| `feature6 on\|off` | Sets or clears SMU feature bit 6 (only that bit is reachable) |
+| `bankprobe` | Writes only `0x00`/`0x07` to SPI_PG under nine index encodings, with a positive control. Never writes `0x1F` |
+| `sramdiff [n]` | Snapshots SRAM before and after a WGP request and reports what moved |
+| `smnread` / `secprobe` | Secure SMN read. **Avoid `0x03B1xxxx`** |
+| `selftest` | Confirms the whitelist refuses the dangerous messages |
+
+The whitelist admits only six messages: Q2 `0x05`/`0x06` (feature bit 6 only),
+Q2 `0x0A` (address pinned to the driver's own staging page), Q3 `0x22` (only when
+unlocked) and Q3 `0x2A` (only when unlocked). The secure SMN **write** pair
+`0x2B`/`0x2C` is deliberately not whitelisted.
 
 ---
 
@@ -120,14 +211,15 @@ Install order: **GPU first**, then PSP. Full notes: `AGENTS.md` "PSP ↔ GPU coe
 
 | Feature | Blocker |
 |---------|---------|
-| **3D graphics** | WGP/SPI_PG SOS-locked (SPI_PG=0). **Not hardware-fused** — Linux amdgpu runs shaders. |
-| **WGP unlock on Windows** | SPI_PG_ENABLE_STATIC_WGP_MASK SOS-locked from host BAR5 |
+| **3D graphics** | WGP/SPI_PG locked against host BAR5. **Not hardware-fused** — Linux amdgpu runs shaders. |
+| **WGP unlock on Windows** | **Tested properly 2026-09-30.** The WGP init step was finally executed (it had never run before, because `HwInitMaxStep=1` stopped short of it) and `SPI_PG` still read `0`. MMIO read/write proven working by positive control. See the top section. |
 | **WGP unlock via EFI** | **CONFIRMED BLOCKED** (2026-09-15) — NBIO locked at EFI boot on this unit. `third-party/EFI_Boot/WGP_unlock.nsh` does not work here. |
 | **WGP unlock via Linux** | Works via debugfs/kernel context — not replicable on Windows WDM |
+| **Remaining WGP lead** | This board runs a **modified** BIOS (`MeiMeiDXEv3`). A stock image is on disk. The ACL may come from the mod rather than the silicon. |
 | **SDMA** | Ring not initialized, firmware broken (stock v0x34). navi12_sdma.bin works on Linux. |
 | **Compute rings** | KIQ_SIZE=0 (read-only), ring BASE registers SOS-locked |
 
-### Test Results (2026-09-15 + re-run 2026-09-23)
+### Test Results (2026-09-15 + re-run 2026-09-23 + 2026-09-30)
 
 ```
 smu-all-msgs-test.exe     ✅  16/16 PASS, 0 wedge (re-run 2026-09-23)
@@ -136,8 +228,12 @@ smu-cpu-msg-test.exe      ✅  8 cores @ 3500MHz (re-run 2026-09-23: 1212mV, all
 smu-stress-test.exe       ✅  50 iterations, 0 failures
 psp-ring-submit-test.exe  ✅  RING_INIT + GET_FW_ATTESTATION SUCCESS (re-run 2026-09-23)
 gpu-init-explicit.exe     ✅  NBIO_MAP INIT OK, no deadlock (2026-09-23)
-full-init-test.exe        ✅  Flags=0 SUCCESS, no TDR (2026-09-23)
+full-init-test.exe        ✅  Flags=0 SUCCESS, no TDR (2026-09-30, WGP step cap 12)
 vulkaninfoSDK.exe         ✅  vendor 0x1002, device 0x13fe, discrete GPU
+
+smu-unlock-staged selftest ✅  6/6 dangerous messages refused by the whitelist
+smu-unlock-staged probe    ✅  SMU 0x00580600, gate 0x7B3C=0, Q2 0x0A reads SRAM
+smu-unlock-staged bankprobe✅  MMIO read/write proven; SPI_PG=0 under 9 encodings
 ```
 
 ---

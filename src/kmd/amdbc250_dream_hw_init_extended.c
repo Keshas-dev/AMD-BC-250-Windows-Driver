@@ -18,6 +18,7 @@ extern NTSTATUS DreamV3HwInitSdmaRing(_In_ PDREAM_V3_DEVICE_EXTENSION DevExt);
 extern NTSTATUS DreamV3InitRlc(_In_ PDREAM_V3_DEVICE_EXTENSION DevExt);
 extern VOID DreamV3MarkHwInitStep(_In_ ULONG Step);
 extern NTSTATUS DreamV3ProgramGoldenSettings(_In_ PDREAM_V3_DEVICE_EXTENSION DevExt);
+extern NTSTATUS DreamV3HwInitFence(_In_ PDREAM_V3_DEVICE_EXTENSION DevExt);
 NTSTATUS Amdbc250PspRingCreate(PVOID G, ULONG T, ULONG L, ULONG H, ULONG S); // psp.c
 
 static ULONG DreamV3ReadMaxStepExt(void){
@@ -56,6 +57,21 @@ NTSTATUS DreamV3HwInitializeExtended(_In_ PDREAM_V3_DEVICE_EXTENSION DevExt){
     // Step 0: soc15_common doorbell/cg_flags emulation (log only, no reg write that hangs)
     DreamV3MarkHwInitStep(0);
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL, "AMDBC250: [EXT 0/13] soc15_common (cg_flags=0 pg_flags=0, DF primary)\n"));
+
+    // Step 0b: global fence page. FIRST, ahead of every step that writes
+    // GRBM_GFX_INDEX, because it is pure host memory (one contiguous page,
+    // zeroed) with no MMIO write at all. Two reasons it lives here and not in
+    // the ring step it was extracted from: the GFX ring base is host-read-only
+    // on BC-250, so the ring step frees what it allocated and leaves no fence;
+    // and the fence is the only driver-owned window the PM4 IT_DMA_DATA operand
+    // resolver accepts, so it has to exist for that path to be testable.
+    // Reachable with HwInitMaxStep=1, i.e. without crossing any hazard step.
+    if(MaxStep && 1>MaxStep) return STATUS_SUCCESS;
+    DreamV3MarkHwInitStep(AMDBC250_HWINIT_STEP_FENCE);
+    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL, "AMDBC250: [EXT 0b] global fence\n"));
+    Status = DreamV3HwInitFence(DevExt);
+    if(!NT_SUCCESS(Status)) KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL, "AMDBC250: [EXT 0b] fence failed 0x%08X (continue)\n", Status));
+    else KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL, "AMDBC250: [EXT 0b] fence OK\n"));
 
     // Step 1-2: GMC early — GART + VM hub BEFORE PSP (linux gmc_v10_0 hw_init 962 + gfxhub gart_enable 345)
     // Previous Windows did PSP before GART (inverted) — fix here.

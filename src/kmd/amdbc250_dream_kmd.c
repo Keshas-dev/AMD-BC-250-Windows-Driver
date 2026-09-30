@@ -1053,6 +1053,16 @@ DreamV3DdiRemoveDevice(
                "AMDBC250-DREAM-V4.3: DxgkDdiRemoveDevice called\n"));
 
     if (DevExt != NULL) {
+        /* A failed StartDevice is followed by RemoveDevice, never StopDevice, so
+         * this is the only place that can reclaim what init already allocated
+         * (fence page, IH ring, GFX ring). Without it, an init that failed after
+         * allocating them leaks the pages AND leaves GlobalFence dangling for a
+         * later IOCTL to find. StopDevice clears HardwareInitialized, so the
+         * flag is the "StopDevice has not run yet" test. */
+        if (DevExt->HardwareInitialized) {
+            DreamV3HwShutdown(DevExt);
+            DevExt->HardwareInitialized = FALSE;
+        }
         KeSetEvent(&DevExt->DeviceRemoved, 0, FALSE);
         ExFreePoolWithTag(DevExt, DREAM_V3_TAG_DEVICE);
         g_PciDevExt = NULL;
@@ -1614,6 +1624,13 @@ DreamV3WritePm4Type0(
 
     if (Ring == NULL) return;
 
+    /* A packet larger than the whole ring can never be placed: without this
+     * the wrap branch below lands WPtr at 0 and the writes below run off the
+     * end of the mapping (kernel-memory corruption, not a PM4 error). */
+    if (TotalSize > (ULONG)DevExt->GfxRing.SizeInBytes) {
+        return;
+    }
+
     /* CRITICAL: Check ring buffer bounds to prevent kernel memory corruption */
     if (WPtr + TotalSize > (ULONG)DevExt->GfxRing.SizeInBytes) {
         /* Ring buffer wrap - write NOP packet and reset pointer */
@@ -1658,6 +1675,12 @@ DreamV3WritePm4Type3(
     ULONG TotalSize = sizeof(ULONG) + (Count * sizeof(ULONG));
 
     if (Ring == NULL) return;
+
+    /* See DreamV3WritePm4Type0: a packet bigger than the ring cannot be placed
+     * anywhere, so reject it instead of overrunning the mapping after a wrap. */
+    if (TotalSize > (ULONG)DevExt->GfxRing.SizeInBytes) {
+        return;
+    }
 
     /* CRITICAL: Check ring buffer bounds to prevent kernel memory corruption */
     if (WPtr + TotalSize > (ULONG)DevExt->GfxRing.SizeInBytes) {
@@ -1775,6 +1798,87 @@ DreamV3SwRegRangeValid(
         return FALSE;
     end = (ULONG64)Offset + (ULONG64)DwordCount * 4;
     return end <= DevExt->MmioSize;
+}
+
+/* Cap on one software-executed DMA_DATA move. The PS5 loader usleeps 100 ms
+ * per move of the same magnitude; a ring buffer tops out far below this, so the
+ * cap only rejects a malformed length field before it reaches RtlCopyMemory. */
+#define AMDBC250_SW_PM4_DMA_MAX_BYTES (1u << 20)
+
+/* One already-mapped, driver-owned window: physical base, kernel VA, length.
+ * A flat table rather than an array of ring pointers, because IhRing is
+ * DREAM_V3_IH_RING, not DREAM_V3_RING_BUFFER: the three fields read below
+ * happen to sit at identical offsets today, so casting the pointer would
+ * compile with a C4133 warning and work by accident — silently wrong the day
+ * either struct is reordered. */
+typedef struct _DREAM_V3_DMA_WINDOW {
+    PHYSICAL_ADDRESS    PhysicalAddress;
+    PVOID               VirtualAddress;
+    SIZE_T              SizeInBytes;
+} DREAM_V3_DMA_WINDOW, *PDREAM_V3_DMA_WINDOW;
+
+/* Resolve one PM4 DMA_DATA operand (src or dst) to a host pointer, but only
+ * when the ENTIRE range lies inside memory this driver already owns and has
+ * mapped: a ring buffer (GfxRing / SdmaRing / IhRing) or the global fence page.
+ * Returns NULL for everything else.
+ *
+ * Rejection is the honest answer for GPU addresses: BC-250 has no GART/VM the
+ * host can dereference, so a DMA operand naming a GPU VA cannot be serviced on
+ * the CPU. Mapping an arbitrary physical address on behalf of a userspace-fed
+ * PM4 stream would be an arbitrary kernel read/write primitive, so it is never
+ * done here.
+ *
+ * ComputeRing is deliberately absent: nothing in the repo ever allocates it
+ * (grep confirms only the declaration), so it is permanently NULL/0 and could
+ * only ever be a dead entry. */
+static PVOID
+DreamV3SwDmaRangeResolve(
+    _In_ PDREAM_V3_DEVICE_EXTENSION DevExt,
+    _In_ ULONG64 Address,
+    _In_ ULONG64 Length
+    )
+{
+    DREAM_V3_DMA_WINDOW windows[4];
+    ULONG i;
+
+    if (Length == 0 || Length > AMDBC250_SW_PM4_DMA_MAX_BYTES) {
+        return NULL;
+    }
+
+    windows[0].PhysicalAddress = DevExt->GfxRing.PhysicalAddress;
+    windows[0].VirtualAddress   = DevExt->GfxRing.VirtualAddress;
+    windows[0].SizeInBytes      = DevExt->GfxRing.SizeInBytes;
+    windows[1].PhysicalAddress = DevExt->SdmaRing.PhysicalAddress;
+    windows[1].VirtualAddress   = DevExt->SdmaRing.VirtualAddress;
+    windows[1].SizeInBytes      = DevExt->SdmaRing.SizeInBytes;
+    windows[2].PhysicalAddress = DevExt->IhRing.PhysicalAddress;
+    windows[2].VirtualAddress   = DevExt->IhRing.VirtualAddress;
+    windows[2].SizeInBytes      = DevExt->IhRing.SizeInBytes;
+    windows[3].PhysicalAddress = DevExt->GlobalFence.PhysicalAddress;
+    windows[3].VirtualAddress   = (PVOID)DevExt->GlobalFence.VirtualAddress;
+    windows[3].SizeInBytes      = PAGE_SIZE;  /* allocated as exactly one page */
+
+    for (i = 0; i < RTL_NUMBER_OF(windows); i++) {
+        PDREAM_V3_DMA_WINDOW win = &windows[i];
+        ULONG64 base = win->PhysicalAddress.QuadPart;
+        ULONG64 limit;
+
+        if (win->VirtualAddress == NULL || win->SizeInBytes == 0 || base == 0) {
+            continue;
+        }
+        /* Operands name PHYSICAL addresses; map the physical window back to the
+         * already-mapped VA by the window's own physical base. The
+         * `Address < limit` conjunct is what makes the (Address + Length) sum
+         * overflow-safe: reaching it proves Address sits below a driver-owned
+         * bound, so the ULONG64 addition cannot wrap. */
+        limit = base + (ULONG64)win->SizeInBytes;
+        if (Address >= base && Address < limit &&
+            (Address + Length) <= limit) {
+            return (PUCHAR)win->VirtualAddress + (Address - base);
+        }
+    }
+
+    return NULL;
 }
 
 static NTSTATUS
@@ -1953,6 +2057,70 @@ DreamV3SwPm4Process(
                     /* Restore broadcast */
                     DreamV3WriteRegister(DevExt, DevExt->GrbmGfxIndexOffset,
                         AMDBC250_GRBM_GFX_INDEX_BROADCAST_VAL);
+                }
+                i += count;
+                break;
+            }
+
+            case IT_DMA_DATA: {
+                /* PM4 IT_DMA_DATA (0x50) — 6 payload DWORDs:
+                 *   [0] control flags, [1] src addr lo, [2] src addr hi,
+                 *   [3] dst addr lo, [4] dst addr hi, [5] byte count.
+                 * Layout copied verbatim from the PS5 loader's
+                 * pm4_build_dma_data (inc/ps5_gpu_patterns.h). */
+                if (count < 6) {
+                    /* Short packet: skip it like IT_WRITE_DATA does, rather
+                     * than voiding the whole submission on one bad packet. */
+                    i += count;
+                    break;
+                }
+                {
+                    ULONG64 srcPa = (ULONG64)Commands[i + 1] |
+                                    ((ULONG64)Commands[i + 2] << 32);
+                    ULONG64 dstPa = (ULONG64)Commands[i + 3] |
+                                    ((ULONG64)Commands[i + 4] << 32);
+                    /* The 21-bit mask applies to the LENGTH field (below), not
+                     * to this payload count. */
+                    ULONG64 bytes = (ULONG64)(Commands[i + 5] & PM4_DMA_LENGTH_MASK);
+                    PVOID src;
+                    PVOID dst;
+
+                    if (bytes == 0) {
+                        i += count;
+                        break; /* legal no-op */
+                    }
+
+                    /* The control word (Commands[i + 0]) carries cache and
+                     * segment policy that only means something to the hardware
+                     * copy engine, so it is intentionally ignored here. Both
+                     * operands must name PHYSICAL addresses inside a
+                     * driver-owned window; anything else is consumed and
+                     * dropped. See DreamV3SwDmaRangeResolve. */
+                    src = DreamV3SwDmaRangeResolve(DevExt, srcPa, bytes);
+                    if (src == NULL) {
+                        i += count;
+                        break; /* not ours: consume, do not fault */
+                    }
+                    dst = DreamV3SwDmaRangeResolve(DevExt, dstPa, bytes);
+                    if (dst == NULL) {
+                        i += count;
+                        break;
+                    }
+
+                    /* Real DMA hardware resolves overlapping src/dst; the CPU
+                     * copy does not, and RtlCopyMemory on overlap is undefined.
+                     * Bounded by the window checks above, so the worst outcome
+                     * of mishandling it would be a mangled ring, not a memory
+                     * fault — but it is a behavioural difference from the GPU,
+                     * so reject it explicitly rather than corrupt silently. */
+                    if ((PUCHAR)dst < (PUCHAR)src + bytes &&
+                        (PUCHAR)src < (PUCHAR)dst + bytes) {
+                        i += count;
+                        break; /* overlapping move: not serviceable on the CPU */
+                    }
+
+                    RtlCopyMemory(dst, src, (SIZE_T)bytes);
+                    KeMemoryBarrier();
                 }
                 i += count;
                 break;
@@ -3049,6 +3217,171 @@ DreamV3CmosDecode(
     cm->UmaSizeMb = (UINT16)(Raw[0x1A] | (Raw[0x1B] << 8));
 }
 
+/* ============================================================================
+ * SMU secure-access unlock helpers.
+ *
+ * The chain is a port of bc250-smu-unlock (BIOS 3 only, so PMFW 88.6.0
+ * offsets apply to this board unchanged). Every routine below operates purely
+ * on SMU-LOCAL SRAM plus a 4KB host DMA page; nothing here touches flash,
+ * CMOS, the SPI flash or any host-visible register window.
+ *
+ * STAGING IS DELIBERATE. No helper runs a partial chain: the caller drives
+ * one stage per IOCTL and verifies it, so an unexpected result can be
+ * abandoned at a stage boundary. A normal reboot restores the SMU regardless,
+ * because every byte this code writes lives in volatile SMU SRAM.
+ * ============================================================================
+ */
+
+/* Allocate the 4KB staging page the transfer engine moves data through.
+   MmNonCached matches every other device-visible allocation in this driver
+   (firmware staging, KIQ ring, GART, page tables) and is the correct type for
+   memory an external DMA engine both reads and writes: no cache maintenance is
+   needed and there is no window where the CPU and the SMU disagree about the
+   contents. A cached page would require an explicit flush on every transfer in
+   both directions, and getting the flush direction or ordering wrong silently
+   returns stale bytes rather than failing. */
+static
+NTSTATUS
+SmuUnlockEnsurePage(
+    _Inout_ PDREAM_V3_DEVICE_EXTENSION DevExt
+    )
+{
+    PHYSICAL_ADDRESS low, high, skip;
+    SIZE_T size = 0x1000;
+
+    if (DevExt->SmuUnlockVa) return STATUS_SUCCESS;
+
+    low.QuadPart = 0;
+    /* Pin the allocation below 4GiB. The Q2 mailbox transmits the page address
+       as a 32-bit value, so a page above 4GiB could never be named and the
+       whitelist could not distinguish it from the driver's own page. */
+    high.QuadPart = 0xFFFFFFFFULL;
+    skip.QuadPart = 0;
+
+    DevExt->SmuUnlockVa = MmAllocateContiguousMemorySpecifyCache(
+        size, low, high, skip, MmNonCached);
+    if (!DevExt->SmuUnlockVa) {
+        return STATUS_INSUFFICIENT_RESOURCES;
+    }
+    RtlZeroMemory(DevExt->SmuUnlockVa, size);
+    DevExt->SmuUnlockPa = MmGetPhysicalAddress(DevExt->SmuUnlockVa);
+    return STATUS_SUCCESS;
+}
+
+/* DMA `Words` dwords between SMU SRAM and the staged DMA page.
+   PagePa = page physical address, PageVa = page virtual address (kernel VA).
+   Dir: ToSram = TRUE  -> page -> SMU (write)
+               FALSE -> SMU -> page (read) */
+static
+NTSTATUS
+SmuUnlockDma(
+    _In_ PVOID Mmio,
+    _In_ PHYSICAL_ADDRESS PagePa,
+    _Inout_opt_ PVOID PageVa,
+    _In_ ULONG SramOffset,
+    _In_ ULONG Words,
+    _In_ BOOLEAN ToSram,
+    _Out_ PULONG OutStatus
+    )
+{
+    NTSTATUS s;
+    ULONG args[AMDBC250_SMU_MAX_ARGS];
+    ULONG resp = 0, st = 0;
+
+    /* One request, and the whole range must sit inside the SRAM window -
+     * checking only the start offset lets the final word fall past the end. */
+    if (Words == 0 || Words > 18) return STATUS_INVALID_PARAMETER;
+    if ((SramOffset & 3u) != 0) return STATUS_INVALID_PARAMETER;
+    if ((ULONG64)SramOffset + (ULONG64)Words * 4ull > (ULONG64)AMDBC250_SMU_SRAM_LIMIT) {
+        return STATUS_INVALID_PARAMETER;
+    }
+    if (!ToSram && !PageVa) return STATUS_INVALID_PARAMETER;
+    if (PagePa.QuadPart == 0 || (PagePa.QuadPart & 0xFFFull) != 0) {
+        return STATUS_INVALID_PARAMETER;
+    }
+
+    /*
+     * Q2 0x0A operand layout, per the reference implementation
+     * (bc250_smu/api_q2.py transfer_engine_*):
+     *
+     *   sram_load : [0x1F, 0, src,   words]
+     *   smu2dram  : [0x14, 0, dram_lo, words, 0, 0]
+     *   dram2smu  : [0x23, 0, dram_lo, words, 0, key]
+     *
+     * i.e. arg1 is the address high word (always 0 for us), arg2 carries the
+     * SRAM offset or the low 32 bits of the page address, and arg3 is the
+     * dword count. The 64-bit address is passed as high+low, not as one
+     * 64-bit word.
+     */
+    RtlZeroMemory(args, sizeof(args));
+
+    /* sub 0x1F: CPU copy SRAM[off .. off+Words) into the staging entry. */
+    args[0] = AMDBC250_SMU_Q2_SUB_SRAM_LOAD;
+    args[1] = 0;
+    args[2] = SramOffset;
+    args[3] = Words;
+    s = Amdbc250PspSmuQ2Msg(Mmio, AMDBC250_SMU_Q2_XFER, args, &resp, &st);
+    if (!NT_SUCCESS(s)) { if (OutStatus) *OutStatus = st; return s; }
+
+    /* sub 0x14: staging entry -> DRAM[page].  sub 0x23: DRAM[page] -> entry. */
+    RtlZeroMemory(args, sizeof(args));
+    args[0] = ToSram ? AMDBC250_SMU_Q2_SUB_DRAM2SMU
+                     : AMDBC250_SMU_Q2_SUB_SMU2DRAM;
+    args[1] = (ULONG)(PagePa.QuadPart >> 32);      /* high word, 0 today */
+    args[2] = (ULONG)(PagePa.QuadPart & 0xFFFFFFFFu); /* low word */
+    args[3] = Words;
+    s = Amdbc250PspSmuQ2Msg(Mmio, AMDBC250_SMU_Q2_XFER, args, &resp, &st);
+    if (OutStatus) *OutStatus = st;
+
+    /* No cache maintenance: the page is non-cached, so the SMU's DMA and the
+       CPU see the same bytes with no flush to get wrong in either direction. */
+    return s;
+}
+
+/* Read `Words` dwords from SMU-local SRAM into PageVa. */
+static
+NTSTATUS
+SmuUnlockSramRead(
+    _In_ PVOID Mmio,
+    _In_ PHYSICAL_ADDRESS PagePa,
+    _Inout_ PVOID PageVa,
+    _In_ ULONG SramOffset,
+    _In_ ULONG Words,
+    _Out_ PULONG OutStatus
+    )
+{
+    return SmuUnlockDma(Mmio, PagePa, PageVa, SramOffset, Words, FALSE, OutStatus);
+}
+
+
+/* NOTE ON WHERE THE EXPLOIT CHAIN LIVES
+ *
+ * The multi-stage hijack (ring overflow -> fake transfer table -> clear the
+ * secure-access gate byte) is deliberately NOT implemented in this driver.
+ *
+ * It is a memory-corruption chain whose success depends on reproducing the SMU
+ * ring's internal counter layout and subqueue command-type encoding exactly.
+ * A transcription error there does not fail cleanly - it corrupts SMU ring
+ * state, which is the "SMU wedged, needs an AC power cycle" outcome this work
+ * is trying to reach safely. Getting that wrong from memory is a worse risk
+ * than not shipping the sequence at all.
+ *
+ * Instead the kernel exposes two narrow things and nothing more:
+ *   - IOCTL_AMDBC250_SMU_MSG_ARGS: a whitelisted 6-argument Q2/Q3 passthrough.
+ *     Q2 0x23 passes all four ring-entry words through verbatim and Q2 0x0A
+ *     passes the transfer-engine operands through, with per-sub-op validation.
+ *   - IOCTL_AMDBC250_SMU_UNLOCK_STEP: the two read-only stages, PROBE and
+ *     VERIFY, which are safe to run at any time.
+ *
+ * The sequencing lives in the user-mode tool (smu-unlock-staged) as one
+ * runnable step per subcommand, transcribed stage by stage from the reference
+ * implementation so it can be reviewed line by line and abandoned between
+ * steps. Keeping the destructive part out of the kernel also keeps this
+ * driver's attack surface small, which matters because the control device
+ * object is created without a DACL.
+ */
+
+
 NTSTATUS
 DreamV3DeviceControl(
     _In_ PDEVICE_OBJECT DeviceObject,
@@ -4089,6 +4422,7 @@ DreamV3DeviceControl(
             SMU_ARG_GFX_FREQ,    /* 350..2500 MHz (GPU force freq) */
             SMU_ARG_GFX_VID,     /* 0..255 (GPU VID, 96=950mV) */
             SMU_ARG_GFX_QUERY,   /* GPU query (arg must be 0) */
+            SMU_ARG_WGP_COUNT,   /* active compute-unit count, 0..18 */
         } SMU_CPU_ARG_TYPE;
         typedef struct _SMU_CPU_MSG_DESC {
             ULONG Queue;
@@ -4115,7 +4449,18 @@ DreamV3DeviceControl(
             { 3, AMDBC250_SMU_Q3_ENABLE_FEATURES,       SMU_ARG_MASK32 },
             /* Q3: ungated SMN write (only known-safe addresses) */
             { 3, AMDBC250_SMU_Q3_UNGATED_SMN_WRITE,     SMU_ARG_SMN_ADDR },
-            /* Q3: SMU SRAM write pointer + data (DWORD-aligned, lower SRAM only) */
+            /* Q3: SMU SRAM write pointer + data.
+               SEC_SET_WRITE_PTR is restricted to DWORD-aligned SRAM offsets, but
+               SEC_WRITE_THROUGH writes to whatever address 0x28 last pointed at.
+               The reference marks both of these as gated, and the gate is what
+               this chain exists to clear - so this pair must NOT be widened
+               here. Typing SEC_WRITE_THROUGH as SMU_ARG_U32 (any 32-bit value)
+               combined with SEC_SET_WRITE_PTR's range would let any caller of
+               this IOCTL point at the debug-disable byte and zero it, which is
+               the entire unlock, reachable without the staged procedure.
+               SMU_ARG_NONE keeps the data word at 0, which still exercises the
+               pointer path without becoming a general store. SRAM writes belong
+               behind the staged IOCTL. */
             { 3, AMDBC250_SMU_Q3_SEC_SET_WRITE_PTR,     SMU_ARG_SRAM_ADDR },
             { 3, AMDBC250_SMU_Q3_SEC_WRITE_THROUGH,     SMU_ARG_NONE },
             /* Q0: SMU table DMA address setup (addr must be 4KB-aligned DRAM) */
@@ -4125,6 +4470,12 @@ DreamV3DeviceControl(
             { 0, AMDBC250_SMU_Q0_TRANSFER_TBL_DRAM2SMU, SMU_ARG_NONE },
             /* Q0: GFX frequency control (governor sequence) */
             { 0, AMDBC250_SMU_Q0_QUERY_GFXCLK,         SMU_ARG_GFX_QUERY },
+            /* Q0 0x18 sets the active compute-unit count. The SMU rejects this
+               with 0xFF while feature 6 is clear, which is what this board
+               returned before; feature 6 is reachable through Q2 0x05. Every
+               count in the documented 0..18 range is an idle/active state the
+               GPU sits in normally, so all of them are reversible. */
+            { 0, AMDBC250_SMU_Q0_REQUEST_ACTIVE_WGP,   SMU_ARG_WGP_COUNT },
             { 0, AMDBC250_SMU_Q0_QUERY_ACTIVE_WGP,      SMU_ARG_GFX_QUERY },
             { 0, AMDBC250_SMU_Q0_GET_GFX_FREQUENCY,     SMU_ARG_GFX_QUERY },
             { 0, AMDBC250_SMU_Q0_GET_GFX_VID,           SMU_ARG_GFX_QUERY },
@@ -4166,6 +4517,7 @@ DreamV3DeviceControl(
             case SMU_ARG_GFX_FREQ:  allowed = (a >= 350 && a <= 2500); break;  /* GPU MHz */
             case SMU_ARG_GFX_VID:   allowed = (a <= 255); break;               /* GPU VID */
             case SMU_ARG_GFX_QUERY: allowed = (a == 0); break;                 /* query, arg=0 */
+            case SMU_ARG_WGP_COUNT: allowed = (a <= AMDBC250_SMU_WGP_COUNT_MAX); break;
             default:               allowed = FALSE; break;
             }
             break;
@@ -4205,6 +4557,326 @@ DreamV3DeviceControl(
 
         status = STATUS_SUCCESS;
         bytesReturned = sizeof(*sm);
+        break;
+    }
+
+    /* ========================================================================
+     * SMU multi-argument message (0x80000BF0).
+     *
+     * The unlock chain needs Q2's two-argument interface and Q3's
+     * multi-word debug messages, neither of which fits the single Argument
+     * field of IOCTL_AMDBC250_SMU_CPU_MSG. Only the six messages in the table
+     * below are reachable, and every argument word is range-checked, so this
+     * is not a general-purpose SMU passthrough.
+     *
+     * The Q3 0x2B/0x2C pair is a secure-SMN write of an arbitrary value to an
+     * arbitrary SMN address. That is intentionally NOT whitelisted here: it is
+     * strictly more capable than the host 0xB8/0xBC transport and there is no
+     * legitimate caller for it yet. Secure-SMN READ (0x2A) is included because
+     * reading is how the chain verifies its own progress and how a GC/WGP SMN
+     * alias would be discovered. Writing stays behind the staged unlock.
+     * ======================================================================== */
+    case IOCTL_AMDBC250_SMU_MSG_ARGS: {
+        if (inputLen < sizeof(AMDBC250_IOCTL_SMU_MSG_ARGS) ||
+            outputLen < sizeof(AMDBC250_IOCTL_SMU_MSG_ARGS)) {
+            status = STATUS_BUFFER_TOO_SMALL;
+            break;
+        }
+        PAMDBC250_IOCTL_SMU_MSG_ARGS ma =
+            (PAMDBC250_IOCTL_SMU_MSG_ARGS)outputBuffer;
+
+        ULONG mq = ma->Queue;
+        ULONG mMsg = ma->Message;
+        ULONG mCount = ma->ArgCount;
+        ULONG mArg[AMDBC250_SMU_MAX_ARGS];
+
+        if (!DevExt || !DevExt->MmioVirtualBase) {
+            ma->Result = 0; ma->ResponseStatus = 0xFF;
+            status = STATUS_DEVICE_NOT_READY; break;
+        }
+        /* Only Q2 and Q3 exist here; Q0 keeps its dedicated CPU-message path. */
+        if (mq != 2 && mq != 3) {
+            ma->Result = 0; ma->ResponseStatus = 0xFD;
+            status = STATUS_INVALID_PARAMETER;
+            bytesReturned = sizeof(*ma);
+            break;
+        }
+        if (mCount < 1 || mCount > AMDBC250_SMU_MAX_ARGS) {
+            ma->Result = 0; ma->ResponseStatus = 0xFD;
+            status = STATUS_INVALID_PARAMETER;
+            bytesReturned = sizeof(*ma);
+            break;
+        }
+        for (ULONG i = 0; i < AMDBC250_SMU_MAX_ARGS; i++) {
+            mArg[i] = (i < mCount) ? ma->Arg[i] : 0;
+        }
+
+        RtlZeroMemory(ma, sizeof(*ma));
+        ma->Queue = mq; ma->Message = mMsg; ma->ArgCount = mCount;
+        for (ULONG i = 0; i < mCount; i++) ma->Arg[i] = mArg[i];
+
+        /*
+         * Whitelist. Each entry pins the queue, the message, the required
+         * argument count and a per-message argument rule, so this stays a
+         * narrow primitive rather than a general SMU passthrough.
+         *
+         * Q2 0x23 (ring append) is deliberately NOT whitelisted.
+         * Its entry layout is {arg0 + base, arg2, arg1, 1}, so arg0 is the
+         * destination index and arg2 is the stored value: the message is an
+         * arbitrary 16-byte SMU-SRAM write whose destination the caller picks.
+         * The subqueue-4 command type also overflows into the adjacent
+         * counter block, which is a corruption primitive rather than a write.
+         * Bounding the stored value does not bound the destination, so the
+         * value check that looks like a safety property is not one. Nothing
+         * reachable today needs it, so it stays out until a reviewed stage
+         * that uses it exists.
+         *
+         * Q2 0x0A (transfer engine) uses the reference operand layout
+         * [sub, addr_hi, addr_lo, words, 0, key]. For the DRAM-facing sub-ops
+         * the address must be the driver's OWN staging page, not a
+         * caller-supplied one: accepting any 4KB-aligned value would make this
+         * "SMU-initiated DMA to or from any physical page below 4GiB", which
+         * is arbitrary kernel memory access from a DACL-less device. This is
+         * the same reason the PM4 path refuses to map user-fed physical
+         * addresses. The SRAM-facing sub-op is bounded to SRAM with its tail
+         * inside the window.
+         */
+        BOOLEAN mAllowed = FALSE;
+        if (mq == 2 && (mMsg == AMDBC250_SMU_Q2_ENABLE_FEATURES ||
+                        mMsg == AMDBC250_SMU_Q2_DISABLE_FEATURES)) {
+            /* Feature-mask set/clear, restricted to the single GPU compute-unit
+               power bit. The SMU takes the mask as ARG0 and an (unused here)
+               high word as ARG1, so the whole call shape is pinned: exactly two
+               words, ARG1 zero, and ARG0 equal to bit 6 and nothing else. A
+               caller cannot reach the other 63 feature bits, which cover thermal
+               and current limiting where a wrong value matters. */
+            mAllowed = (mCount == 2) &&
+                       (mArg[1] == 0) &&
+                       (mArg[0] == AMDBC250_SMU_FEATURE_GFX_WGP_POWER);
+        } else if (mq == 2 && mMsg == AMDBC250_SMU_Q2_XFER) {
+            ULONG sub = mArg[0];
+            BOOLEAN isDram = (sub == AMDBC250_SMU_Q2_SUB_SMU2DRAM) ||
+                             (sub == AMDBC250_SMU_Q2_SUB_DRAM2SMU);
+            BOOLEAN isSram = (sub == AMDBC250_SMU_Q2_SUB_SRAM_LOAD);
+            BOOLEAN isCtl  = (sub == AMDBC250_SMU_Q2_SUB_SETUP) ||
+                             (sub == AMDBC250_SMU_Q2_SUB_FINALIZE) ||
+                             (sub == AMDBC250_SMU_Q2_SUB_TABLE_RESTORE);
+            BOOLEAN ok = FALSE;
+            if (mCount == 6 && mArg[4] == 0 && mArg[5] <= 0xFFu &&
+                mArg[1] == 0) {
+                if (isDram) {
+                    /* Only the driver's own staging page is a legal target. */
+                    ok = (DevExt->SmuUnlockVa != NULL) &&
+                         (mArg[2] == (ULONG)(DevExt->SmuUnlockPa.QuadPart &
+                                             0xFFFFFFFFu)) &&
+                         (mArg[3] >= 1) && (mArg[3] <= 18);
+                } else if (isSram) {
+                    /* Aligned SRAM offset whose tail stays inside the window. */
+                    ok = (mArg[2] <= 0x000FFFFFu) && ((mArg[2] & 3u) == 0) &&
+                         (mArg[3] >= 1) && (mArg[3] <= 18) &&
+                         ((ULONG64)mArg[2] + (ULONG64)mArg[3] * 4ull) <=
+                             (ULONG64)AMDBC250_SMU_SRAM_LIMIT;
+                } else if (isCtl) {
+                    ok = TRUE;
+                }
+            }
+            mAllowed = ok;
+        } else if (mq == 3 && mMsg == AMDBC250_SMU_Q3_RPC_TRIGGER) {
+            /* Q3 0x22 rpc trigger: the reference passes the fixed table id 0x7F.
+               Reaching the call-anything handler without the handler patch
+               installed is harmless, but it is withheld until then because it
+               is pure code-execution surface with no diagnostic value. */
+            mAllowed = (mCount == 1) && (mArg[0] == 0x7Fu) &&
+                       (DevExt->SmuUnlockState >= 4);
+        } else if (mq == 3 && mMsg == AMDBC250_SMU_Q3_SEC_SMN_READ32) {
+            /* Q3 0x2A secure SMN read of any 32-bit SMN address. This is the
+             * new capability and the reason this IOCTL exists, but it is a
+             * firmware-privileged read of addresses the host 0xB8/0xBC
+             * transport cannot reach, so it carries the same state gate as the
+             * rpc trigger. A firmware-side gate is not a substitute for a
+             * driver-side one when the driver already tracks the state.
+             * NOTE: the reference uses two call forms for 0x2A - with no
+             * argument as a gate probe, and with an address as the actual read.
+             * Only the addressed form is implemented; the caller has not
+             * confirmed the argument form on this board's PMFW. */
+            mAllowed = (mCount == 1) && (DevExt->SmuUnlockState >= 4);
+        }
+
+        if (!mAllowed) {
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+                "AMDBC250-DREAM-V4.3: SMU_MSG_ARGS refused q=%u msg=0x%X n=%u arg0=0x%X arg1=0x%X\n",
+                mq, mMsg, mCount, mArg[0], mArg[1]));
+            ma->Result = 0;
+            ma->ResponseStatus = 0xFD;
+            status = STATUS_INVALID_PARAMETER;
+            /* Return the in-struct diagnostics as well: a caller that only
+               looks at Result/ResponseStatus should not have to guess why. */
+            bytesReturned = sizeof(*ma);
+            break;
+        }
+
+        {
+            PUCHAR mMmio = (PUCHAR)DevExt->MmioVirtualBase;
+            ULONG mResp = 0, mSt = 0;
+            NTSTATUS mSmuSt;
+            ExAcquireFastMutex(&DevExt->DeviceMutex);
+            if (mq == 2) {
+                mSmuSt = Amdbc250PspSmuQ2Msg(mMmio, mMsg, mArg, &mResp, &mSt);
+            } else {
+                mSmuSt = Amdbc250PspSmuQ3Msg(mMmio, mMsg, mArg[0], &mResp, &mSt);
+            }
+            ExReleaseFastMutex(&DevExt->DeviceMutex);
+
+            ma->Response = mResp;
+            ma->ResponseStatus = mSt;
+            ma->Result = (NT_SUCCESS(mSmuSt)) ? 1 : 0;
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                "AMDBC250-DREAM-V4.3: SMU_MSG_ARGS q=%u msg=0x%X n=%u arg0=0x%X arg1=0x%X resp=0x%X st=0x%X res=%u\n",
+                mq, mMsg, mCount, mArg[0], mArg[1], mResp, mSt, ma->Result));
+        }
+        status = STATUS_SUCCESS;
+        bytesReturned = sizeof(*ma);
+        break;
+    }
+
+    /* ========================================================================
+     * Staged SMU secure-access unlock (0x80000BF4).
+     *
+     * One stage per call, each stage verified before the next is attempted, so
+     * the caller can abandon the chain at any stage boundary. All mutated state
+     * is volatile SMU SRAM: a normal reboot returns the SMU to its boot state
+     * regardless of how far the chain got.
+     * ======================================================================== */
+    case IOCTL_AMDBC250_SMU_UNLOCK_STEP: {
+        if (inputLen < sizeof(AMDBC250_IOCTL_SMU_UNLOCK_STEP) ||
+            outputLen < sizeof(AMDBC250_IOCTL_SMU_UNLOCK_STEP)) {
+            status = STATUS_BUFFER_TOO_SMALL;
+            break;
+        }
+        PAMDBC250_IOCTL_SMU_UNLOCK_STEP us =
+            (PAMDBC250_IOCTL_SMU_UNLOCK_STEP)outputBuffer;
+
+        ULONG uStep = us->Step;
+        ULONG uParam[4];
+        for (ULONG i = 0; i < 4; i++) uParam[i] = us->Param[i];
+
+        if (!DevExt || !DevExt->MmioVirtualBase) {
+            us->Result = 0; us->ResponseStatus = 0xFF;
+            status = STATUS_DEVICE_NOT_READY; break;
+        }
+        if (uStep > AMDBC250_SMU_UNLOCK_STEP_MAX) {
+            us->Result = 0; us->ResponseStatus = 0xFD;
+            status = STATUS_INVALID_PARAMETER; break;
+        }
+
+        RtlZeroMemory(us, sizeof(*us));
+        us->Step = uStep;
+        for (ULONG i = 0; i < 4; i++) us->Param[i] = uParam[i];
+        us->Detail[3] = DevExt->SmuUnlockState; /* prior state, always reported */
+
+        {
+            PUCHAR uMmio = (PUCHAR)DevExt->MmioVirtualBase;
+            NTSTATUS uSt = STATUS_SUCCESS;
+            ULONG uLast = 0;
+            ExAcquireFastMutex(&DevExt->DeviceMutex);
+
+            switch (uStep) {
+            case AMDBC250_SMU_UNLOCK_STEP_PROBE: {
+                /* Read-only. Confirm the SMU answers, allocate the staging page
+                   (host memory only) and read SRAM through the legitimate
+                   transfer engine. Nothing here mutates SMU state: the Q2 0x0A
+                   reads below use the transfer table the firmware itself
+                   installed at boot.
+
+                   Param[0] selects the address, defaulting to the gate byte.
+                   Four consecutive dwords come back rather than one, because a
+                   single zero cannot be told apart from a read path that
+                   always returns zero - which is exactly the mistake that would
+                   otherwise make a wrong "already unlocked" conclusion look
+                   like a result. */
+                ULONG ver = 0, verSt = 0;
+                ULONG addr = uParam[0];
+                if (addr == 0) addr = AMDBC250_SMU_DBG_DISABLE;
+
+                if (!NT_SUCCESS(Amdbc250PspDirectSmuMsg(uMmio,
+                        AMDBC250_SMU_Q0_GET_SMU_VERSION, 0, &ver, &verSt))) {
+                    uSt = STATUS_TIMEOUT;
+                    break;
+                }
+                us->Detail[0] = ver;          /* 0x00580600 = 88.6.0 */
+                uSt = SmuUnlockEnsurePage(DevExt);
+                if (!NT_SUCCESS(uSt)) break;
+                us->Detail[1] = (ULONG)DevExt->SmuUnlockPa.QuadPart;
+                us->Detail[2] = DevExt->SmuUnlockState;
+                us->Detail[3] = addr;
+
+                uSt = SmuUnlockSramRead(uMmio, DevExt->SmuUnlockPa,
+                        DevExt->SmuUnlockVa, addr,
+                        AMDBC250_SMU_PROBE_WORDS, &uLast);
+                if (NT_SUCCESS(uSt)) {
+                    RtlCopyMemory(&us->Detail[4], DevExt->SmuUnlockVa,
+                                  AMDBC250_SMU_PROBE_WORDS * sizeof(ULONG));
+                }
+                break;
+            }
+            case AMDBC250_SMU_UNLOCK_STEP_VERIFY: {
+                /* Read-only. Report the gate byte and probe one benign SMN
+                   address through the secure window. Before any chain runs the
+                   probe answers REJECTED_PREREQ (0xFD); after it runs it must
+                   not. Either outcome is reported rather than judged, so this
+                   doubles as the diagnostic for "where is the chain right now".
+                   The staging page is ensured first so this does not fail with
+                   an opaque STATUS_INVALID_PARAMETER on a fresh boot. */
+                NTSTATUS pe = SmuUnlockEnsurePage(DevExt);
+                if (!NT_SUCCESS(pe)) {
+                    uSt = pe;
+                    break;
+                }
+                us->Detail[3] = AMDBC250_SMU_DBG_DISABLE;
+                uSt = SmuUnlockSramRead(uMmio, DevExt->SmuUnlockPa,
+                        DevExt->SmuUnlockVa, AMDBC250_SMU_DBG_DISABLE,
+                        AMDBC250_SMU_PROBE_WORDS, &uLast);
+                if (NT_SUCCESS(uSt)) {
+                    RtlCopyMemory(&us->Detail[4], DevExt->SmuUnlockVa,
+                                  AMDBC250_SMU_PROBE_WORDS * sizeof(ULONG));
+                }
+                {
+                    ULONG probe = 0, probeSt = 0;
+                    NTSTATUS ps = Amdbc250PspSmuQ3Msg(uMmio,
+                            AMDBC250_SMU_Q3_SEC_SMN_READ32,
+                            AMDBC250_SMU_UNLOCK_PROBE_SMN, &probe, &probeSt);
+                    us->Detail[6] = probe;
+                    us->Detail[7] = probeSt;
+                    /* Result reflects only whether the call completed; the
+                       caller compares Detail[7] against 0xFD itself. */
+                    us->Result = NT_SUCCESS(ps) ? 1 : 0;
+                }
+                /* Gate byte 0 == secure access enabled. */
+                if (NT_SUCCESS(uSt) && us->Detail[4] == 0) {
+                    DevExt->SmuUnlockState = 4;
+                }
+                break;
+            }
+            default:
+                uSt = STATUS_INVALID_PARAMETER;
+                break;
+            }
+
+            ExReleaseFastMutex(&DevExt->DeviceMutex);
+            us->ResponseStatus = uLast;
+            us->Result = (NT_SUCCESS(uSt)) ? 1 : 0;
+            if (!NT_SUCCESS(uSt)) status = uSt;
+        }
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+            "AMDBC250-DREAM-V4.3: SMU_UNLOCK step=%u res=%u st=0x%X d0=0x%X d1=0x%X d2=0x%X d3=0x%X\n",
+            uStep, us->Result, us->ResponseStatus,
+            us->Detail[0], us->Detail[1], us->Detail[2], us->Detail[3]));
+        /* Detail[] is reported back even when a stage fails: for METHOD_BUFFERED
+           the I/O manager copies IoStatus.Information bytes out regardless of
+           the NTSTATUS, and a failed stage's measurements are exactly what the
+           caller needs to decide whether to stop. This is deliberate, not an
+           oversight of the usual "zero Information on failure" rule. */
+        bytesReturned = sizeof(*us);
         break;
     }
 
@@ -4809,13 +5481,23 @@ DreamV3DeviceControl(
                 ULONG Pm4Buffer[128];
                 ULONG Pm4Count = SendPm4->CommandCount;
 
-                if (SendPm4->FenceValue > 0) {
+                /* Only build the EOP fence packet when a fence page actually
+                 * exists. GlobalFence.PhysicalAddress used to be embedded here
+                 * untested, and before the fence was extracted it could hold a
+                 * DANGLING physical address (allocated then freed inside
+                 * InitGfxRing) - a DMA-to-freed-page hazard. Now it is either a
+                 * live page or 0, but 0 in a DMA descriptor is still a fault
+                 * waiting to happen, so gate it. Same test the software
+                 * executor uses at the EOP/RELEASE_MEM case. */
+                if (SendPm4->FenceValue > 0 &&
+                    DevExt->GlobalFence.VirtualAddress != NULL) {
                     if (Pm4Count > 58) Pm4Count = 58;
                 }
 
                 RtlCopyMemory(Pm4Buffer, SendPm4->Commands, Pm4Count * sizeof(ULONG));
 
-                if (SendPm4->FenceValue > 0) {
+                if (SendPm4->FenceValue > 0 &&
+                    DevExt->GlobalFence.VirtualAddress != NULL) {
                     ULONG idx = Pm4Count;
                     Pm4Buffer[idx++] = PM4_TYPE3_HDR(IT_EVENT_WRITE_EOP, 5);
                     Pm4Buffer[idx++] = (0x47 << 0) | (5 << 8) | (2 << 12) | (1 << 14);

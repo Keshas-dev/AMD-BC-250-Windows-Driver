@@ -50,6 +50,8 @@ static NTSTATUS DreamV3WaitForRegister(
     _In_ ULONG ExpectedValue,
     _In_ ULONG TimeoutUs
     );
+/* DreamV3HwInitFence is declared in amdbc250_dream_kmd.h: the extended init
+ * path (the default configuration) calls it from another translation unit. */
 
 /* Persistent step marker so a TDR/reboot reveals the last-entered step.
  * Written to the driver's service key (same RegistryPath the driver uses
@@ -208,6 +210,25 @@ DreamV3HwInitialize(
     }
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                "AMDBC250-DREAM-V4.3: [STEP 4/12] IH ring OK\n"));
+
+    /* Step 4b: global fence page. Runs here, ahead of every step that writes
+     * GRBM_GFX_INDEX, and touches only host memory: the GFX ring probe in step
+     * 7 fails on BC-250 (host-read-only ring base) and used to take the fence
+     * down with it, which left the PM4 IT_DMA_DATA path with no resolvable
+     * window. Also reachable with HwInitMaxStep=4, i.e. without crossing the
+     * display-hazard steps at all. */
+    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+               "AMDBC250-DREAM-V4.3: [STEP 4b] Global fence\n"));
+    if (MaxStep != 0 && 4 > MaxStep) { KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL, "AMDBC250-DREAM-V4.3: HwInit STOP at cap %u\n", MaxStep)); return STATUS_SUCCESS; }
+    DreamV3MarkHwInitStep(40);
+    Status = DreamV3HwInitFence(DevExt);
+    if (!NT_SUCCESS(Status)) {
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
+                   "AMDBC250-DREAM-V4.3: *** FAILED: global fence: 0x%08X\n", Status));
+        return Status;
+    }
+    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+               "AMDBC250-DREAM-V4.3: [STEP 4b] Global fence OK\n"));
 
     /* Step 5: Halt all CP engines before firmware load */
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
@@ -441,14 +462,27 @@ DreamV3HwInitialize(
     /* Step 12b: WGP unlock — Linux gfx_v10_0_get_cu_info() timing: after GART/VM + PSP ring, before RLC */
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                "AMDBC250-DREAM-V4.3: [STEP 12b] WGP unlock (SPI_PG/CC/RLC) — post-GART/PSP\n"));
+    DreamV3MarkHwInitStep(43);
     if (DevExt->MmioVirtualBase != NULL) {
         PUCHAR bar5b = (PUCHAR)DevExt->MmioVirtualBase;
-        static const ULONG bankSel2[4] = { 0x00000000, 0x00000100, 0x00010000, 0x00010100 };
+        /* The proven Linux call passes instance=0xffffffff, which sets
+         * INSTANCE_BROADCAST_WRITES in GRBM_GFX_INDEX. The previous selects here
+         * left that bit clear, so writes landed on instance 0 only. Both forms
+         * are written because it is not established which one BC-250 honours,
+         * and the value is harmless either way. */
+        static const ULONG bankSel2[8] = {
+            0x00000000, 0x01000000,   /* SE0/SH0 instance=0 and broadcast */
+            0x00000100, 0x01000100,   /* SE0/SH1 */
+            0x00010000, 0x01010000,   /* SE1/SH0 */
+            0x00010100, 0x01010100,   /* SE1/SH1 */
+        };
         ULONG spiBefore2 = READ_REGISTER_ULONG((PULONG)(bar5b + 0x5C3C));
+        ULONG rlcBefore2 = READ_REGISTER_ULONG((PULONG)(bar5b + 0x3D64));
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-                    "AMDBC250-DREAM-V4.3: [STEP 12b] SPI_PG before = 0x%08X\n", spiBefore2));
+                    "AMDBC250-DREAM-V4.3: [STEP 12b] SPI_PG before = 0x%08X  RLC_PG before = 0x%08X\n",
+                    spiBefore2, rlcBefore2));
         __try {
-            for (int b = 0; b < 4; b++) {
+            for (int b = 0; b < 8; b++) {
                 WRITE_REGISTER_ULONG((PULONG)(bar5b + 0x34D0), bankSel2[b]);
                 WRITE_REGISTER_ULONG((PULONG)(bar5b + 0x9C1C), 0x00000000);
                 WRITE_REGISTER_ULONG((PULONG)(bar5b + 0x5C3C), 0x0000001F);
@@ -457,8 +491,10 @@ DreamV3HwInitialize(
             WRITE_REGISTER_ULONG((PULONG)(bar5b + 0x34D0), AMDBC250_GRBM_GFX_INDEX_BROADCAST_VAL); /* gfx10.1 all-broadcast (INST=24, SH=26, SE=28) */
             ULONG spiAfter2 = READ_REGISTER_ULONG((PULONG)(bar5b + 0x5C3C));
             ULONG ccAfter2  = READ_REGISTER_ULONG((PULONG)(bar5b + 0x9C1C));
+            ULONG rlcAfter2 = READ_REGISTER_ULONG((PULONG)(bar5b + 0x3D64));
             KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-                        "AMDBC250-DREAM-V4.3: [STEP 12b] WGP unlock DONE: SPI_PG=0x%08X CC=0x%08X\n", spiAfter2, ccAfter2));
+                        "AMDBC250-DREAM-V4.3: [STEP 12b] WGP unlock DONE: SPI_PG=0x%08X CC=0x%08X RLC_PG=0x%08X\n",
+                        spiAfter2, ccAfter2, rlcAfter2));
         } __except(EXCEPTION_EXECUTE_HANDLER) {
             KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
                         "AMDBC250-DREAM-V4.3: [STEP 12b] WGP unlock FAILED (SEH)\n"));
@@ -596,6 +632,26 @@ DreamV3HwShutdown(_In_ PDREAM_V3_DEVICE_EXTENSION DevExt)
         DevExt->GlobalFence.VirtualAddress = NULL;
     }
 
+    /* The SMU unlock staging page is ordinary host memory, so it is released
+       here alongside the other kernel-owned allocations.
+
+       The state field is cleared unconditionally, not only when a page happens
+       to exist: it is a security gate, and a gate that a memory free can leave
+       set is a gate that can survive in a state nobody intended.
+
+       The page free itself takes DeviceMutex, because the IOCTL path holds that
+       mutex while DMAing to and from this page. Without it, a PnP stop racing
+       an in-flight read would free and unmap the page under a live DMA and a
+       live dereference. */
+    ExAcquireFastMutex(&DevExt->DeviceMutex);
+    if (DevExt->SmuUnlockVa != NULL) {
+        MmFreeContiguousMemory(DevExt->SmuUnlockVa);
+        DevExt->SmuUnlockVa = NULL;
+        DevExt->SmuUnlockPa.QuadPart = 0;
+    }
+    DevExt->SmuUnlockState = 0;
+    ExReleaseFastMutex(&DevExt->DeviceMutex);
+
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                "AMDBC250-DREAM-V4.3: HwShutdown complete\n"));
 }
@@ -635,8 +691,56 @@ DreamV3HdpFlush(_In_ PDREAM_V3_DEVICE_EXTENSION DevExt)
 ===========================================================================*/
 
 /*===========================================================================
-  DreamV3HwInitGfxRing — Initialize GFX command ring (GFX10 style)
-===========================================================================*/
+  DreamV3HwInitGfxRing �?" Initialize GFX command ring (GFX10 style)
+ ===========================================================================*/
+
+/*
+ * Allocate the 64-bit global fence page.
+ *
+ * EXTRACTED from DreamV3HwInitGfxRing (2026-09-30). It used to be allocated
+ * there, which made the fence unreachable on real BC-250: the GFX ring base is
+ * host-read-only (SOS/PSP), so InitGfxRing took the !GfxWritable path, FREED the
+ * fence it had just allocated, and returned. FencePhysAddr therefore read 0 and
+ * the PM4 IT_DMA_DATA path had no driver-owned window to resolve against, so it
+ * could only ever be tested in its refuse-foreign-address form.
+ *
+ * This is pure host memory: one contiguous page, zeroed, no MMIO write, no ring
+ * register, no GRBM_GFX_INDEX. That matters because the step that DOES write
+ * GRBM_GFX_INDEX (InitGfxRing) is a documented white-screen/BSOD hazard on a
+ * live display, and a test must not have to cross it to get a window.
+ *
+ * Idempotent: an existing fence is left alone, so HwShutdown remains the single
+ * owner that frees it.
+ */
+NTSTATUS
+DreamV3HwInitFence(
+    _In_ PDREAM_V3_DEVICE_EXTENSION DevExt
+    )
+{
+    PHYSICAL_ADDRESS FencePhys;
+    PVOID FenceVirt;
+
+    if (DevExt->GlobalFence.VirtualAddress != NULL) {
+        return STATUS_SUCCESS; /* already allocated */
+    }
+
+    FenceVirt = DreamV3AllocateContiguousMemory(PAGE_SIZE, &FencePhys);
+    if (FenceVirt == NULL) {
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
+                   "AMDBC250-DREAM-V4.3: Failed to allocate global fence\n"));
+        return STATUS_NO_MEMORY;
+    }
+
+    RtlZeroMemory(FenceVirt, PAGE_SIZE);
+
+    DevExt->GlobalFence.PhysicalAddress = FencePhys;
+    DevExt->GlobalFence.VirtualAddress = (volatile PULONG64)FenceVirt;
+
+    KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+               "AMDBC250-DREAM-V4.3: Global fence allocated at PA=0x%llX\n",
+               FencePhys.QuadPart));
+    return STATUS_SUCCESS;
+}
 
 NTSTATUS
 DreamV3HwInitGfxRing(
@@ -645,8 +749,6 @@ DreamV3HwInitGfxRing(
 {
     PHYSICAL_ADDRESS RingPhys;
     PVOID RingVirt;
-    PHYSICAL_ADDRESS FencePhys;
-    PVOID FenceVirt;
     ULONG RingSize = 2 * 1024 * 1024;  /* 2 MB for GFX10 */
     ULONG RbCntl;
     ULONG RbBufSz;
@@ -700,17 +802,44 @@ DreamV3HwInitGfxRing(
     DevExt->GfxRing.WritePointer = 0;
     DevExt->GfxRing.Initialized = FALSE;
 
-    /* Allocate 64-bit fence (GFX10 requirement) */
-    FenceVirt = DreamV3AllocateContiguousMemory(PAGE_SIZE, &FencePhys);
-    if (FenceVirt == NULL) {
-        DreamV3FreeContiguousMemory(RingVirt, RingSize);
+    /* Allocate ring buffer */
+    RingVirt = DreamV3AllocateContiguousMemory(RingSize, &RingPhys);
+    if (RingVirt == NULL) {
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
+                   "AMDBC250-DREAM-V4.3: Failed to allocate GFX ring\n"));
         return STATUS_NO_MEMORY;
     }
 
-    RtlZeroMemory(FenceVirt, PAGE_SIZE);
-    DevExt->GlobalFence.PhysicalAddress = FencePhys;
-    DevExt->GlobalFence.VirtualAddress = (volatile PULONG64)FenceVirt;
-    *DevExt->GlobalFence.VirtualAddress = 0;
+    RtlZeroMemory(RingVirt, RingSize);
+
+    DevExt->GfxRing.PhysicalAddress = RingPhys;
+    DevExt->GfxRing.VirtualAddress = RingVirt;
+    DevExt->GfxRing.SizeInBytes = RingSize;
+    DevExt->GfxRing.ReadPointer = 0;
+    DevExt->GfxRing.WritePointer = 0;
+    DevExt->GfxRing.Initialized = FALSE;
+
+    /* The 64-bit fence page is allocated by DreamV3HwInitFence, which runs
+     * BEFORE this function and independently of it: this function's ring-base
+     * probe below routinely fails on BC-250, and when it did the fence used to
+     * be allocated and immediately freed again. Do not allocate it here, and do
+     * not free it on the error paths — HwShutdown owns it.
+     *
+     * Checked BEFORE the 2 MB ring allocation above, and non-fatal for the
+     * same reason the !GfxWritable path below is: a missing fence is a
+     * diagnostic, not a hardware fault, and this function's caller treats a
+     * non-success return as fatal for the whole init (step 7). Returning ahead
+     * of the allocation also spares a retrying caller — the lazy re-init in
+     * GET_NBIO_STATUS runs on every call while the ring is uninitialized — a
+     * 2 MB allocate/zero/free per call just to fail again. */
+    if (DevExt->GlobalFence.VirtualAddress == NULL) {
+        DreamV3FreeContiguousMemory(RingVirt, RingSize);
+        DevExt->GfxRing.VirtualAddress = NULL;
+        DevExt->GfxRing.PhysicalAddress.QuadPart = 0;
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
+                   "AMDBC250-DREAM-V4.3: GFX ring init SKIPPED (no global fence)\n"));
+        return STATUS_SUCCESS;
+    }
 
     /* Halt CP before programming */
     DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_ME_CNTL,
@@ -749,11 +878,12 @@ DreamV3HwInitGfxRing(
          * active corrupts the display (white screen). Skip the KIQ probe + all
          * GRBM_GFX_INDEX writes, free the ring, keep CP halted, and continue.
          * The CP/MEC cannot be woken on the host anyway (rings are locked). */
-        DreamV3FreeContiguousMemory(FenceVirt, PAGE_SIZE);
         DreamV3FreeContiguousMemory(RingVirt, RingSize);
         DevExt->GfxRing.VirtualAddress = NULL;
+        DevExt->GfxRing.PhysicalAddress.QuadPart = 0;
         DevExt->GfxRing.Initialized = FALSE;
-        DevExt->GlobalFence.VirtualAddress = NULL;
+        /* GlobalFence is NOT freed here: DreamV3HwInitFence owns it and
+         * HwShutdown reclaims it. Clearing the pointer would strand the page. */
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
                     "AMDBC250-DREAM-V4.3: GFX ring init SKIPPED (no writable ring base) — CP stays halted\n"));
         return STATUS_SUCCESS;
@@ -776,10 +906,10 @@ DreamV3HwInitGfxRing(
     /* Initialize command processor */
     NTSTATUS Status = DreamV3InitCommandProcessor(DevExt);
     if (!NT_SUCCESS(Status)) {
-        DreamV3FreeContiguousMemory(FenceVirt, PAGE_SIZE);
         DreamV3FreeContiguousMemory(RingVirt, RingSize);
         DevExt->GfxRing.VirtualAddress = NULL;
-        DevExt->GlobalFence.VirtualAddress = NULL;
+        DevExt->GfxRing.PhysicalAddress.QuadPart = 0;
+        /* GlobalFence survives: owned by DreamV3HwInitFence / HwShutdown. */
         return Status;
     }
 

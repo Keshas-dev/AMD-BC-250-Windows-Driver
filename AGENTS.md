@@ -1,5 +1,180 @@
 # AMD BC-250 Windows Driver — Agent Notes
 
+## 🛑 BIOS FAKTAS — NE AIŠKINTI (2026-09-30 pataisymas)
+
+**Mes esame BIOS 3.00. NE 5.00.**
+- Diske **tik 3.00 ROM'ai**: `third-party/Bios/BC250_3.00_M.ROM` == `BC250_3.00_MeiMeiDXEv3.ROM` (16MB, SHA256 `3D982841…A24736`, 8-core unlock aktyvus). **5.00 ROM'o NĖRA** — ankstesnės AGENTS pastabos „BIOS 5.00 / BIOS-5 offset'ai" buvo **klaida**, kurią kartojau kelis kartus.
+- **PMFW 88.6.0 / SMU 11.8 (Xtensa)** — **tai pats profilis kaip thelamer/bc250-vcn** („SMU 11.8, PMFW 88.6.0 extracted from BIOS") → jų `FUN_*` adresai (pvz. `FUN_00023b14(6,1)` domain-6 power-on) **taikomi mums tiesiogiai, be perverdinimo**.
+- **`bc250-smu-unlock` „BIOS 3 only" mums NERIBOJA** — mes esame BIOS 3. 🔓
+- Išsilavinusios bendruomenės priemonės su BC-250 offset'ais (`bc250-smu-unlock`, `bc250-collective/amd_smu_reverse_engineering`, `rw-r-r-0644/bc250-core-unlock`) veikia **tame pačiame firmware profilyje**.
+- ⚠️ **ĮDIEGTAS BIOS YRA MODDED** (`MeiMeiDXEv3`). Stock `BC250_3.00_CHIPSETMENU.ROM` (SHA `48FBE5D3…`) yra diske. Modded PSP/SOS galėjo taikyti kitą DF ACL — tai likęs WGP kandidatas.
+
+## ⭐⭐⭐ SMU UNLOCK EXPLOIT (2026-09-30) — BIOS 3 TAIKOMAS, REALUS WGP KAMPAS
+
+**Repos klonuota:** `C:\AMD-BC-250\bc250-smu-unlock`, `C:\AMD-BC-250\amd_smu_reverse_engineering`.
+**`bc250-smu-unlock/README.md`:** *„current repo is BIOS 3 only!"* → **mes esame BIOS 3 → offsetai tinka tiesiogiai.**
+
+### grandinė (visas SRAM, be flash, be firmware ištrūkinio)
+1. **Q2 0x23** subqueue-ring append (`RING_BASE=0x18850`, `ENTRY_SZ=16`, `SUBQ_SLOTS=30`, counters `+0x780`) → subq4 overflow perrašo subq0 indeksą → entry landa `TR_TABLE_PTR=0x19784`
+2. **Q2 0x0A** transfer engine (sub: `0x00` setup, `0x1F` sram_load, `0x14` smu2dram, `0x23` dram2smu, `0x11/0x12` pptable) → **arbitraus SMU SRAM R/W**
+3. parašyti **`DBG_DISABLE=0x7B3C := 0`** → secure access ĮJUNGTAS
+4. tada: Q3 `0x28/0x29` (SRAM write) + **Q3 `0x2A`=sec_smn_read32 / `0x2B`=set_smn_write_addr / `0x2C`=sec_smn_write32 → arbitraus secure SMN R/W** (ko mūsų 0xB8/0xBC neatlieka)
+5. `patcher.py` + `patches.hex` → **runtime SRAM patch** (`rpc.s` call-anything) → Q3 `0x22` (arg `0x7f`) → **`call(fn,*args)`**, scratch `0x12080`, max 5 args → **tai pat kaip thelamer `FUN_00023b14(6,1)`**
+
+### ką turime vs trūksta
+| ✅ jau turime | ❌ trūksta whitelist |
+|---|---|
+| Q2 mailbox `0x03B10528/564/998` | Q2 `0x23` (4 args) |
+| Q3 mailbox `0x03B10A20/80/88` | Q2 `0x0A` (6 args) |
+| Q3 `0x28/0x29` (SEC_SET_WRITE_PTR/WRITE_THROUGH) | Q3 `0x22` (rpc trigger) |
+| `ALLOC_DMA_BUFFER` IOCTL `0x80000930` | Q3 `0x2A/0x2B/0x2C` |
+| PCI SMN transport `0xB8/0xBC` | |
+
+### FAKTAI
+- **BIOS 3.00 SMU firmware ROM'e UŽŠIFRUOTAS** (0 plaintext stringų) → per repo decompile neįmanoma. `robin_1`=**88.6.0 (mūsų)**, `robin_5`=88.7.0 (53% skirtingi). thelamer dirbo 88.6.0 → jų `FUN_*` tinka. `smu.c`/`export.html` **nėra** commite.
+- **Reikia 1 puslapio (4096B) fiziškai kontigiuaus DMA buferio** su žinomu PA.
+- ⚠️ **PAVOJUS:** `unlock.py` nesėkmė rašo *„cold power cycle"*; Q3 `0x2C` mums **jau wedged kartą** (AC power cycle) — tai buvo secure access **GATED**, ne tikrosios klaidos. Reikia dėžės, kurią galima fiziškai power-cycle.
+
+## 🏁 WGP SPI_PG — DEFINITIVUS NEIGIAMAS, VALDOMAI PATIKRINTAS (2026-09-30)
+
+**Šis skyrius pakeičia VISUS ankstesnius „SPI_PG užrakinta“ verdiktus.**
+
+### Ką iš tikrųjų įrodėme
+| Faktas | Įrodymas |
+|---|---|
+| ✅ **Q2 0x0A transfer engine realiai skaito SRAM** | `probe 0x7B20` → 4 skirtingos reikšmės |
+| ✅ **gate `0x7B3C`=0 nuo boot** | realus skaitymas — `bc250-smu-unlock` grandinė **nebereikėjo** |
+| ✅ **Q3 0x2A secure SMN read veikia** | `0x0115A870`=0xFF (8 CPU) — sutapo |
+| ✅ **MMIO read+write veikia** (teigiama kontrolė) | `SCRATCH[0x32D4]=0x4D585042` + `GRBM_GFX_INDEX` echo'ina |
+| ❌ **`SPI_PG` priima rašymą** | WGP žingsnis **ĮVYKO** (`Step_HwInit=0xC`), rašė `0x1F` į 4 bankus+broadcast → **vis tiek 0** |
+
+### ⭐ KODĖL ŽINGSNIS NIEKADA NEATTIKO (2 metų klaida)
+`HwInitMaxStep=1` (šios mašinos saugi dangtė) **sustabdydavo seką PRIEŠ WGP žingsnį**. Visi ankstesni „blokuota“ rodmenys buvo imti **su žingsniu išjungtu**. O ne-extended `Step 12b` (`hw_init.c`) šioje konfigūracijoje yra **negyvas kodas**: `HwInitExtended=1` nukreipia į `DreamV3HwInitializeExtended` (`hw_init_extended.c`), kur tikrasis WGP žingsnis yra **savo numeriu 12**.
+
+`enable-wgp-test.bat` → `HwInitMaxStep=12` izoliuoja: praeina 0b,1,2,3,4,9,10,6,**12**, sustoja PRIEŠ 13(RLC)/7,8(ringai)/11(display) — **išvengta visos 0x1A istorijos**. Rezultatas: `Step_HwInit=0xC`, `full-init-test.exe` SUCCESS, **juodo ekrano nebuvo**.
+
+### Atmestos hipotezės (su įrodymais)
+| Hipotezė | Verdiktas |
+|---|---|
+| „Blogas bank index (trūksta `0x01000000`)“ | ❌ **9 encoding'ų**, nė vienas neveikia |
+| „MMIO rašymai nelipa“ | ❌ teigiama kontrolė |
+| „WGP žingsnis niekada nebuvo paleistas“ | ✅ **buvo** — dabar įrodyta, kad paleistas |
+| „`RequestActiveWgp` (Q0 0x18) = kelias“ | ❌ Cyan Skillfish **neturi** (Vangogh relictas); `RLC_PG_CNTL=0`, harvestintė CU nėra power-gated |
+| „Feature 6 blokeriaus“ | ❌ jau ON (`0xDD602C7D`) |
+| „GC aliasas SMN“ | ❌ `SMN[0x02405ED4]`=0, st=OK |
+
+### ⭐ LIKĘS VIENINTELIS KANDIDATAS: **BIOS MODDED**
+```
+BC250_3.00_MeiMeiDXEv3.ROM  SHA 3D982841…  ← įdiegtas (MeiMei mod)
+BC250_3.00_M.ROM            SHA 3D982841…  ← tas pats
+BC250_3.00_CHIPSETMENU.ROM  SHA 48FBE5D3…  ← STOCK, kitas hash
+```
+Bendruomenės 40CU atrakinimas veikia **Linux'e su identišku MMIO rašymu** → blokada **ne tik geležinė**. Modded BIOS turi kitą PSP/SOS → kitą DF ACL. **Testuojama flash'inti stock'ą.**
+
+### ⛔ BRANGIAUSIA TAISYKLĖ
+**NIEKADA neskaityti `SMN 0x03B1xxxx` per Q3 `0x2A`** — `0x03B10A08` = paties SMU C2PMSG_66. Savireferencinis skaitymas **užkino SMU**: visi pranešimai nustojo, `probe`=`gle=31`, atkūrimas = **AC power cycle** (soft restartas neatgauna, duoda juodą ekraną). **Q2 0x0A niekada neužstrigo.**
+
+## ✅ GC SMN ALIAS ATSAKYMAS: NĖRA (2026-09-30) — WGP PER SMN UŽDARYTA
+
+**Bandymas:** `smu-unlock-staged.exe smnread 0x02405ED4` (`0x02402C00` GC high base + `0x32D4` SCRATCH beacon).
+**Rezultatas:** `resp=0x00000000`, **`st=0x01 (OK)`** → tai **tikras skaitymas**, ne timeout-echo.
+**Laukiama, jei GC būtų SMN-matomas:** `0x4D585042`.
+
+**Išvada:** GC high window **neturi** veikiančio SMN aliaso. Kartu su ankstesniu `wgp-smn-probe` rezultatu (`0x1260`/`0xA000`/`0x02402C00` = 0 per `0xB8/0xBC`) **WGP atrakinimas per SMN yra uždarytas abiais keliais.** Tai suderina su esamu verdiktu: vartai statomi pre-x86 (PSP_BL ~926 parašų, ~816 programuoja DF ACL) — joks host kelias jų neatidaro.
+
+**Svarbu:** tai *tikrai* užveria „ar WGP pasiekiamas per SMN" klausimą. Ne „radau ir negaliu pasiekti", o **„patvirtinau, kad tokio kelio nėra"**. Lieka tik: (a) EFI/UEFI fazė, (b) Linux kernel/debugfs, (c) SMU firmware vidinės funkcijos (thelamer kelias, reikia SMU code exec — kurio neturime ir kurio grandinė nebūtų reikalinga be „second gate" sprendimo).
+
+## ⛔ Q3 0x2A SECURE-SMN READ UŽKINA SMU (2026-09-30) — BRANGIAUSIA TAIKYMAS
+
+**Šaltinis:** `output\smu-unlock-staged.exe` (`DriverVer 4.3.0.13`, `.sys` `478E2212…`). BIOS 3.00_MeiMeiDXEv3, PMFW **88.6.0**.
+
+| Faktas | Įrodymas |
+|---|---|
+| ✅ **Q2 0x0A transfer engine realiai skaito SRAM** per NBIO/BAR5 | `probe 0x7B20` → `0x01840000 / 0x01860000 / 0x00010001 / 0x01740000` |
+| ✅ **gate byte `0x7B3C` == 0 → secure access JAU ATRINKTA** | `probe` / `verify` (realus skaitymas) |
+| ✅ **0x2A grąžino TEISINGAS reikšmes** | `SMN[0x0115A870]=0xFF` (8 CPU, BIOS unlock) + `0x0005A870=0xFF` (alias) |
+| ⛔⛔ **`SMN[0x03B10A08]` = paties SMU C2PMSG_66** → timeout, ir **PO TAM VISKAS NEATSAKO** | Q0 0x02, Q2, visi Q3 → `probe` = `gle=31` |
+
+**SAUGUMO TAISYKLĖ: NIEKADA neskaityti SMU `0x03B1xxxx` bloko (pačio pašto registrai) per `0x2A`.** Tai savireferencinis skaitymas per paties SMU vidinį arbitrą — jis užkina. Dar vienas „read side-effects" atvejis, kurį AGENTS jau spėjo.
+
+**„Grandinės nereikia":** BIOS 3 profilyje gate **atrakintas nuo boot** — niekas jo neuždarė, tiesiog nebuvo įrodytas. `bc250-smu-unlock` grandinė liko **neparealizuota sąmoningai** (kernelio neturi, `smn-unlock-staged.exe` neturi) — ji nebereikalinga šiam tikslui, o jos pusės rizika (ringo korumpcija = AC ciklas) neprisižadinga.
+
+**ATSTATOMA:** SMU SRAM volatile → pradžio reboot turi atkurti. Po reboot — **VIENAS** `probe`, nieko daugiau. Jei neatgavo → AC power cycle. **Nežinoma:** ar SMU mirė, ar tik arbitras.
+
+## ⭐⭐⭐ SMU Q2/unlock Windows portas — BUILD OK (2026-09-30)
+
+**`output\atikmdag.sys` 149352B, SHA256 `EB81EE1F69C7B8B99B8B6874F7102C6F5551BF44B9315E66E63DCCC379E603FF`**, pasirašyta `Valid`. `output\smu-unlock-staged.exe` sukompiliuotas švariai (/W3, 0 warning).
+
+### Kas įdiegta
+- `Amdbc250PspSmuQ2Msg()` — **Q2 siunka 6 ARG**, ne 2. `CMD 0x03B10528`, `RSP 0x03B10564`, `ARG0..5 = 0x03B10998+4*i`. **BE pre-wait** (Q2 RSP po boot gali būti `0`, o `0` nėra DONE → timeout neatsiunčia nieko). Q2 timeout **5000 ms** (ne 100 — transfer engine gali ilgiau, o grįžus per anksti korumpuoja mailbox).
+- `IOCTL_AMDBC250_SMU_MSG_ARGS` (fn `0x8C` = `0x80000BF0`) — multi-arg su whitelist.
+- `IOCTL_AMDBC250_SMU_UNLOCK_STEP` (fn `0x8D` = `0x80000BF4`) — **tik PROBE(0) ir VERIFY(4), read-only**.
+- `DevExt->SmuUnlockState/SmuUnlockVa/SmuUnlockPa`; `HwShutdown` atlaisina su `DeviceMutex` (be jo = UAF).
+- Q2 0x0A operand layout **[sub, addr_hi, addr_lo, words, 0, key]** (`0x1F`/`0x14`/`0x23`), `Words<=18`.
+
+### ⛔ GRANDINĖ (HIJACK/STAGE/UNLOCK) NEPAREALIZUOTA SĄMONINGAI
+Tai memory-corruption chain: Q2 0x23 layout `{arg0+base, arg2, arg1, 1}` = **arbitraus 16B SMU-SRAM rašymas su vartotojo renkamu adresu**, o subq-4 overflow → korumpcija. Perrašyti „iš akies" = SMU ringo sugriovimas = **AC power cycle**. Įrodžiau sau 2 klaidas bandydamas (arg2 vs arg0, subqueue kodo neaiškumas) — improvizavimas čia netoleruojamas. **Q2 0x23 pašalintas iš whitelist**, o `smnread` įrankas papildomai atsisako (`0x23`) net jei kernel leistų.
+
+### 🔒 SAUGUMO TAISYMĖJAI (Code Reviewer: 2 CRITICAL LPE + 7 HIGH + 6 MED — visi pataisyti)
+1. **NE** naudoti `SMU_ARG_U32` Q3 `0x29` — `0x28` (ptr) leidžia `0x7B3C` (pačio gate!), o `0x29`=0 jį išvalo = **visas unlock per esamą `0x80000C2C` be jokių naujų IOCTL**. Grąžinta `SMU_ARG_NONE`.
+2. Q2 `0x0A` DRAM adresas **pririštas prie `DevExt->SmuUnlockPa`** — vartotojo PA = „SMU DMA į bet kurį fizinį lapą" = LPE.
+3. Staging puslapis = **`MmNonCached`, <4GiB** → **NĖRA cache flush**. (`MmCached`+`KeFlushIoAccess` buvo klaida: kryptis/eilutė → stale bytes → **false gate byte**.)
+4. Q3 arg-high (`0x03B10A8C`) dabar zeroinamas; `0x2A` (arba SMN read) — už `SmuUnlockState>=4`.
+
+### ⚠️ ŽINOMA SKYLA (ne šio darbo, bet svarbi kontekste)
+`\\.\AMDBC250DreamV43` **be DACL** → low-priv vartotojas gali viską. `IOCTL_AMDBC250_PCI_SMN_ACCESS` (`0x80000C30`) jau dabar = **neapribotas arbitraus SMN R/W**, o `PSP_SMU_MSG` (`0x924`) = **newhelistintas Q0 passthrough**. Mano whitelist pataisymai to nepablogina, bet **nepagerina** — esama architektūros skylė (out-of-scope follow-up).
+
+**RUNBOOK:** `output\smu-unlock-staged.exe probe` (read-only) → `verify` (read-only) → `selftest` (tikrina, kad whitelist ATMETA `0x2B/0x2C/0x22/0x98`).
+
+## ⭐⭐⭐ SMU power-domain atrakimas (2026-09-30) — VCN VERDIKTAS PASENĘS, NAUJAS WGP KAMPAS
+
+**Šaltinis:** `thelamer/bc250-vcn` (atnaujintas; mūsų senas „VCN permanent locked" verdiktas pasenęs).
+- **VCN power domain 6 ĮJUNGAS** per SMU **VIDINĘ** funkciją `FUN_00023b14(6, 1)` (SMU v3) — **ne** per mailbox pranešimą. SMU 11.8 **neturi jokių** `PowerUpVcn`/`PowerDownVcn` (0 per 7 queues).
+- Dabar BLOKERIS = **„second gate"**: clock/reset/isolation. Power-down ref: `FUN_00024764` → `FUN_00023744` → `FUN_0002362c` (`soc_clk_program_slot`), slots `0x16/0x17/0x18`.
+- **Vizuali invertacija:** tiesioginis VCN MMIO (BAR5/UMR/SMN-debugfs) **HANGINA boardą** — „gated by something else".
+- **Trikai patvirtinti neguotus:** nenaudok mailbox ID iš kitų SMU šeimų (`0x8/0x9` = VCN ant SMU 11.5; čia `0x09` = no-op/DRAM/mem-ctrl). Firmware: PSP atmeta VCN (`0xffff0008`) → direct-load workaround.
+- ⭐ **REIKŠMĖ MŪSŲ WGP TIKSLAI:** power domain'us valdo **SMU firmware vidinės funkcijos**. Tas pats klases gali valdyti **GC/WGP** power domain → **naujas WGP kampas**, jei gauname SMU code execution (`bc250-smu-unlock`). PAVOJUS: „SMU power-domain testai gali užrakinti APU — tik ant dėžės, kurią fiziškai galima power-cycle".
+- ⛔ **HARD RULE:** NEKADA neveikti blind SMN sweep'o — sukėlė boardo užklausimą (2026-09-30). SMN tik **whitelist** (`0x03B1xxxx` SMU, `0x0115A870`, `0x0006Dxxx`); dalis registrų turi read side-effects.
+
+## ⭐⭐⭐ ps5-linux-loader GPU patterns (2026-09-30) — PAGE TABLE + PM4 + TMR
+
+**Šaltinis:** `C:\AMD-BC-250\ps5-linux-loader-main` — PS5 hypervisor exploit + Linux bootloader (tas pats Oberon/Cyan Skillfish die). Nėra GPU register init šaltinis (hypervisor kontekstas), bet turi bendrų GPU/PM4/TMR patterns.
+
+**Išgryninta į `inc/ps5_gpu_patterns.h`:**
+- **GPU page table** (gpu.c): 4-lygių PML4/PDP/PD/PT; PDE valid=bit0, IS_PTE=bit54 (2MB leaf), TF=bit56, block_frag=bits59-63, addr_mask=`0x0000FFFFFFFFFFC0`; fragment sizes 4→8KB, 1→8KB, 0→64KB
+- **PM4 DMA_DATA** (gpu.c): type3 header `(3<<30)|((count-1)<<16)|(opcode<<8)|(1<<1)`, opcode `0x50`, DMA flags `cp_sync(1<<31)|dst_cache_policy(2<<25)|dst_volatile(1<<27)|src_cache_policy(2<<13)|src_volatile(1<<15)`, length mask `0x1FFFFF`
+- **Command descriptor** (gpu.c): 16B, `word0=(addr_lo<<32)|0xC0023F00`, `word1=(size_dwords<<32)|addr_hi`
+- **TMR registrai** (tmr.h): `TMR_BASE/LIMIT/CONFIG/REQUESTORS(n)=n*0x10+0x00/04/08/0C`, `TMR_CFG_PERMISSIVE=0x3F07`, `TMR_INDEX_OFF=0x80`, `TMR_DATA_OFF=0x84`
+- **GPU kernel offsets** (gpu.c): `gvmspace->page_dir_va=0x38`, `size=0x10`, `start_va=0x08`, `sizeof_gvmspace=0x100`
+- **SceSblHvShm** (boot_linux.c): TMR management `tmrPtStates[64]` (flags/addr/size), `tmrMapPts`, `tmrOvlpIds`, `nmiCounts`
+
+**NĖRA naudingo:** HV defeat exploits (PS5 FW specifiški), shellcode injection (PS5 HV), rest mode (PS5), MP3/HDCP (content protection), VBIOS copy (BC-250 neturi VBIOS).
+
+**Pagrindinis skirtumas:** PS5 loader nėra inicializuoja GPU 3D — jis naudoja GPU DMA tik atminties prieigai per `/dev/gc` ioctl. Tikrą GPU init atlieka Linux amdgpu po boot'o. BC-250 WGP/3D blokeriai (SOS lock, WGP power state) yra hardware/firmware lygio — šie patterns nepašalina jų, bet padeda suprasti GPU page table ir PM4 command formatą.
+
+### ✅ IT_DMA_DATA (0x50) IMPLEMENTUOTAS (2026-09-30) — build OK
+- **Trūkumas rastas:** SW PM4 executor (`DreamV3SwPm4Process`) neturėjo `IT_DMA_DATA` (`0x50`) — paties ps5-loader naudojamo opcode. Tik `IT_WRITE_DATA`, `IT_INDIRECT_BUFFER`, `IT_EVENT_WRITE_EOP`, `IT_RELEASE_MEM`, SET_*/DRAW_*/DISPATCH_*.
+- **Įgyvendinta:** `inc/amdbc250_dream_hw.h` — `IT_DMA_DATA 0x50` + `PM4_DMA_*` flag macros (cp_sync bit31, dst_cache_policy 2<<25, dst_volatile 1<<27, src_cache_policy 2<<13, src_volatile 1<<15, len mask 0x1FFFFF). `src/kmd/amdbc250_dream_kmd.c` — `DreamV3SwDmaRangeResolve()` + `IT_DMA_DATA` atvejis.
+- **Saugumo politika:** operandai turi būti **fiziniai** adresai driverio nuosavo mapped langų (GfxRing / SdmaRing / IhRing / GlobalFence). **NE mapojamas joks arbitrinis PA** — tai būtų `arbitrary kernel read/write` primityvas (SW executor įeinamas per `\\.\AMDBC250DreamV43` IOCTL be DACL). Refuse yra teisingas atsakymas GPU VA'ams (BC-250 neturi GART/VM, kurį host galėtų dereferuoti).
+- **Code Reviewer likučiai (visi pritaikyti):** overlap → `RtlCopyMemory` atmetamas (realus HW palaiko, CPU ne); `count < 6` → skip kaip `IT_WRITE_DATA` (neabortuoti visos submit); `ComputeRing` neįtrauktas (niekur nealokuojamas); macro kolizija `ps5_gpu_patterns.h` ↔ `amdbc250_dream_hw.h` → `PS5_` prefiksas.
+- **Build:** OK 144232B, `atikmdag.sys` (2026-09-30 19:15).
+- **Žinoma skyla (atskira, out-of-scope):** `IT_INDIRECT_BUFFER` (kmd.c:~2101) mapina user-nurodytą PA per `MmMapIoSpace` ir jo interpretuoja kaip PM4. Device objektas be `IoCreateDeviceSecure` → low-priv user gali paduoti arbitrinį PA. Reikia follow-up (IB operandus nukreipti per tą patį `DreamV3SwDmaRangeResolve`).
+
+### ✅ Fence extraction — DMA_DATA teigiamam testui (2026-09-30, v41-round3)
+- **Problema:** 64-bit fence buvo alokuojamas **VIDUJE `DreamV3HwInitGfxRing`**, kuris BC-250 (host-read-only ring base) ją **alokuoja ir tuojau atlaisva** → `FencePhysAddr=0` → DMA_DATA resolver neturi lango.
+- **Sprendimas:** `DreamV3HwInitFence()` (nauja) — **tik host atmintis** (1 puslapis, zeroed, **be jokių MMIO rašymų**). Iškvietiama **PRIEŠ** visus `GRBM_GFX_INDEX` rašymus:
+  - `hw_init.c` **step 4b** (ne-extended kelias)
+  - `hw_init_extended.c` **step 0b** — **NUSTATYTASIS kelias** (`HwInitExtended` default=1, patvirtinta `Step_HwInit=0x0B`); be šio tikslo nepasiektų
+  - Prototipas `inc/amdbc250_dream_kmd.h`; markeris `AMDBC250_HWINIT_STEP_FENCE 40`
+- **SUDĖTI:** fence NEatlaisvinamas GfxRing init funkcijoje (išjungtos 3 vietos); `HwShutdown` = vienintelis owner; **`RemoveDevice` (kmd.c:1046) dabar išsaukia `HwShutdown`** jei `HardwareInitialized` (f-StartDevice → RemoveDevice, ne StopDevice — senasis nutekėjimo kelias).
+- **GfxRing laisvinimas:** visuose 3 keliuose `GfxRing.PhysicalAddress.QuadPart=0` (kad `GET_HW_STATUS` ne报告显示 freed PA).
+- **SEND_PM4 PATH 1 (kmd.c:4970):** EOP fence paketas tik jei `GlobalFence.VirtualAddress != NULL` (anksčiau dangling/0 PA įdedamas be testo).
+- **GfxRing fence guard:** patikra **prieš** 2MB alokaciją, **non-fatal** (`STATUS_SUCCESS` + WARNING) — senas `STATUS_DEVICE_NOT_READY` buvo reached per `GET_NBIO_STATUS` lazy re-init (2MB alloc/zero/free kiekvieną kvietimą) ir abortavo visą init.
+- **Testas:** `output\dma-data-test.exe` — 8 atvejų; `have_windows` = tik `fencePa != 0` (ne `RingsInitialized`, nes BC-250 ring base visada RO). Byte movement neassertinamas (langai nematomi iš user mode).
+- **Code Reviewer (ses_f0c8b8695ffe4rVdrMN2Cc0Ap8):** 2 CRITICAL (nebūtinas step 4b extended keliuje; reachable STATUS_DEVICE_NOT_READY) + 1 HIGH (PATH 1 fence PA) + 3 MED (RemoveDevice leak, freed-PA stale, have_windows) + 4 LOW — **visi 10 pritaikyti**.
+- **Build:** OK **144744B** (20:03).
+
+
 ## ⭐⭐⭐⭐ Linux boot etalonas + 0xB8 quirk (2026-09-24) — INIT-ORDER REFERENCE — README FIRST
 
 ### Šaltinis
@@ -101,11 +276,11 @@
 ### Išvada
 Vartai **statomi pre-x86**: PSP_BL programuoja DF ACL (~926 rašymai) iki x86 reset release (simpmix įrodymas + SEC_GASKET `0x24 @0x982000` mūsų ROM'e). Joks host state (halt/ring/GART/aperture/EFI) jų neatidaro — todėl **AGP-apertūros fazė PRALEISTA** (ta pati ACL + 0x1A rizika be teorijos).
 - Host keliai (BAR5 / PCI-SMN / EFI / halt / ring): **UŽDARYTA, 12+ metodų**
-- Vienintelis apeinantis rašytojas: SMU firmware pats (fw-window rašymai limpa — vcn komandos įrodymas). Bet SPI_PG adreso SMU kontekste niekas nežino → reikia BIOS-5 SRAM dump + Ghidra (exploit projektas, ne dabar; sąlygos: bendruomenės BIOS-5 offset'ai arba aukojama lenta)
+- Vienintelis apeinantis rašytojas: SMU firmware pats (fw-window rašymai limpa — vcn komandos įrodymas). Bet SPI_PG adreso SMU kontekste niekas nežino → **2026-09-30 pataisymas: „BIOS-5 SRAM dump" klaida, mes ant BIOS 3.00; realus kelias = SMU code execution (`bc250-smu-unlock`) → SMU *vidinės* funkcijos (thelamer įrodė, kad domain'us valdo jos, ne mailbox)**
 - Q3 sweep irgi neduotų adresų (siunčia žinutes, neatskleidžia) — atidėtas tuo pačiu pagrindu
 
 ### Kas toliau (produktyvu, vartai nebereikalingi)
-Display + SMU + CPU (viskas veikia) → governor, KMDOD polish, lavapipe registracija, commit'ai. WGP tema nebegrįžtama be naujų faktų (BIOS-5 offset'ų).
+Display + SMU + CPU (viskas veikia) → governor, KMDOD polish, lavapipe registracija, commit'ai. WGP tema nebegrįžtama be naujų faktų — **2026-09-30: SMU power-domain atradimas (thelamer) davė NAUJĄ faktą: power domain'us valdo SMU vidinės funkcijos → WGP galimas per SMU code execution.**
 
 ---
 
@@ -347,8 +522,8 @@ Stage 1 (ICD) + Stage 2 (SW PM4→SCRATCH) were safe — only Stage 3 caused the
 **Sutapimai su mūsų matavimais (patikimumo ženklas):** dom6 `status=0x01010101`/`ctrl=0x02` baitas į baitą; PCI `0xB8/0xBC` rašymai ignoruojami / skaitymai gyvi; mirę skaitymai → `0x00000000`; `0x024` slice žemėlapis patvirtina GC/MP0 adresus.
 
 **Trys sienos:**
-1. **Visi offset'ai tik BIOS 3** (Robin1 PMFW 0.58.6.0); mes ant BIOS 5.00 / PMFW 88.6.0 — kiekvienas adresas vestinas iš naujo (SRAM dump + Ghidra). README: *"BIOS 3 only!"*.
-2. **Nėra adreso SPI_PG SMU kontekste.** Jų sėkmė — SMN erdvė (dom6); SPI_PG — GPU MMIO, ne SMN; kandidatas `0x024` GC slice (`0x02402C00`) — turinys nežinomas, rašyti aklas = hang.
+1. ~~**Visi offset'ai tik BIOS 3**~~ **ATŠAUTA 2026-09-30: mes ANT BIOS 3.00, ne 5.00.** Diske tik 3.00 ROM'ai (`BC250_3.00_M.ROM` == `BC250_3.00_MeiMeiDXEv3.ROM`, 16MB, SHA256 `3D982841…A24736`) — 5.00 ROM'o NĖRA. PMFW 88.6.0 / SMU 11.8 (Xtensa) — **tai pats profilis kaip thelamer** (jie: "SMU 11.8, PMFW 88.6.0 extracted from BIOS") → jų `FUN_*` adresai **taikomi mums tiesiogiai**. `bc250-smu-unlock` „BIOS 3 only" mums **NERIBOJA** — iš anksto parašyta klaida, kurią kartojau.
+2. **Nėra adreso SPI_PG SMU kontekste.** Jų sėkmė — SMN erdvė (dom6); SPI_PG — GPU MMIO, ne SMN; kandidatas `0x024` GC slice (`0x02402C00`) — **2026-09-30 patikrinta: per SMN ten nėra GC alias** (SCRATCH beacon 0x4D585042 nerastas, 0x02402C00+0x32D4=0).
 3. **Kiekvienas žingsnis — wedge rizika** (their measured vectors: call-thunk, route W, thunk-writes, blogi SMN) — Linux'e SSH + PSU cycle; Windows'e hard freeze su filesystem rizika, ir taip kartotinai.
 
 **Refinement 2026-09-24 (mūsų hardware įrodymas):** aukščiau esantis teiginys „Host PCI `0xB8/0xBC`: writes dropped, reads → `0xFFFFFFFF`" galioja **VCN fabric** (SEC_GASKET ACL), NE visam SMN. Įrodyta: `-8core status` skaito `0x0115A870=0xFF` (ne FF..F) per tą patį `0xB8/0xBC`; SMU mailbox 16/16 veikia. CPU/SMU erdvė atvira, VCN erdvė uždaryta.

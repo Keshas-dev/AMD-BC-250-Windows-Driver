@@ -278,6 +278,147 @@ typedef struct _AMDBC250_IOCTL_SMU_CPU_MSG {
 /* Known-safe SMN addresses for Q3 0x98 ungated write (proven on hardware). */
 #define AMDBC250_SAFE_SMN_ADDR_CORE_MASK   0x0115A870
 
+/* ---------------------------------------------------------------------------
+ * SMU secure-access messages (BIOS 3.00 / PMFW 88.6.0).
+ *
+ * These are the "sec_*" debug primitives left in the SMU firmware. They are
+ * GATED by a debug-disable byte in SMU SRAM: while that byte is non-zero every
+ * one of them answers SMU_RETURN_REJECTED_PREREQ (0xFD). IOCTL_AMDBC250_SMU_
+ * UNLOCK_STEP is the staged procedure that clears the gate; only after the
+ * verify step reports the gate open are these messages actually usable.
+ *
+ * Q3 0x2A/0x2B/0x2C are the "mem64" secure-SMN window: 0x2A reads any 32-bit
+ * SMN address, 0x2B+0x2C write any 32-bit value to any 32-bit SMN address.
+ * That is a far broader capability than the host 0xB8/0xBC SMN transport, which
+ * silently drops writes to registers under the PSP data-fabric ACL.
+ * ------------------------------------------------------------------------- */
+#define AMDBC250_SMU_Q3_SEC_SMN_READ32        0x2A  /* arg = SMN address        */
+#define AMDBC250_SMU_Q3_SEC_SET_SMN_WR_ADDR   0x2B  /* arg = SMN address        */
+#define AMDBC250_SMU_Q3_SEC_SMN_WRITE32       0x2C  /* arg = 32-bit value       */
+#define AMDBC250_SMU_Q3_RPC_TRIGGER           0x22  /* arg must be 0x7F         */
+
+/* Q2 transfer-engine sub-op for msg 0x0A (arg0 carries the sub-op code). */
+#define AMDBC250_SMU_Q2_XFER                 0x0A
+#define AMDBC250_SMU_Q2_SUB_SETUP            0x00
+#define AMDBC250_SMU_Q2_SUB_FINALIZE         0x02
+#define AMDBC250_SMU_Q2_SUB_TABLE_RESTORE    0x04
+#define AMDBC250_SMU_Q2_SUB_SRAM_LOAD        0x1F
+#define AMDBC250_SMU_Q2_SUB_SMU2DRAM         0x14
+#define AMDBC250_SMU_Q2_SUB_DRAM2SMU         0x23
+/* Q2 subqueue-ring append - the primitive the unlock chain is built on. */
+#define AMDBC250_SMU_Q2_RING_APPEND          0x23
+
+/* --- Feature framework (SMU 11.8) ----------------------------------------
+ * Q2 0x05/0x06 set and clear bits in the SMU's own feature_mask; a reconcile
+ * walk then invokes each affected feature's enable/disable callback.
+ *
+ * Bit 6 is the one that matters for the GPU compute units. From the SMU
+ * decompile: both RequestActiveWgp (Q0 0x18) and the q1 0x08 state action
+ * test feature 6 and reject with 0xFF when it is clear, so WGP gating is
+ * unusable until it is set. That is the documented reason Q0 0x18 came back
+ * rejected on this board - not a hardware gate.
+ *
+ * Feature 6 is also the safest bit available: it is a stable policy toggle
+ * whose callback powers compute units on and off at idle, it is not a trip
+ * point and it is not a state machine that latches. It is reversible at any
+ * time by clearing it again, and it does not survive as a persisted setting.
+ *
+ * The whitelist deliberately admits ONLY this one bit through these two
+ * messages. The other 63 bits are not reachable here.
+ */
+#define AMDBC250_SMU_Q2_ENABLE_FEATURES      0x05
+#define AMDBC250_SMU_Q2_DISABLE_FEATURES     0x06
+#define AMDBC250_SMU_FEATURE_GFX_WGP_POWER   0x00000040u  /* bit 6 */
+
+/* Q0 0x18 sets the active compute-unit count; the decompile bounds its
+ * argument to 18. 0 is a normal value here (that is the idle state), so the
+ * whole documented range is accepted and every value is reversible. */
+#define AMDBC250_SMU_Q0_REQUEST_ACTIVE_WGP   0x18
+#define AMDBC250_SMU_WGP_COUNT_MAX           18u
+
+/* --- SMU unlock chain constants (bc250-smu-unlock, BIOS 3 only) ------------
+ * SMU-LOCAL SRAM offsets in a private address space - not SMN, not host MMIO.
+ * Valid for PMFW 88.6.0 = our BIOS 3.00. Only the two the driver actually
+ * uses are named here; the rest of the chain's geometry (ring base, entry
+ * size, subqueue slots, transfer-table pointer, the chain's own narrower
+ * window) is documented in bc250-smu-unlock\unlock.py and is not referenced
+ * by any driver code, so it is not duplicated into this header. */
+#define AMDBC250_SMU_DBG_DISABLE             0x7B3Cu  /* secure-access gate */
+#define AMDBC250_SMU_RPC_SCRATCH             0x12080u /* call-anything scratch */
+/* 0x0005A870: a benign SMN address used purely to detect the gate state. */
+#define AMDBC250_SMU_UNLOCK_PROBE_SMN        0x0005A870u
+
+/* --- SMU multi-argument message IOCTL (Function 0x8C, packed 0x80000BF0) ----
+ * Extends the single-argument IOCTL_AMDBC250_SMU_CPU_MSG to the two-argument
+ * Q2 interface and to the multi-argument Q3 debug messages. Still fully
+ * whitelisted: Message and every Arg are validated against fixed tables below.
+ * ------------------------------------------------------------------------- */
+#define IOCTL_AMDBC250_SMU_MSG_ARGS   CTL_CODE_AMDBC250(0x8C, METHOD_BUFFERED, FILE_ANY_ACCESS)
+
+#define AMDBC250_SMU_MAX_ARGS         6u
+
+typedef struct _AMDBC250_IOCTL_SMU_MSG_ARGS {
+    UINT32 Queue;                    /* IN: 2 (transfer/ring) or 3 (debug) */
+    UINT32 Message;                  /* IN: message ID                      */
+    UINT32 ArgCount;                 /* IN: 1..AMDBC250_SMU_MAX_ARGS       */
+    UINT32 Arg[AMDBC250_SMU_MAX_ARGS]; /* IN: argument words, Arg[0] first  */
+    UINT32 Response;                 /* OUT: response value                 */
+    UINT32 ResponseStatus;           /* OUT: 1=OK 0xFF=fail 0xFE=unknown
+                                         0xFD=rejected 0xFC=busy 0=timeout */
+    UINT32 Result;                   /* OUT: 1=sent, 0=refused/failed       */
+} AMDBC250_IOCTL_SMU_MSG_ARGS, *PAMDBC250_IOCTL_SMU_MSG_ARGS;
+
+/* --- Staged SMU secure-access unlock IOCTL (Function 0x8D, 0x80000BF4) ----
+ * Only the two READ-ONLY stages are implemented:
+ *
+ * Step 0 PROBE   read-only. SMU version, the secure-access gate byte, and
+ *                allocation of the driver's 4KB staging page. Also confirms the
+ *                Q2 transfer engine can read SMU SRAM at all, which every
+ *                later stage depends on. Run this first.
+ * Step 4 VERIFY  read-only. Gate byte plus a probe of one benign SMN address
+ *                through the secure window. Before the chain runs the probe
+ *                answers 0xFD (rejected-prerequisite); after it runs it must not.
+ *
+ * Steps 1, 2 and 3 (HIJACK / STAGE / UNLOCK) are RESERVED AND NOT IMPLEMENTED.
+ * The driver returns STATUS_INVALID_PARAMETER for them. They are the
+ * memory-corruption part of the chain, and the sequencing lives outside the
+ * driver on purpose - see the note above SmuUnlockEnsurePage in
+ * src\kmd\amdbc250_dream_kmd.c. Do not add them to this switch without a
+ * reviewed transcription of the reference implementation.
+ *
+ * All mutated state is volatile SMU SRAM: a normal reboot returns the SMU to
+ * its boot state regardless of how far a chain got. Nothing here touches
+ * flash, CMOS or the SPI flash.
+ * ------------------------------------------------------------------------- */
+#define IOCTL_AMDBC250_SMU_UNLOCK_STEP  CTL_CODE_AMDBC250(0x8D, METHOD_BUFFERED, FILE_ANY_ACCESS)
+
+#define AMDBC250_SMU_UNLOCK_STEP_PROBE    0u
+/* 1=HIJACK, 2=STAGE, 3=UNLOCK: reserved, not implemented. */
+#define AMDBC250_SMU_UNLOCK_STEP_VERIFY   4u
+#define AMDBC250_SMU_UNLOCK_STEP_MAX      4u
+
+/* The SMU SRAM window the driver enforces: offsets must be DWORD aligned and
+   the whole range must fit in 1MiB. The chain's own narrower window (0x3054..
+   0x7B20, the region below the debug-disable byte) is deliberately NOT what
+   this bound expresses - that is a property of the chain, not of SRAM. */
+#define AMDBC250_SMU_SRAM_LIMIT           0x00100000u
+
+/* How many SRAM dwords PROBE returns in Detail[4..]. A single value is not
+   enough to tell a real read apart from a read path that always returns zero,
+   which is the failure that would otherwise make a wrong conclusion about the
+   gate byte look like a result. */
+#define AMDBC250_SMU_PROBE_WORDS         4u
+
+typedef struct _AMDBC250_IOCTL_SMU_UNLOCK_STEP {
+    UINT32 Step;                     /* IN: one of the STEP_* values        */
+    UINT32 Param[4];                 /* IN: PROBE reads 4 dwords at
+                                         Param[0], defaulting to the gate   */
+    UINT32 Detail[8];                /* OUT: measurements, see the driver   */
+    UINT32 ResponseStatus;           /* OUT: mailbox status of the last
+                                         SMU message issued by this stage */
+    UINT32 Result;                   /* OUT: 1=stage completed, 0=failed   */
+} AMDBC250_IOCTL_SMU_UNLOCK_STEP, *PAMDBC250_IOCTL_SMU_UNLOCK_STEP;
+
 typedef struct _AMDBC250_PSP_LOAD_IP_FW_IN {
     UINT32 FwType;              /* GFX_FW_TYPE_*: 1=CP_ME 2=CP_PFP 3=CP_CE 4=CP_MEC 8=RLC_G 9=SDMA0 10=SDMA1 18=SMU */
     WCHAR  FileName[260];       /* Absolute path to firmware blob, e.g.

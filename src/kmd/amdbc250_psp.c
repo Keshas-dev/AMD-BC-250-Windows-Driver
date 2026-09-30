@@ -372,13 +372,92 @@ Amdbc250PspSmuQ3Msg(PVOID GpuBar5Va, ULONG Message, ULONG Argument,
     }
     Amdbc250PspSmnWrite(GpuBar5Va, SMU_Q3_RSP_SMN, 0);
 
-    /* Write argument, then command. */
+    /* Write argument, then command. Q3's argument block is a high word at
+       ARG+4 as well (the reference exposes read_arg_high() for it), so it is
+       zeroed here rather than left holding whatever the previous message put
+       there - otherwise a handler that composes a 64-bit operand from the pair
+       reads a stale high word. */
+    Amdbc250PspSmnWrite(GpuBar5Va, SMU_Q3_ARG_SMN + 4, 0);
     Amdbc250PspSmnWrite(GpuBar5Va, SMU_Q3_ARG_SMN, Argument);
     Amdbc250PspSmnWrite(GpuBar5Va, SMU_Q3_CMD_SMN, Message);
 
     /* Wait for completion. */
     st = SmuQ3WaitDone(GpuBar5Va, DIRECT_POLL_MAX_MS);
     ULONG resp = Amdbc250PspSmnRead(GpuBar5Va, SMU_Q3_ARG_SMN);
+
+    if (OutResponse) *OutResponse = resp;
+    if (OutResponseStatus) *OutResponseStatus = st;
+
+    return (st == 0x01) ? STATUS_SUCCESS : STATUS_UNSUCCESSFUL;
+}
+
+/* ============================================================================
+ * SMU Queue 2 mailbox (SMN-based). Q2 is the driver-table / transfer-engine
+ * queue and the only queue that carries a full six-dword argument block.
+ * Register block (verified against the reference implementation in
+ * bc250_smu\api.py DEFAULT_QUEUE_ADDRS):
+ *   CMD    = SMN[0x03B10528]
+ *   RSP    = SMN[0x03B10564]
+ *   ARG0-5 = SMN[0x03B10998 .. 0x03B109AC]   (ARG0 + 4*i)
+ * DONE states match Q3: 0x01=OK, 0xFF=fail, 0xFE=unknown, 0xFD=rejected,
+ * 0xFC=busy.
+ * ============================================================================
+ */
+#define SMU_Q2_CMD_SMN     0x03B10528
+#define SMU_Q2_RSP_SMN     0x03B10564
+#define SMU_Q2_ARG_SMN     0x03B10998
+#define SMU_Q2_ARG_COUNT   6u
+
+/* Q2 polls need a much longer budget than Q0/Q3. A transfer-engine operation
+   can outlast the 100ms used for the short status messages, and returning
+   while the SMU is still busy is how mailbox state gets corrupted: the next
+   caller writes RSP/ARG/CMD onto a mailbox the SMU has not finished with.
+   The reference implementation allows 5 seconds. */
+#define Q2_POLL_MAX_MS 5000
+
+/* Wait for Q2 RSP to reach a DONE state. Returns the state, or 0 on timeout. */
+static ULONG
+SmuQ2WaitDone(PVOID GpuBar5Va, ULONG TimeoutMs)
+{
+    ULONG i;
+    for (i = 0; i < TimeoutMs; i++) {
+        ULONG st = Amdbc250PspSmnRead(GpuBar5Va, SMU_Q2_RSP_SMN);
+        if (st == 0x01 || st == 0xFF || st == 0xFE || st == 0xFD || st == 0xFC) {
+            return st;
+        }
+        KeStallExecutionProcessor(1000); /* 1ms */
+    }
+    return 0;
+}
+
+/* --- SMU Q2 mailbox round-trip carrying the full six-word argument block.
+ *     Wire order matches the reference implementation: RSP=0, then ARG0..ARG5,
+ *     then CMD. There is deliberately NO pre-wait before writing RSP: unlike
+ *     Q0/Q3, which are used constantly and therefore always left in a DONE
+ *     state, a freshly booted SMU may leave Q2's RSP at 0, and 0 is not a DONE
+ *     value - so a pre-wait would time out without ever sending. Callers MUST
+ *     have validated (Message, Args) against the kernel whitelist first.
+ *     Returns STATUS_SUCCESS only on 0x01. --- */
+NTSTATUS
+Amdbc250PspSmuQ2Msg(PVOID GpuBar5Va, ULONG Message, const ULONG *Args,
+                    PULONG OutResponse, PULONG OutResponseStatus)
+{
+    ULONG i;
+
+    if (!GpuBar5Va || !Args) return STATUS_INVALID_PARAMETER;
+
+    /* Clear any previous result, then write all six argument words. Every SMU
+       mailbox handler reads a fixed width block, so the unused trailing words
+       MUST be zeroed rather than left holding the previous message's data. */
+    Amdbc250PspSmnWrite(GpuBar5Va, SMU_Q2_RSP_SMN, 0);
+    for (i = 0; i < SMU_Q2_ARG_COUNT; i++) {
+        Amdbc250PspSmnWrite(GpuBar5Va, SMU_Q2_ARG_SMN + 4 * i, Args[i]);
+    }
+    Amdbc250PspSmnWrite(GpuBar5Va, SMU_Q2_CMD_SMN, Message);
+
+    /* Wait for completion. */
+    ULONG st = SmuQ2WaitDone(GpuBar5Va, Q2_POLL_MAX_MS);
+    ULONG resp = Amdbc250PspSmnRead(GpuBar5Va, SMU_Q2_ARG_SMN);
 
     if (OutResponse) *OutResponse = resp;
     if (OutResponseStatus) *OutResponseStatus = st;
