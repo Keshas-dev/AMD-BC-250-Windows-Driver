@@ -201,7 +201,7 @@ NTSTATUS DreamV3SmuWakeGfx(PDREAM_V3_DEVICE_EXTENSION DevExt);
 VOID DreamV3MarkHwInitStep(ULONG Step);
 
 /*===========================================================================
-  DreamV3DisplayWritesEnabled G�� guard for live DCN (HUBPREQ/OTG) writes.
+  DreamV3DisplayWritesEnabled Gï¿½ï¿½ guard for live DCN (HUBPREQ/OTG) writes.
 
   BC-250's OTG0 scans out a real 2560x1440@60 framebuffer from the GOP/UEFI
   BIOS. Writing HUBPREQ surface address / FLIP_CONTROL into that LIVE scanout
@@ -1178,7 +1178,7 @@ static VOID DreamV3WdmUnload(_In_ PDRIVER_OBJECT DriverObject)
                    "AMDBC250-DREAM-V4.3: Control device deleted by WDM unload\n"));
     }
 
-    /* Free separately-allocated device extension (WDM path only G�� WDDM path frees in RemoveDevice) */
+    /* Free separately-allocated device extension (WDM path only Gï¿½ï¿½ WDDM path frees in RemoveDevice) */
     if (g_PciDevExt != NULL) {
         ExFreePoolWithTag(g_PciDevExt, '3vDA');
         g_PciDevExt = NULL;
@@ -1770,7 +1770,7 @@ DreamV3WriteEopFence(
 }
 
 /*
- * Software PM4 executor G�� translate PM4 packets to direct register writes.
+ * Software PM4 executor Gï¿½ï¿½ translate PM4 packets to direct register writes.
  *
  * Handles: IT_NOP, IT_WRITE_DATA, IT_EVENT_WRITE_EOP, IT_RELEASE_MEM,
  *          IT_SET_CONFIG_REG, IT_SET_CONTEXT_REG, IT_SET_SH_REG, PM4_TYPE_0,
@@ -1809,7 +1809,7 @@ DreamV3SwRegRangeValid(
  * A flat table rather than an array of ring pointers, because IhRing is
  * DREAM_V3_IH_RING, not DREAM_V3_RING_BUFFER: the three fields read below
  * happen to sit at identical offsets today, so casting the pointer would
- * compile with a C4133 warning and work by accident — silently wrong the day
+ * compile with a C4133 warning and work by accident â€” silently wrong the day
  * either struct is reordered. */
 typedef struct _DREAM_V3_DMA_WINDOW {
     PHYSICAL_ADDRESS    PhysicalAddress;
@@ -1892,7 +1892,7 @@ DreamV3SwPm4Process(
 {
     ULONG i = 0;
 
-    /* Depth guard G�� prevent stack overflow from nested IT_INDIRECT_BUFFER */
+    /* Depth guard Gï¿½ï¿½ prevent stack overflow from nested IT_INDIRECT_BUFFER */
     if (Depth == 0) {
         return STATUS_ALERTED;
     }
@@ -1929,7 +1929,7 @@ DreamV3SwPm4Process(
             ULONG opcode = (header >> 8) & 0xFF;
             i++;
 
-            /* NOP has no meaningful payload G�� skip count validation */
+            /* NOP has no meaningful payload Gï¿½ï¿½ skip count validation */
             if (opcode != IT_NOP && i + count > CommandCount) {
                 return STATUS_BUFFER_TOO_SMALL;
             }
@@ -2017,7 +2017,7 @@ DreamV3SwPm4Process(
             case IT_SET_SH_REG: {
                 /* SH register space: hwOff = mmREGISTER / 4.
                  * On BC-250: BAR5_offset = AMDBC250_GC_BASE + hwOff * 4
-                 * (No +0x2C000 G�� BC-250's mmREGISTER already encodes GC block offset.) */
+                 * (No +0x2C000 Gï¿½ï¿½ BC-250's mmREGISTER already encodes GC block offset.) */
                 if (count >= 1) {
                     ULONG hwOff = Commands[i];
                     ULONG numRegs = count - 1;
@@ -2063,7 +2063,7 @@ DreamV3SwPm4Process(
             }
 
             case IT_DMA_DATA: {
-                /* PM4 IT_DMA_DATA (0x50) — 6 payload DWORDs:
+                /* PM4 IT_DMA_DATA (0x50) â€” 6 payload DWORDs:
                  *   [0] control flags, [1] src addr lo, [2] src addr hi,
                  *   [3] dst addr lo, [4] dst addr hi, [5] byte count.
                  * Layout copied verbatim from the PS5 loader's
@@ -2111,7 +2111,7 @@ DreamV3SwPm4Process(
                      * copy does not, and RtlCopyMemory on overlap is undefined.
                      * Bounded by the window checks above, so the worst outcome
                      * of mishandling it would be a mangled ring, not a memory
-                     * fault — but it is a behavioural difference from the GPU,
+                     * fault â€” but it is a behavioural difference from the GPU,
                      * so reject it explicitly rather than corrupt silently. */
                     if ((PUCHAR)dst < (PUCHAR)src + bytes &&
                         (PUCHAR)src < (PUCHAR)dst + bytes) {
@@ -2357,7 +2357,7 @@ DreamV3DdiPresent(
 
     if (pSrcAlloc != NULL && pSrcAlloc->PhysicalAddress.QuadPart != 0) {
         if (!DreamV3DisplayWritesEnabled()) {
-            /* DCN HUBPREQ writes are DISABLED by default G�� they target a LIVE
+            /* DCN HUBPREQ writes are DISABLED by default Gï¿½ï¿½ they target a LIVE
              * 2560x1440 scanout (0xEB28+) and black-screen/hang the GPU unless
              * a full DCN pipeline is initialized. See DreamV3DisplayWritesEnabled. */
             KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
@@ -2596,7 +2596,7 @@ DreamV3DdiSetVidPnSourceAddress(
 
     /* Program HUBPREQ0_DCSURF_PRIMARY_SURFACE_ADDRESS (DCN 2.1) */
     if (!DreamV3DisplayWritesEnabled()) {
-        /* Live-scanout HUBPREQ writes are DISABLED by default G�� see
+        /* Live-scanout HUBPREQ writes are DISABLED by default Gï¿½ï¿½ see
          * DreamV3DisplayWritesEnabled (writing 0xEB28+ hangs the GPU). */
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
             "AMDBC250-DREAM-V4.3: SetVidPnSourceAddress HUBPREQ write SKIPPED (DisplayWritesEnabled=0)\n"));
@@ -2638,7 +2638,7 @@ DreamV3DdiSetVidPnSourceVisibility(
      * DDI display path is stubbed on Win11 26100 (WDM fallback). */
     if (DevExt->MmioVirtualBase != NULL) {
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_TRACE_LEVEL,
-                   "AMDBC250-DREAM-V4.3: SetVidPnSourceVisibility G�� OTG stub (DDI display disabled)\n"));
+                   "AMDBC250-DREAM-V4.3: SetVidPnSourceVisibility Gï¿½ï¿½ OTG stub (DDI display disabled)\n"));
     }
 
     return STATUS_SUCCESS;
@@ -3422,7 +3422,7 @@ DreamV3DeviceControl(
     PIO_STACK_LOCATION irpSp = IoGetCurrentIrpStackLocation(Irp);
     NTSTATUS status = STATUS_SUCCESS;
     ULONG bytesReturned = 0;
-    /* WARNING: METHOD_BUFFERED G�� inputBuffer == outputBuffer (same SystemBuffer).
+    /* WARNING: METHOD_BUFFERED Gï¿½ï¿½ inputBuffer == outputBuffer (same SystemBuffer).
      * Read ALL input fields BEFORE writing to output. Do NOT RtlZeroMemory before reading. */
     PVOID inputBuffer = Irp->AssociatedIrp.SystemBuffer;
     PVOID outputBuffer = Irp->AssociatedIrp.SystemBuffer;
@@ -4040,7 +4040,7 @@ DreamV3DeviceControl(
 
             if (physAddr != 0) {
                 if (!DreamV3DisplayWritesEnabled()) {
-                    /* Live-scanout HUBPREQ writes are DISABLED by default G�� see
+                    /* Live-scanout HUBPREQ writes are DISABLED by default Gï¿½ï¿½ see
                      * DreamV3DisplayWritesEnabled. Writing 0xEB28+ hangs the GPU. */
                     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
                         "AMDBC250-DREAM-V4.3: FlipDisplay HUBPREQ write SKIPPED (DisplayWritesEnabled=0)\n"));
@@ -4135,7 +4135,7 @@ DreamV3DeviceControl(
 
         PUCHAR mmio = (PUCHAR)DevExt->MmioVirtualBase;
 
-        /* Helper macros G�� one SMU mailbox round-trip each, tracking the worst
+        /* Helper macros Gï¿½ï¿½ one SMU mailbox round-trip each, tracking the worst
          * response status so a single dead message doesn't mask the rest. */
 #define SMU_TEL_QUERY(_msg, _arg, _out)                                        \
         do {                                                                   \
@@ -4415,7 +4415,7 @@ DreamV3DeviceControl(
             SMU_ARG_TEMP,        /* 30..100 C */
             SMU_ARG_BOOL,        /* 0 or 1 */
             SMU_ARG_CORE_ID,     /* 0..7 */
-            SMU_ARG_MASK32,      /* raw 32-bit mask (feature bits) — safe bits only */
+            SMU_ARG_MASK32,      /* raw 32-bit mask (feature bits) â€” safe bits only */
             SMU_ARG_SMN_ADDR,    /* known-safe SMN address only (Q3 0x98 ungated write) */
             SMU_ARG_DRIVER_PA,   /* driver-owned DRAM page only (table DMA) */
             SMU_ARG_SRAM_ADDR,   /* DWORD-aligned SMU SRAM offset (lower SRAM only) */
@@ -5091,7 +5091,7 @@ DreamV3DeviceControl(
          *
          * NOTE 2026-07-31: SPI_PG_ENABLE_STATIC_WGP_MASK is a PER-BANK register
          * (one instance per SE/SH). The GRBM_GFX_INDEX per-bank select must be
-         * written first (SE0/SH0, SE0/SH1, SE1/SH0, SE1/SH1) G�� otherwise host
+         * written first (SE0/SH0, SE0/SH1, SE1/SH0, SE1/SH1) Gï¿½ï¿½ otherwise host
          * reads/writes land on the wrong instance and appear read-only (0x0).
          * Linux writes these via GRBM select inside gfx_v10_0_get_cu_info().
          * Per-bank selects (GRBM_GFX_INDEX values, no broadcast flags):
@@ -5133,7 +5133,7 @@ DreamV3DeviceControl(
                 /* Read back and verify the SPI gate state on this bank.
                  * CC_GC_SHADER_ARRAY_CONFIG CU mask is bits [31:19]; compare
                  * that field (0xFFF80000=0x1FFF stock 24CU vs 0xFFE00000=0x1FFE
-                 * unlocked 40CU), NOT the whole DWORD G�� a plain 0xFFE00000 mask
+                 * unlocked 40CU), NOT the whole DWORD Gï¿½ï¿½ a plain 0xFFE00000 mask
                  * is identical for both states. */
                 ULONG spiBack = DreamV3ReadRegister(DevExt, AMDBC250_REG_SPI_PG_ENABLE_STATIC_WGP_MASK);
                 ULONG ccBack = DreamV3ReadRegister(DevExt, AMDBC250_REG_CC_GC_SHADER_ARRAY_CONFIG);
@@ -5155,10 +5155,10 @@ DreamV3DeviceControl(
             if (enable) {
                 KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
                     "AMDBC250-DREAM-V4.3: *** WGP UNLOCK ENABLED *** "
-                    "CC=0xFFE00000 SPI=0x1F (WGP0-4) G�� %lu/4 banks verified\n", banksVerified));
+                    "CC=0xFFE00000 SPI=0x1F (WGP0-4) Gï¿½ï¿½ %lu/4 banks verified\n", banksVerified));
             } else {
                 KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
-                    "AMDBC250-DREAM-V4.3: WGP unlock DISABLED (WGP0-2, stock) G�� %lu/4 banks verified\n",
+                    "AMDBC250-DREAM-V4.3: WGP unlock DISABLED (WGP0-2, stock) Gï¿½ï¿½ %lu/4 banks verified\n",
                     banksVerified));
             }
             status = STATUS_SUCCESS;
@@ -5232,10 +5232,10 @@ DreamV3DeviceControl(
                 InitHw->MmioPhysicalBase, InitHw->MmioSize));
 
             /* Full INIT holds no DeviceMutex during DreamV3HwInitialize
-             * (deadlock: KiqInit → 0x900 → DeviceMutex). Reject re-entry. */
+             * (deadlock: KiqInit â†’ 0x900 â†’ DeviceMutex). Reject re-entry. */
             if (DevExt->HwInitInProgress) {
                 KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL,
-                    "AMDBC250-DREAM-V4.3: INIT_HARDWARE concurrent re-entry — STATUS_DEVICE_BUSY\n"));
+                    "AMDBC250-DREAM-V4.3: INIT_HARDWARE concurrent re-entry â€” STATUS_DEVICE_BUSY\n"));
                 status = STATUS_DEVICE_BUSY;
                 ExReleaseFastMutex(&DevExt->DeviceMutex);
                 break;
@@ -5398,24 +5398,24 @@ DreamV3DeviceControl(
                 KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                     "AMDBC250-DREAM-V4.3: GPU reg[0x0000] = 0x%08X (NBIO_MAP test)\n", gpuId));
                 
-                /* 40 CU unlock deferred G�� inaccurate offsets cause hangs */
+                /* 40 CU unlock deferred Gï¿½ï¿½ inaccurate offsets cause hangs */
                 
                 DevExt->HardwareInitialized = TRUE;
                 DevExt->GpuClockMhz = AMDBC250_BOOST_CLOCK_MHZ;
                 DevExt->MemoryClockMhz = AMDBC250_MEMORY_CLOCK_MHZ;
 
-                /* NBIO_MAP: NO KiqInit here — PSP proxy (0x900/0x901) works
-                 * without KIQ. Calling Amdbc250PspKiqInit → PspProxyInit →
-                 * PSP GET_GPU_INFO → GPU 0x900 re-acquires DeviceMutex →
+                /* NBIO_MAP: NO KiqInit here â€” PSP proxy (0x900/0x901) works
+                 * without KIQ. Calling Amdbc250PspKiqInit â†’ PspProxyInit â†’
+                 * PSP GET_GPU_INFO â†’ GPU 0x900 re-acquires DeviceMutex â†’
                  * DEADLOCK (non-recursive FastMutex). KIQ only needed for
-                 * SEND_PM4/ring — init via separate IOCTL later. */
+                 * SEND_PM4/ring â€” init via separate IOCTL later. */
                 DevExt->KiqAvailable = FALSE;
 
                 bytesReturned = sizeof(AMDBC250_IOCTL_INIT_HARDWARE);
                 status = STATUS_SUCCESS;
                 ExReleaseFastMutex(&DevExt->DeviceMutex);
 
-                /* SDMA ring init SKIPPED — suspected BSOD 0x1a source.
+                /* SDMA ring init SKIPPED â€” suspected BSOD 0x1a source.
                  * Register range 0xE000-0xE018 needs probing first. */
                 KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                     "AMDBC250-DREAM-V4.3: NBIO_MAP done (no KIQ), SDMA skipped\n"));
@@ -5469,8 +5469,8 @@ DreamV3DeviceControl(
             }
 
             /* Mark in-progress UNDER mutex, then release: DreamV3HwInitialize
-             * calls Amdbc250PspKiqInit → PspProxyInit → PSP GET_GPU_INFO →
-             * GPU 0x900 re-acquires DeviceMutex (non-recursive) → DEADLOCK. */
+             * calls Amdbc250PspKiqInit â†’ PspProxyInit â†’ PSP GET_GPU_INFO â†’
+             * GPU 0x900 re-acquires DeviceMutex (non-recursive) â†’ DEADLOCK. */
             DevExt->HwInitInProgress = TRUE;
             ExReleaseFastMutex(&DevExt->DeviceMutex);
 
@@ -5585,7 +5585,7 @@ DreamV3DeviceControl(
                 ULONG EopSize = 6 * sizeof(ULONG); /* EOP packet is 6 DWORDs */
                 ULONG TotalBytes = BytesNeeded + (SendPm4->FenceValue > 0 ? EopSize : 0);
 
-                /* Ring wrap if needed (including space for EOP) G�� use 64-bit to avoid overflow */
+                /* Ring wrap if needed (including space for EOP) Gï¿½ï¿½ use 64-bit to avoid overflow */
                 if ((ULONG64)WPtr + TotalBytes > RingSize) {
                     ULONG NopCount = (RingSize - WPtr) / sizeof(ULONG);
                     for (ULONG i = 0; i < NopCount; i++) {
@@ -5605,7 +5605,7 @@ DreamV3DeviceControl(
 
                 /* Write EOP fence BEFORE doorbell
                  * NOTE: Fence PM4 is written to GfxRing buffer but doorbell
-                 * below kicks HQD/KIQ ring G�� fence never consumed by HW.
+                 * below kicks HQD/KIQ ring Gï¿½ï¿½ fence never consumed by HW.
                  * TODO: Move fence to SavedPm4Cmds/KIQ ring instead. */
                 if (SendPm4->FenceValue > 0) {
                     DreamV3WriteEopFence(DevExt, (ULONG64)SendPm4->FenceValue);
@@ -7176,7 +7176,7 @@ DreamV3DeviceControl(
                         BAR5_READ(GCVM_CONTEXT0_PT_BASE_HI),
                         BAR5_READ(GCVM_CONTEXT0_PT_BASE_LO)));
 
-                    /* Enable GCVM context 0 G�� MUST be 4-level (PAGE_TABLE_DEPTH=3).
+                    /* Enable GCVM context 0 Gï¿½ï¿½ MUST be 4-level (PAGE_TABLE_DEPTH=3).
                      * Ring GPU VA is 0xF4FFFA000 (bits[39:30]=0xD); a flat
                      * (depth=0) single-level PT can't walk those top bits -> VM
                      * fault -> ring never fetched. depth field = bits[2:1]=0x06. */
@@ -7272,7 +7272,7 @@ DreamV3DeviceControl(
                 ULONG meVal = BAR5_READ(ME_CNTL);
                 BAR5_WRITE(ME_CNTL, meVal & ~((1 << 28) | (1 << 30)));  /* clear ME_HALT | PFP_HALT */
             }
-            /* Step 18b: UNHALT MEC G�� KIQ runs on MEC0; if MEC is left halted
+            /* Step 18b: UNHALT MEC Gï¿½ï¿½ KIQ runs on MEC0; if MEC is left halted
              * (minimal PSP SOS / firmware load may leave it halted) the ring is
              * never fetched even though WPTR advances. This was the missing piece. */
             {
@@ -7312,7 +7312,7 @@ DreamV3DeviceControl(
                     BAR5_WRITE(0x3BC0, 32);  /* 32 dwords */
                     /* Then set ME=1 for RLC scheduler trigger */
                     BAR5_WRITE(GRBM_INDEX, 0x00010000);
-                    BAR5_WRITE(0xECA8, 0xA0);  /* RLC_CP_SCHEDULERS G�� correct offset */
+                    BAR5_WRITE(0xECA8, 0xA0);  /* RLC_CP_SCHEDULERS Gï¿½ï¿½ correct offset */
                     BAR5_WRITE(GRBM_INDEX, AMDBC250_GRBM_GFX_INDEX_BROADCAST_VAL);  /* restore broadcast */
                     kiqTest->HqdProgrammed = 2;  /* IB mode */
                 } else {
@@ -7372,7 +7372,7 @@ DreamV3DeviceControl(
                 useIb ? "IB" : "KIQ",
                 kiqTest->ScratchBefore, kiqTest->ScratchAfter, kiqTest->Result));
 
-            /* Step 22b: Retry kick G�� if MEC was just unhalted (or the engine
+            /* Step 22b: Retry kick Gï¿½ï¿½ if MEC was just unhalted (or the engine
              * simply needed a second WPTR kick / more time), re-assert WPTR and
              * wait again. Capture retry diagnostics into the *_2 fields. */
             if (kiqTest->ScratchAfter != 0x5AFEBABE) {
@@ -7579,7 +7579,7 @@ DreamV3DeviceControl(
             "AMDBC250-DREAM-V4.3: LOAD_CP_FW header: total=%u hdrSize=%u ver=%u ucodeSize=%u ucodeOff=%u jtOffDw=%u jtSizeDw=%u\n",
             totalSize, hdrSizeBytes, ucodeVersion, ucodeSize, ucodeOffset, jtOffsetDw, jtSizeDw));
 
-        /* Validate header fields G�� avoid integer overflow */
+        /* Validate header fields Gï¿½ï¿½ avoid integer overflow */
         if (ucodeSize == 0 || ucodeOffset < hdrSizeBytes || 
             ucodeSize > fwSize || ucodeOffset > fwSize - ucodeSize) {
             KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
@@ -7615,7 +7615,7 @@ DreamV3DeviceControl(
          * the host IC_BASE DMA + CP unhalt path.
          *
          * On BC-250 the host cannot un-halt a CP engine after loading microcode
-         * G�� doing so lets the GPU run the firmware and perform a rogue host DMA
+         * Gï¿½ï¿½ doing so lets the GPU run the firmware and perform a rogue host DMA
          * write that corrupts system memory (0x1A MEMORY_MANAGEMENT). The PSP
          * driver hands the blob to the SOS, which loads it through the secure
          * mailbox (GFX_CMD_ID_LOAD_IP_FW), exactly like Linux does for this ASIC.
@@ -7798,7 +7798,7 @@ DreamV3DeviceControl(
             /* 0x0B460 = empirically-verified alive GCVM_CONTEXT0_CNTL (see hw.h) */
             #define KIQ_GCVM_CTX0_CNTL  AMDBC250_REG_GCVM_CONTEXT0_CNTL
 
-            /* Step 0: Save BIOS state (use DreamV3ReadRegister G�� no volatile pointer!) */
+            /* Step 0: Save BIOS state (use DreamV3ReadRegister Gï¿½ï¿½ no volatile pointer!) */
             kt->ScratchBefore           = DreamV3ReadRegister(DevExt, KIQ_SCRATCH_OFF);
             kt->KiqRptrBefore           = DreamV3ReadRegister(DevExt, KIQ_RPTR_OFF);
             kt->MeCntlBefore            = DreamV3ReadRegister(DevExt, KIQ_ME_CNTL_OFF);
@@ -7829,7 +7829,7 @@ DreamV3DeviceControl(
 
             KdPrint(("AMDBC250-DREAM-V4.3: KIQ_NOP_TEST ring PA=0x%llX\n", ringPa.QuadPart));
 
-            /* Step 2: Read current KIQ_BASE G�� if non-zero, BIOS configured KIQ */
+            /* Step 2: Read current KIQ_BASE Gï¿½ï¿½ if non-zero, BIOS configured KIQ */
             {
                 ULONG kBaseLo = DreamV3ReadRegister(DevExt, KIQ_BASE_LO_OFF);
                 ULONG kBaseHi = DreamV3ReadRegister(DevExt, KIQ_BASE_HI_OFF);
@@ -8197,7 +8197,7 @@ DreamV3DeviceControl(
                 resp->RingDword2 = ring[2];
                 resp->RingDword3 = ring[3];
             } __except(EXCEPTION_EXECUTE_HANDLER) {
-                /* Ring may have been unmapped G�� non-fatal */
+                /* Ring may have been unmapped Gï¿½ï¿½ non-fatal */
                 resp->RingDword0 = resp->RingDword1 = resp->RingDword2 = resp->RingDword3 = 0xDEAD;
             }
 
@@ -8321,7 +8321,7 @@ DreamV3DeviceControl(
         break;
     }
 
-    case 0x8000098C: { /* IOCTL_AMDBC250_GCVM_PT_SETUP G�� Set up GCVM page table */
+    case 0x8000098C: { /* IOCTL_AMDBC250_GCVM_PT_SETUP Gï¿½ï¿½ Set up GCVM page table */
         {
             PHYSICAL_ADDRESS lowAddr = {0x100000}, highAddr = {0xFFFFFFFFFFFFFFFFULL}, boundaryAddr = {0};
             PHYSICAL_ADDRESS ringPhys, ptPhys[3];
@@ -8591,7 +8591,7 @@ DreamV3DeviceControl(
         RtlZeroMemory(rp, sizeof(*rp));
         rp->CommandCount = cmdCount;
         pollMs = pollTimeoutMs & 0x7FFFFFFF;
-        if (pollMs > 50) pollMs = 50; /* hard cap — live-display GRBM/KIQ window */
+        if (pollMs > 50) pollMs = 50; /* hard cap â€” live-display GRBM/KIQ window */
         rp->TimeoutMs = pollMs;
 
         /* --- Allocate ring buffer (MQD stored at offset 0; PM4 at offset 256) --- */
@@ -8681,8 +8681,8 @@ DreamV3DeviceControl(
         rp->ScratchBefore = DreamV3ReadRegister(DevExt, AMDBC250_REG_SCRATCH_REG0);
 
         /* Step 1: Select ME=1 (MEC) once; enable schedulers; unhalt ME+MEC.
-           GRBM is left on KIQ select for the whole HW section — no per-poll
-           KIQ↔broadcast thrash (that hammered display-path index reads). */
+           GRBM is left on KIQ select for the whole HW section â€” no per-poll
+           KIQâ†”broadcast thrash (that hammered display-path index reads). */
         DreamV3WriteRegister(DevExt, AMDBC250_REG_GRBM_GFX_INDEX,
             AMDBC250_GRBM_GFX_INDEX_KIQ_VAL);
 
@@ -8758,8 +8758,8 @@ DreamV3DeviceControl(
             rp->WptrAfter = totalBytes;
         }
 
-        /* Short poll for RPTR advance — GRBM stays on KIQ select (no thrash).
-           pollMs capped at 50 (above): WGP locked ⇒ RPTR never moves; long hold
+        /* Short poll for RPTR advance â€” GRBM stays on KIQ select (no thrash).
+           pollMs capped at 50 (above): WGP locked â‡’ RPTR never moves; long hold
            of non-default GRBM index on live display was a white-screen contributor. */
         {
             ULONG waited = 0;
@@ -8774,7 +8774,7 @@ DreamV3DeviceControl(
 
         /* --- CLEANUP HW first (live-display safe): deactivate HQD, re-halt
                ME/MEC, restore schedulers + GRBM index BEFORE SW fallback.
-               SW PM4 writes SCRATCH via absolute BAR5 — must run with the
+               SW PM4 writes SCRATCH via absolute BAR5 â€” must run with the
                original GRBM index (broadcast), not KIQ/ME select. --- */
         DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_HQD_ACTIVE, 0);
         DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_HQD_PQ_WPTR_LO, 0);
@@ -8800,7 +8800,7 @@ DreamV3DeviceControl(
         }
 
         /* --- DISPATCH_DIRECT test: ONLY if TimeoutMs bit31 set (opt-in).
-               Default OFF — writes PGM + DISPATCH_INITIATOR on live display
+               Default OFF â€” writes PGM + DISPATCH_INITIATOR on live display
                is a documented white-screen source. Restores GRBM after. --- */
         rp->DispatchResult = 0;
         rp->GrbmStatusBefore = 0;
@@ -9213,7 +9213,7 @@ DreamV3DeviceControl(
     }
 
     /* ==========================================================================
-       IOCTL_AMDBC250_PSP_RING_LOAD_IP_FW (0x80000C20) — GFX_CMD_ID_LOAD_IP_FW (0x06)
+       IOCTL_AMDBC250_PSP_RING_LOAD_IP_FW (0x80000C20) â€” GFX_CMD_ID_LOAD_IP_FW (0x06)
        via the KM GPCOM ring.
 
        The driver reads the firmware file itself (user cannot pass a GPU-visible
@@ -9250,7 +9250,7 @@ DreamV3DeviceControl(
 
             /* File I/O and staging allocation must run at PASSIVE_LEVEL, so
                do them BEFORE acquiring the fast mutex (ExAcquireFastMutex
-               raises IRQL to APC_LEVEL — ZwCreateFile/ReadFile are illegal
+               raises IRQL to APC_LEVEL â€” ZwCreateFile/ReadFile are illegal
                there). Only ring build/kick/poll runs under the mutex. */
             PUCHAR fwData = NULL;
             ULONG fwSize = 0;
@@ -9414,7 +9414,7 @@ DreamV3DeviceControl(
 
             /* Only free the staging buffer once the fence confirms the PSP is
                done reading it. On timeout the PSP may still be DMA-reading the
-               blob — freeing now could hand those pages to another allocator
+               blob â€” freeing now could hand those pages to another allocator
                and corrupt the load (or leak data). A one-shot leak per failed
                load is preferable. */
             if (fenceStatus) {
@@ -9434,12 +9434,12 @@ DreamV3DeviceControl(
     }
 
     /* ==========================================================================
-       IOCTL_AMDBC250_PSP_RING_SETUP_TMR (0x80000C24) — GFX_CMD_ID_SETUP_TMR (0x05)
+       IOCTL_AMDBC250_PSP_RING_SETUP_TMR (0x80000C24) â€” GFX_CMD_ID_SETUP_TMR (0x05)
        via the KM GPCOM ring.
 
        Gives the SOS a TMR region for trusted-app runtime data. buf_phy_addr is
        a GPU address (MC for VRAM, GART VA for GTT); system_phy_addr is the CPU
-       physical address — they differ. We cannot provide a GART VA (GART/VM path
+       physical address â€” they differ. We cannot provide a GART VA (GART/VM path
        broken), so we use the VRAM aperture like Linux does on this board:
        buf_phy_addr = MC 0xF40F800000, system_phy_addr = BAR0 physical + same
        offset. No host allocation needed.
@@ -9471,10 +9471,10 @@ DreamV3DeviceControl(
                buf_phy_addr is a GPU address (MC for VRAM, GART VA for GTT);
                passing a CPU physical address there fails with
                TEE_ERROR_BAD_PARAMETERS. We cannot provide a GART VA (GART/VM
-               path is broken on this driver), so use the VRAM aperture:
+               path is not implemented on this driver), so use the VRAM aperture:
                buf_phy_addr = GPU MC (0xF400000000+off), system_phy_addr = CPU
-               physical (aper_base = BAR0 + off). Offsets mirror Linux dmesg
-               on this board ("PSP TMR: 4MB reserved at 0xF40F800000"). */
+               physical (aper_base = BAR0 + off). The offset is derived from the
+               actual VRAM size - see below. */
             PHYSICAL_ADDRESS tmrPa;   /* system_phy_addr (CPU physical) */
             PHYSICAL_ADDRESS tmrMc;   /* buf_phy_addr (GPU MC) */
             tmrPa.QuadPart = 0;
@@ -9491,11 +9491,63 @@ DreamV3DeviceControl(
                 UINT64 mcBase = 0xF400000000ULL;      /* vram_start (Linux dmesg) */
                 UINT64 phyBase = DevExt->FbPhysicalBase.QuadPart;
                 if (phyBase == 0) phyBase = 0xC0000000ULL;  /* aper_base = BAR0 */
-                UINT64 offset = 0x0F800000ULL;         /* Linux TMR offset in 256MB VRAM */
-                if (offset + tmrSize > 0x10000000ULL) {
-                    status = STATUS_INVALID_PARAMETER;  /* would exceed 256MB VRAM */
+
+                /*
+                 * Linux places the PSP TMR and the GART table at fixed distances
+                 * below VRAM top, not at fixed offsets from the base. From the
+                 * CachyOS capture on this exact board, VRAM
+                 * 0xF400000000-0xF41FFFFFFF (512 MB):
+                 *
+                 *   "reserve 0x400000 from 0xf41f800000 for PSP TMR"
+                 *   "PCIE GART of 512M enabled (table at 0x000000F41FE00000)"
+                 *
+                 * So the layout measured down from the top of VRAM is:
+                 *   [GART table 2MB][gap 2MB][TMR 4MB][... free VRAM ...]
+                 *
+                 * The previous hardcoded offset of 0x0F800000 computed
+                 * 0xF40F800000, which is 224 MB below where Linux actually puts
+                 * it. A TMR outside the region the PSP considers valid is the
+                 * most likely reason SETUP_TMR returned
+                 * TEE_ERROR_BAD_PARAMETERS (0xFFFF0006).
+                 *
+                 * The offset must therefore be derived from VRAM size minus the
+                 * reservation above the TMR. Do NOT collapse this into a single
+                 * constant: the 0x400000 reserve is what keeps the TMR clear of
+                 * the GART table, and a single constant would silently break
+                 * that for any tmrSize other than 4 MB.
+                 *
+                 * Note DevExt->TotalVramBytes is never a real VRAM size on this
+                 * path: it is 0 at AddDevice and the 16 GB fallback elsewhere,
+                 * because DreamV3DetectVram only runs in the full-init path and
+                 * even there assigns CMOS UMA_SIZE to VisibleVramBytes, not to
+                 * TotalVramBytes. So the range filter below always substitutes
+                 * 512 MB. That is deliberate - 512 MB is directly evidenced by
+                 * both the CMOS UMA_SIZE dump and the Linux capture - but it
+                 * means this does not follow a future VRAM reconfiguration.
+                 */
+                UINT64 vramSize = (UINT64)DevExt->TotalVramBytes;
+                UINT64 offset;     /* from vram start to the TMR */
+                UINT64 reserve;    /* bytes held above the TMR: GART table + gap */
+
+                if (vramSize < 0x10000000ULL || vramSize > 0x200000000ULL)
+                    vramSize = 0x20000000ULL;   /* 512 MB: what this board reports */
+
+                reserve = 0x400000ULL;          /* 2MB GART table + 2MB gap */
+
+                if (tmrSize >= vramSize || reserve + tmrSize > vramSize) {
+                    status = STATUS_INVALID_PARAMETER;  /* no room, or overlaps */
                     break;
                 }
+
+                offset = vramSize - reserve - (UINT64)tmrSize;
+
+                /* system_phy_addr is a CPU physical address and must stay under
+                 * 4 GB. phyBase defaults to BAR0 but callers may pass BAR5. */
+                if (phyBase + offset + tmrSize > 0x100000000ULL) {
+                    status = STATUS_INVALID_PARAMETER;
+                    break;
+                }
+
                 tmrMc.QuadPart = mcBase + offset;
                 tmrPa.QuadPart = phyBase + offset;
             }
@@ -9626,7 +9678,7 @@ DreamV3DeviceControl(
             Out->TmrMcHi = (ULONG)(tmrMc.QuadPart >> 32);
 
             /* Keep the TMR addresses alive for the session (SOS references it).
-               No host allocation to free — it's a fixed VRAM region. */
+               No host allocation to free â€” it's a fixed VRAM region. */
             DevExt->PspTmrMc = tmrMc;
             DevExt->PspTmrPa = tmrPa;
             DevExt->PspTmrSize = tmrSize;
