@@ -144,7 +144,21 @@ NTSTATUS DreamV3HwInitializeExtended(_In_ PDREAM_V3_DEVICE_EXTENSION DevExt){
             KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL, "AMDBC250: [EXT 12a] CC 0x9C1C=0x%08X  CC 0x529C=0x%08X (candidates)\n", ccAt9c1c, ccAt529c));
             for(ULONG b=0;b<4;b++){
                 WRITE_REGISTER_ULONG((PULONG)(bar5 + 0x34D0), bankSel[b]);
-                WRITE_REGISTER_ULONG((PULONG)(bar5 + 0x9C1C), 0x00000000); // CC=0 per duggasco
+                /* CC is written at 0x9C1C. This was changed to 0x529C and that
+                 * was wrong.
+                 *
+                 * gc_10_1_0_offset.h is the gfx10.1.0 header. This board is
+                 * gfx10.1.3, and the offsets are not the same. Measured on this
+                 * silicon, with a bank selected and a write issued:
+                 *
+                 *   0x9C1C accepted the write and read back 0x1F000000
+                 *   0x529C did not move at all
+                 *
+                 * 0x9C1C has always been live; mm 0x226F is the correct index for
+                 * this IP revision. SPI at 0x5C3C (mm 0x1277) was right in both
+                 * headers, which is why it was never in question.
+                 */
+                WRITE_REGISTER_ULONG((PULONG)(bar5 + 0x9C1C), 0x00000000); /* CC=0 per duggasco */
                 WRITE_REGISTER_ULONG((PULONG)(bar5 + 0x5C3C), 0x0000001F);
                 /* RLC_PG_ALWAYS_ON_WGP_MASK is deliberately NOT written.
                  * gc_10_1_0_offset.h places it at mm 0x4c53, which is 0x143AC

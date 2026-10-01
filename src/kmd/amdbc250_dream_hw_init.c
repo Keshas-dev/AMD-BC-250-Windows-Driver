@@ -1185,8 +1185,23 @@ DreamV3PspHardwareInit(
         }
     }
 
-    /* Step 9b: If SOS is alive, try NBIO unlock */
-    if (DevExt->PspAlive) {
+    /* Step 9b: If SOS is alive, try NBIO unlock.
+     *
+     * Gated by HwTryNbioUnlock, default 0. Two reasons not to do this by
+     * default:
+     *
+     *  - It is not needed. Amdbc250PspTryUnlockNbio's own comment records that
+     *    the NBIO firewall does not block the GC_BASE-shifted aliases on this
+     *    board, that NBIO unlock is therefore unnecessary, and that it does
+     *    not help with the real blocker.
+     *  - It writes 0xC100/0xC180 to BAR5 with no DeviceMutex held, and the
+     *    PSP driver is installed and running on this machine and may write the
+     *    same signatures. Two writers on those registers is what the project
+     *    rules single out as unsafe.
+     *
+     * Enabling PSP hardware init on the active path must not silently turn
+     * this on as a side effect. */
+    if (DevExt->PspAlive && DreamV3ReadStepSwitch(L"HwTryNbioUnlock", 0) != 0) {
         KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
                    "AMDBC250-DREAM-V4.3: Attempting NBIO unlock via PSP...\n"));
 
