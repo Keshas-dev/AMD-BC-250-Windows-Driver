@@ -1,5 +1,39 @@
 # AMD BC-250 Windows Driver — Agent Notes
 
+## 🔥 2026-10-01 NAUJAS KELIAS: UEFI SMU FIRMWARE PATCHING (SKAITYTI PIRMIAUSIA)
+
+**Išsami dokumentacija: `docs\UEFI-SMU-PATCHING-AND-TELEMETRY.md`**
+
+**`Hexxeh/bc250-efi-core-unlock` (11★, MIT) yra stipriausias atrastas WGP kelias.**
+Jis padaro **VEIKIANČIĄ, patikrintą** SMU secure-access grandinę **UEFI fazėje** (Q2 `0x23`
+subq4-overflow → `TR_TABLE_PTR` → Q2 `0x0A` transfer engine → `0x7B3C` gate → Q3 `0x2A/0x2B/0x2C`),
+o tada **60 patch'ų SMU SRAM'o — tai Xtensa KODO patch'ai** (3 baitų literal-load
+instrukcijos, `A2/B2/C2/…` opcode šeima), ne duomenys.
+
+**Kodėl tai mums svarbiau nei viskas kitas:**
+- Mūsų AGENTS.md sakė: *„realus kelias = SMU **code execution** → SMU vidinės funkcijos"*
+- Čia tai jau **realizuota** ir veikia kiekvieną boot
+- Vyksta **PRIEŠ** SOS užrakina registr'us; šaltas bootas = garantuotas švarus atgrižtimas
+- Nereikia nei `Q2 0x23` Windows pusėje (kurios sąmoningai neįdiegėme), nei AC ciklo
+- `SMU_FIRMWARE_OVERVIEW.md` §6: **kiekvienas feature = periodinis tick handler**
+  (`smu_tick_handlers[0x28]`, 40 įrašų) → **paaiškina, kodėl `RequestActiveWgp` neprilaiko**:
+  bitas `GFX_WGP_POWER` (6) įjungtas, bet niekas nevalo
+
+**Kiti 2026-10-01 radimai (ten pat):**
+- **Linux `smu_v11_8_ppsmc.h`** (SMU 11.8 = mūsų) → **`Q0 0x11 QueryVddcrSocClock` =
+  DRAM clock**, `0x13 QueryDfPstate`, `0x0C QueryCorePstate` — visi read-only,
+  **ne whitelist'inti**. Status koda `0x01/0xFC/0xFD/0xFE/0xFF` sutampa 1:1.
+- **`smu_fw_robin_1` = 0.58.6.0 = MŪSŲ firmware** jau yra
+  `C:\AMD-BC-250\amd_smu_reverse_engineering\smu_fw\` (262400 B, pre-trimmed, **plaintext**,
+  SHA256 `8C29CF0B…C6675`) + 2 Ghidra script'ą.
+- `ps5-vitals` (Sony `sceKernel*` API) ir `ps5debug-NG` (tik RAM) — **atmesti**.
+- Senas `F:\bc-250-proektas\ps5-win-driver` — **0 hardwar faktų**, bet 6 naudingi
+  dalykai (guard'ed test flow, `safeboot minimal`, `ROOT\DISPLAY\0000`, ati2mtag_Navi10
+  Inf, `ResetDevice` gate, registry breadcrumbs) + **measurement artefaktas**
+  (`CM_PROB_NONE` ≠ driveris veikia).
+
+---
+
 ## 🛑 BIOS FAKTAS — NE AIŠKINTI (2026-09-30 pataisymas)
 
 **Mes esame BIOS 3.00. NE 5.00.**

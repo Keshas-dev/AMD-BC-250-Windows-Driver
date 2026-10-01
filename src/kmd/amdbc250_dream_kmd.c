@@ -4417,7 +4417,7 @@ DreamV3DeviceControl(
             SMU_ARG_CORE_ID,     /* 0..7 */
             SMU_ARG_MASK32,      /* raw 32-bit mask (feature bits) — safe bits only */
             SMU_ARG_SMN_ADDR,    /* known-safe SMN address only (Q3 0x98 ungated write) */
-            SMU_ARG_ADDR32,      /* 32-bit DRAM address high/low for table DMA */
+            SMU_ARG_DRIVER_PA,   /* driver-owned DRAM page only (table DMA) */
             SMU_ARG_SRAM_ADDR,   /* DWORD-aligned SMU SRAM offset (lower SRAM only) */
             SMU_ARG_GFX_FREQ,    /* 350..2230 MHz (GPU force freq; PS5 APU ceiling) */
             SMU_ARG_GFX_VID,     /* 0..255 (GPU VID, 96=950mV) */
@@ -4429,6 +4429,14 @@ DreamV3DeviceControl(
             ULONG Message;
             SMU_CPU_ARG_TYPE ArgType;
         } SMU_CPU_MSG_DESC;
+
+        /* The AMDBC250_SMU_Q0_* IDs in the shared header and the SMU_MSG_* IDs
+         * in amdbc250_dream_kmd.h must never drift apart. The shared header
+         * spells them that way because user-mode tools cannot include the
+         * kernel header. */
+        static_assert(AMDBC250_SMU_Q0_QUERY_CORE_PSTATE     == SMU_MSG_QueryCorePstate,     "core pstate id drift");
+        static_assert(AMDBC250_SMU_Q0_QUERY_DF_PSTATE       == SMU_MSG_QueryDfPstate,       "df pstate id drift");
+        static_assert(AMDBC250_SMU_Q0_QUERY_VDDCR_SOC_CLOCK == SMU_MSG_QueryVddcrSocClock, "soc clock id drift");
         static const SMU_CPU_MSG_DESC Whitelist[] = {
             /* Q0: SMU info queries */
             { 0, AMDBC250_SMU_Q0_GET_SMU_VERSION,       SMU_ARG_NONE },
@@ -4463,9 +4471,16 @@ DreamV3DeviceControl(
                behind the staged IOCTL. */
             { 3, AMDBC250_SMU_Q3_SEC_SET_WRITE_PTR,     SMU_ARG_SRAM_ADDR },
             { 3, AMDBC250_SMU_Q3_SEC_WRITE_THROUGH,     SMU_ARG_NONE },
-            /* Q0: SMU table DMA address setup (addr must be 4KB-aligned DRAM) */
-            { 0, AMDBC250_SMU_Q0_SET_DRV_TBL_ADDR_HI,   SMU_ARG_ADDR32 },
-            { 0, AMDBC250_SMU_Q0_SET_DRV_TBL_ADDR_LO,   SMU_ARG_ADDR32 },
+            /* Q0: SMU table DMA address setup.
+               SetDriverTableDramAddrHigh/Low point the SMU table-DMA engine at a
+               host DRAM address, and TransferTableDram2Smu (0x07) then performs
+               the transfer. An unconstrained 4KB-aligned address here would be
+               "SMU DMA to an arbitrary physical page" - an LPE primitive, and
+               exactly the hole the SMU_MSG_ARGS 0x0A path closes by pinning the
+               address to DevExt->SmuUnlockPa. SMU_ARG_DRIVER_PA applies that same
+               pin here so both entry points agree. */
+            { 0, AMDBC250_SMU_Q0_SET_DRV_TBL_ADDR_HI,   SMU_ARG_DRIVER_PA },
+            { 0, AMDBC250_SMU_Q0_SET_DRV_TBL_ADDR_LO,   SMU_ARG_DRIVER_PA },
             { 0, AMDBC250_SMU_Q0_TRANSFER_TBL_SMU2DRAM, SMU_ARG_NONE },
             { 0, AMDBC250_SMU_Q0_TRANSFER_TBL_DRAM2SMU, SMU_ARG_NONE },
             /* Q0: GFX frequency control (governor sequence) */
@@ -4483,6 +4498,15 @@ DreamV3DeviceControl(
             { 0, AMDBC250_SMU_Q0_UNFORCE_GFX_FREQ,      SMU_ARG_GFX_QUERY },
             { 0, AMDBC250_SMU_Q0_FORCE_GFX_VID,         SMU_ARG_GFX_VID },
             { 0, AMDBC250_SMU_Q0_UNFORCE_GFX_VID,       SMU_ARG_GFX_QUERY },
+            /* Q0: read-only telemetry queries (Linux smu_v11_8_ppsmc.h, PMFW 88.6.0).
+             * 0x11 is the SoC/DRAM (Vddcr) clock - the "memory clock" field. The
+             * community encoding is (index << 16); SMU_ARG_NONE pins it to index 0
+             * so this stays a single fixed read rather than an index sweep.
+             * 0x13 SoC P-state. 0x0C per-core P-state, arg = core id 0..7.
+             * None of these mutate state; they only read a clock or a state word. */
+            { 0, AMDBC250_SMU_Q0_QUERY_VDDCR_SOC_CLOCK, SMU_ARG_NONE },
+            { 0, AMDBC250_SMU_Q0_QUERY_DF_PSTATE,       SMU_ARG_NONE },
+            { 0, AMDBC250_SMU_Q0_QUERY_CORE_PSTATE,     SMU_ARG_CORE_ID },
         };
 
         /* Find + validate the message against the whitelist. */
@@ -4521,7 +4545,14 @@ DreamV3DeviceControl(
             case SMU_ARG_CORE_ID:  allowed = (a <= 7); break;
             case SMU_ARG_MASK32:   allowed = ((a & ~AMDBC250_SAFE_SMU_FEATURE_MASK) == 0); break;
             case SMU_ARG_SMN_ADDR: allowed = (a == AMDBC250_SAFE_SMN_ADDR_CORE_MASK); break;
-            case SMU_ARG_ADDR32:    allowed = ((a & 0xFFF) == 0); break;  /* 4KB-aligned */
+            case SMU_ARG_DRIVER_PA:
+                /* Only the driver's own non-cached staging page. Anything else
+                 * would let a caller aim the SMU table-DMA engine at an
+                 * arbitrary physical page. */
+                allowed = (DevExt->SmuUnlockVa != NULL) &&
+                          (a == (ULONG)(DevExt->SmuUnlockPa.QuadPart & 0xFFFFFFFFu)) &&
+                          ((a & 0xFFF) == 0);
+                break;
             case SMU_ARG_SRAM_ADDR: allowed = ((a & 3) == 0) && (a <= 0x000FFFFF); break; /* DWORD-aligned SMU SRAM */
             /* GPU frequency ceiling.
              *
@@ -6330,6 +6361,13 @@ DreamV3DeviceControl(
             ULONG bus = p->Bus, dev = p->Device, func = p->Function;
             if (bus > 255) bus = 0; if (dev > 31) dev = 0; if (func > 7) func = 0;
             p->Result = 0; p->Method = 0; p->Bar5SmnData = 0xFFFFFFFF;
+            /* Serialise against SMU_CPU_MSG and SMU_MSG_ARGS. Those helpers do
+             * four independent writes over the SAME shared NBIO SMN index/data
+             * ports (BAR5+0x38/0x3C) that the BAR5 comparison read below also
+             * uses. Without this lock, a concurrent SMU round-trip can land
+             * between the index write and the data read, so a caller silently
+             * reads a different SMN address than the one it asked for. */
+            if (DevExt) ExAcquireFastMutex(&DevExt->DeviceMutex);
             __try {
                 /* Method 1: CF8/CFC ports (legacy PCI config) */
                 ULONG addrB8 = 0x80000000 | (bus << 16) | (dev << 11) | (func << 8) | 0xB8;
@@ -6368,6 +6406,7 @@ DreamV3DeviceControl(
                     "AMDBC250: PCI_SMN EXCEPTION 0x%08X addr 0x%08X\n", GetExceptionCode(), p->SmnAddress));
                 p->Result = 0;
             }
+            if (DevExt) ExReleaseFastMutex(&DevExt->DeviceMutex);
             status = STATUS_SUCCESS;
             bytesReturned = sizeof(AMDBC250_IOCTL_PCI_SMN_ACCESS);
         } else { status = STATUS_BUFFER_TOO_SMALL; }

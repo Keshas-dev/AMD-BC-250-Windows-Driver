@@ -271,6 +271,39 @@ typedef struct _AMDBC250_IOCTL_SMU_CPU_MSG {
 #define AMDBC250_SMU_Q0_FORCE_GFX_VID         0x3B
 #define AMDBC250_SMU_Q0_UNFORCE_GFX_VID       0x3C
 
+/* Q0: read-only telemetry queries. IDs taken from Linux
+ * drivers/gpu/drm/amd/pm/swsmu/inc/pmfw_if/smu_v11_8_ppsmc.h, which is
+ * authoritative for SMU 11.8 = this board's PMFW 88.6.0. The IDs are also
+ * corroborated by the community Ghidra dump in amd_smu_reverse_engineering, but
+ * note that dump was generated against smu_fw_robin_5 = PMFW 88.7.0, not our
+ * 88.6.0 - so it is corroboration, not a byte-exact verification. It does show
+ * Q0 0x08/0x09/0x0A with no handler.
+ *
+ *  0x11 QueryVddcrSocClock - SoC/DRAM (Vddcr) clock in MHz. This is the
+ *      "memory clock" telemetry field that the SMU metrics table also carries.
+ *      Community maps encode the argument as (index << 16); we deliberately
+ *      restrict it to 0 (index 0) so it stays a pure read with no index sweep.
+ *      This is the only one of the three with no prior on-board reading, so it
+ *      may legitimately come back as a timeout.
+ *  0x13 QueryDfPstate      - SoC power state, argument 0.
+ *  0x0C QueryCorePstate    - per-core P-state, argument = core id 0..7
+ *      (returns the 0xFF out-of-range sentinel for cores > 7).
+ *
+ * NOT added, deliberately: 0x2E InitiateGcRsmuSoftReset (GC soft reset),
+ * 0x16/0x17 ConfigureS3PwrOffRegisterAddressHigh/Low (S3 power-off register
+ * programming), 0x2F/0x30/0x31 CAC-weight writes. Note the "0x0A reserved"
+ * below refers to QUEUE 0 only - Q2 0x0A is the transfer engine and IS
+ * whitelisted, on a different IOCTL.
+ *
+ * NOTE: inc\amdbc250_dream_kmd.h already defines these same three IDs as
+ * SMU_MSG_QueryCorePstate / QueryDfPstate / QueryVddcrSocClock. The
+ * AMDBC250_SMU_Q0_* spellings here exist because this header must stay usable
+ * from user mode, where the kernel header cannot be included. The driver
+ * compile-time-asserts that the two spellings agree. */
+#define AMDBC250_SMU_Q0_QUERY_VDDCR_SOC_CLOCK 0x11
+#define AMDBC250_SMU_Q0_QUERY_DF_PSTATE       0x13
+#define AMDBC250_SMU_Q0_QUERY_CORE_PSTATE     0x0C
+
 /* Safe feature bits for Q3 0x3C EnableSmuFeatures (cyan_skillfish PMFW 88.6.0).
  * These are the only bits validated by our whitelist; unknown bits are rejected. */
 #define AMDBC250_SAFE_SMU_FEATURE_MASK   0x0000001Du  /* GFXCLK_DPM|GFXOFF|CG|PG */
