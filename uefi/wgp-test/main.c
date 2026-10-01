@@ -10,9 +10,10 @@
  * selectors, all read back 0, with MMIO proven working via the SCRATCH beacon
  * and the GRBM index echo. The gate is closed before x86 starts.
  *
- * Console output only. The elog file-logging and early run-marker builds were
- * removed from this binary: neither of them produced any output on this board,
- * and neither added anything the console did not already have.
+ * Everything printed is teed to the console and to a log file on the volume the
+ * probe booted from, so the result set can be read off the USB stick instead of
+ * photographed. The log path had never actually been exercised before, because
+ * the earlier builds were never loaded by the firmware at all.
  *
  * Nothing here patches SMU firmware. That is a separate experiment.
  */
@@ -21,47 +22,27 @@
 #include "smu.h"
 #include "unlock.h"
 #include "msvc_compat.h"
+#include "elog.h"
 #include "wgp.h"
 
 /*
- * Seconds to stay on screen before booting the OS. Long enough to photograph or
- * retype the results, and the probe returns EFI_SUCCESS rather than halting, so
- * there is no way to end up stuck in a halt loop.
+ * 0 = full probe, log  WGP.LOG
+ * 1 = only the SMU unlock chain and the baseline, log  WGP0.LOG
+ * 2 = chain + wgp_probe, log  WGP1.LOG
+ * Override at build time with -DTEST_MODE=N.
  */
+#ifndef TEST_MODE
+#define TEST_MODE 0
+#endif
+
+/* Seconds to stay on screen before booting the OS. Long enough to photograph or
+ * retype the results, and the probe returns EFI_SUCCESS rather than halting, so
+ * there is no way to end up stuck in a halt loop. */
 #define STALL_SECONDS 20
 
-/* ------------------------------------------------------------------------- */
-/* Console output helpers. The UEFI console takes UTF-16, so ASCII literals  */
-/* are widened here.                                                           */
-/* ------------------------------------------------------------------------- */
-
-static void puts(EFI_SYSTEM_TABLE *st, const char *s)
-{
-    UINT16 buf[160];
-    int i = 0;
-    for (; *s && i < 159; s++) buf[i++] = (UINT16)(unsigned char)*s;
-    buf[i] = 0;
-    print(st, buf);
-}
-
-static void putnum(EFI_SYSTEM_TABLE *st, unsigned int v)
-{
-    UINT16 b[16];
-    char t[12];
-    int n = 0, i;
-    if (!v) { b[0] = '0'; b[1] = 0; print(st, b); return; }
-    while (v && n < 10) { t[n++] = (char)('0' + (v % 10)); v /= 10; }
-    for (i = 0; i < n; i++) b[i] = (UINT16)t[n - 1 - i];
-    b[n] = 0;
-    print(st, b);
-}
-
-static void puthex32(EFI_SYSTEM_TABLE *st, unsigned int v)
-{
-    /* print_hex already emits the 0x prefix - do not add another. An earlier
-     * build printed "0x0x000000FF" for every value because of it. */
-    print_hex(st, v);
-}
+#define puts(st, s)       elog_str((st), (s))
+#define putnum(st, v)     elog_u32((st), (v))
+#define puthex32(st, v)   elog_hex32((st), (v))
 
 /* ------------------------------------------------------------------------- */
 
@@ -69,13 +50,20 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
 {
     unsigned int before, after, mask;
     EFI_STATUS status;
+    const char *logname = (TEST_MODE == 1) ? "WGP0.LOG"
+                         : (TEST_MODE == 2) ? "WGP1.LOG"
+                                            : "WGP.LOG";
 
-    (void)ImageHandle;
+    /* Open the log first so even an early failure is recorded. */
+    if (!elog_open(SystemTable, ImageHandle, logname))
+        logname = 0;                    /* console only */
+    elog_header(SystemTable);
 
+    puts(SystemTable, "log file    = ");
+    puts(SystemTable, logname ? logname : "(none writable, console only)");
     puts(SystemTable, "\r\n");
-    puts(SystemTable, "==============================================\r\n");
-    puts(SystemTable, " BC-250 UEFI WGP UNLOCK PROBE\r\n");
-    puts(SystemTable, "==============================================\r\n");
+    putnum(SystemTable, (unsigned int)TEST_MODE);
+    puts(SystemTable, "\r\n");
 
     /* --- Baseline ------------------------------------------------------ */
     before = smn_rd(MASK_REG);
@@ -99,7 +87,8 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
     status = unlock_smu(SystemTable);
     if (EFI_ERROR(status)) {
         puts(SystemTable, "ERROR: unlock_smu failed\r\n");
-        SystemTable->BootServices->Stall(20000000);
+        SystemTable->BootServices->Stall(STALL_SECONDS * 1000000u);
+        elog_close();
         return status;
     }
     puts(SystemTable, "unlock_smu: OK\r\n");
@@ -113,8 +102,14 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
         puts(SystemTable, "\r\n");
     }
 
-    /* --- The actual WGP experiment ------------------------------------ */
-    puts(SystemTable, "\r\n-- WGP experiment --\r\n");
+#if TEST_MODE == 1
+    puts(SystemTable, "\n==== chain only, no WGP experiment ====\r\n");
+#elif TEST_MODE == 2
+    puts(SystemTable, "\n-- WGP experiment --\r\n");
+    wgp_probe(SystemTable);
+    puts(SystemTable, "\r\n==== probe done ====\r\n");
+#else
+    puts(SystemTable, "\n-- WGP experiment --\r\n");
     wgp_probe(SystemTable);
 
     puts(SystemTable, "\r\n-- final state --\r\n");
@@ -122,21 +117,22 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
     if (smu_send_msg_q0(SystemTable, 0x1E, NULL, 0, &after)) putnum(SystemTable, after);
     else puts(SystemTable, "(timeout)");
     puts(SystemTable, "\r\n");
-    puts(SystemTable, "SMN 0x0005C3C (SPI_PG?) = ");
+    puts(SystemTable, "SMN 0x0005C3C          = ");
     {
         int st = sec_smn_read32(SystemTable, 0x0005C3Cu, &after);
         if (st == 0x01) puthex32(SystemTable, after);
         else puts(SystemTable, "(unreadable)");
     }
     puts(SystemTable, "\r\n");
-
     puts(SystemTable, "\r\n==== probe done ====\r\n");
+#endif
+
     putnum(SystemTable, STALL_SECONDS);
     puts(SystemTable, "s, then booting the OS\r\n");
 
-    /* Stall so the output can be read, then chainload. No halt loop: a halt
-     * cannot be escaped from the firmware and there is no reason to risk
-     * ending up wedged in it. */
+    /* Flush and close before the stall: after this the OS takes over and the
+     * log must already be on disk. */
+    elog_close();
     SystemTable->BootServices->Stall(STALL_SECONDS * 1000000u);
 
     return EFI_SUCCESS;

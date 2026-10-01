@@ -23,6 +23,28 @@
 /* Only SMN address this tool is ever allowed to touch. */
 #define SMN_CORE_MASK 0x0115A870u
 
+/*
+ * Addresses the UEFI probe also reads, so the two can be diffed.
+ *
+ * The UEFI probe reaches these through the SMU's secure path (Q3 0x2A) in the
+ * UEFI phase; the Windows tool reaches them over CF8/CFC as the host. If the
+ * values agree, the register is real and the two transports see the same thing.
+ * If they differ, that is worth knowing before writing anything to it.
+ *
+ * The UEFI probe found 0x00005C3C, 0x0000A5BC and 0x0000E59C alive and reading
+ * 0. Anything above 0x0000FFFF wedged the SMU on the UEFI side and is not in
+ * this list. All of these are read-only and go through the CF8/CFC path, which
+ * has no read side effects of the kind the secure path can have.
+ */
+static const struct { const char *name; UINT32 addr; } k_smn_probe[] = {
+    { "core_mask_smu_space", 0x0005A870u },
+    { "spipg_candidate",     0x00005C3Cu },
+    { "spipg_gcbase_0x4980", 0x0000A5BCu },
+    { "ccarray_gcbase",      0x0000E59Cu },
+    { "gc_base_0x4980",      0x00004980u },
+};
+#define SMN_PROBE_COUNT (sizeof(k_smn_probe) / sizeof(k_smn_probe[0]))
+
 /* Q0 read-only message IDs */
 #define Q0_GET_SMU_VERSION   0x02u
 #define Q0_GET_DRIVER_IF     0x03u
@@ -416,6 +438,20 @@ static void sample(void)
                tel.SmnEdgeTemp, tel.SmnJunctionTemp, tel.SmnMemTemp);
         printf("             fan=0x%08X fanpwm=0x%08X  (raw - no decode table for cyan_skillfish)\n",
                tel.SmnFanRpm, tel.SmnFanPwm);
+    }
+
+    /* Cross-check set: the same addresses the UEFI probe reads over the SMU's
+     * secure path. Comparing the two is what tells us whether a low SMN address
+     * is a real register or just a hole that reads zero. */
+    printf("SMN compare  (Windows CF8/CFC  vs  UEFI secure Q3 0x2A)\n");
+    for (i = 0; i < (int)SMN_PROBE_COUNT; i++) {
+        unsigned int v = 0;
+        if (smn_read(k_smn_probe[i].addr, &v, NULL))
+            printf("  %-22s 0x%08X = 0x%08X\n", k_smn_probe[i].name,
+                   k_smn_probe[i].addr, v);
+        else
+            printf("  %-22s 0x%08X = (unreadable or dead-bus)\n",
+                   k_smn_probe[i].name, k_smn_probe[i].addr);
     }
 
     printf("--------------------------------------------------------\n");
