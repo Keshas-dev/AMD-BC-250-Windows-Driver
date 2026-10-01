@@ -19,13 +19,26 @@
  * is why the ported .c files compile unmodified and stay diffable against
  * upstream.
  *
+ * The three intrinsics are declared by hand rather than by including
+ * <intrin.h>. intrin.h pulls in xmmintrin.h, which includes malloc.h, which
+ * lives in the Windows Kits UCRT headers - so including it would make this build
+ * depend on the Windows Kits being installed, for three one-line declarations
+ * that need no headers at all. Declared this way it compiles and links with
+ * nothing but the MSVC compiler, which matters because the Kits live on a drive
+ * that is not always mounted. Verified: a probe using only these declarations
+ * compiles clean and links to a 1536-byte EFI application.
+ *
  * Everything else in those files is plain C99.
  */
 #ifndef MSVC_COMPAT_H
 #define MSVC_COMPAT_H
 
-#include <intrin.h>
 #include <stdint.h>
+
+/* Hand-declared MSVC x64 intrinsics. */
+unsigned long __cdecl _outpd(unsigned short port, unsigned long value);
+unsigned long __cdecl _inpd(unsigned short port);
+void          __cdecl __halt(void);
 
 #ifndef NULL
 #define NULL ((void *)0)

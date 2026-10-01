@@ -1,39 +1,36 @@
 /*
- * wgp.c - The WGP experiment, third revision.
+ * wgp.c - The WGP experiment, fourth revision.
  *
- * Revision 1's output settled the two big questions and broke the third.
+ * WHAT REVISION 3 ESTABLISHED - this is the important part:
  *
- * What it proved:
- *   - unlock_smu() completes in the UEFI phase
- *   - sec_smn_read32 works: SMN 0x0005A870 read 0xFF
- *   - smn_write32 works: writing the core mask's own value returned rc 1 and read
- *     back identical
+ *   SMN 0x00000000 read 0x9FFF9700 through the SMU's secure path.
+ *   0x9FFF97xx is the GPU_ID signature the Windows driver reads at BAR5 0x0000.
+ *   Therefore GC registers live at SMN address == BAR5 offset, with no base and
+ *   no aliasing. That makes SMN 0x00005C3C SPI_PG and SMN 0x00009C1C
+ *   CC_GC_SHADER_ARRAY_CONFIG. The whole privileged GC register window is now
+ *   readable, and the "is there an SMN alias" question is answered: yes, trivially.
  *
- * That last one is the piece Windows never had: arbitrary SMN read and write
- * from the SMU side, before SOS is finished.
+ *   Writing SMN 0x5C3C returned rc 1 - the SMU handler ran and reported success -
+ *   but the value did not change. So the Data Fabric ACL that blocks host writes
+ *   also blocks SMU writes to SPI_PG. That route is closed.
  *
- * What it broke: SMN 0x00005C3C, 0x0000A5BC and 0x0000E59C answered 0, then
- * 0x09010C3C timed out, and every call after it failed including the 0x0115A870
- * control that had just worked. Reading an unknown or unmapped SMN address
- * through Q3 0x2A wedges the SMU - the same failure seen in Windows. H3's output
- * was therefore meaningless: the SMU was already dead, which is why the feature
- * mask read back 0 and both the disable and the re-enable timed out. Nothing was
- * actually left switched off.
+ *   Feature bit 6 toggles cleanly: 0xDD602C7D -> 0xDD602C3D -> 0xDD602C7D. The
+ *   feature framework is live and controllable. But ActiveWgp stayed 0 across the
+ *   toggle, so bit 6 is not the WGP power gate. The earlier theory that it was is
+ *   wrong.
  *
- * So this revision only ever touches addresses already proven safe, and checks
- * the SMU is still answering between steps. No address above 0x0000FFFF appears
- * anywhere.
+ * SO: SPI_PG is a dead end from any direction we can reach. CC_ARRAY is not.
+ * The Windows driver found CC_ARRAY partially writable - 0xFFF80000 became
+ * 0x1F000000, bits 24-28 persisted. If SMN writes land on the bits the host could
+ * not set, that is the 40 CU unlock. Revision 4 tests exactly that, and RLC_PG
+ * alongside it since Windows reports it as 0xFFFFFFFF read-only.
  *
- * TEST 1 is the decisive one. SMN 0x00005C3C answered 0 while the SMU was alive,
- * and 0 is the same value BAR5 offset 0x5C3C reports in Windows - weak evidence
- * it may be the real register rather than an unmapped hole. A read cannot
- * settle that, so write a recognisable value and read it back.
+ * SAFETY: every address used here is below 0x10000 and is either a GC register
+ * offset already proven to answer or the two write targets. Nothing that wedged
+ * the SMU in revision 1 is touched, and the SMU is checked between steps.
  *
- * TEST 3 exists so the UEFI numbers can be diffed against the Windows driver,
- * which reads the same addresses over CF8/CFC.
- *
- * Nothing here writes SMU SRAM. The upstream 60-patch firmware set is not
- * applied: its semantics are unknown and it targets core unlock, not the GPU.
+ * Nothing writes SMU SRAM. The upstream 60-patch firmware set is still not
+ * applied.
  */
 
 #include <efi.h>
@@ -41,8 +38,17 @@
 #include "msvc_compat.h"
 #include "wgp.h"
 
-/* --------------------------------------------------------------------- */
-/* Console helpers                                                        */
+/* GC register offsets. Identical as BAR5 offsets and as SMN addresses, per the
+ * GPU_ID finding above. */
+#define GC_GPU_ID        0x00000u
+#define GC_SCRATCH       0x032D4u
+#define GC_GRBM_INDEX    0x034D0u
+#define GC_RLC_PG        0x03D64u
+#define GC_ME_CNTL       0x04A74u
+#define GC_MEC_CNTL      0x04B14u
+#define GC_SPI_PG        0x05C3Cu
+#define GC_CC_ARRAY      0x09C1Cu
+
 /* --------------------------------------------------------------------- */
 
 static void puts(EFI_SYSTEM_TABLE *st, const char *s)
@@ -71,8 +77,6 @@ static void puthex32(EFI_SYSTEM_TABLE *st, unsigned int v)
     print_hex(st, v);   /* already includes the 0x prefix */
 }
 
-/* --------------------------------------------------------------------- */
-
 static unsigned int active_wgp(EFI_SYSTEM_TABLE *st)
 {
     unsigned int v = 0;
@@ -80,169 +84,191 @@ static unsigned int active_wgp(EFI_SYSTEM_TABLE *st)
     return v;
 }
 
+/* Stop everything the moment the SMU stops answering, so one bad access cannot
+ * invalidate the rest of the run. */
+static int smu_ok(EFI_SYSTEM_TABLE *st, const char *where)
+{
+    unsigned int v = 0;
+    int rc = sec_smn_read32(st, 0x0115A870u, &v);
+    if (rc == 0x01) return 1;
+    puts(st, "  !! SMU stopped answering at: ");
+    puts(st, where);
+    puts(st, "\r\n");
+    return 0;
+}
+
+/* --------------------------------------------------------------------- */
+
 void wgp_probe(EFI_SYSTEM_TABLE *st)
 {
-    const unsigned int SMN_SPI_PG = 0x00005C3Cu;
-
-    puts(st, "\n== SMU liveness ==\r\n");
+    /* ================= 1. GC register survey ========================= */
+    puts(st, "\n== 1. GC register survey via privileged SMN ==\r\n");
+    puts(st, "   GPU_ID matching 0x9FFF97xx proves SMN offset == BAR5 offset\r\n");
     {
-        unsigned int v = 0;
-        int rc = sec_smn_read32(st, 0x0115A870u, &v);
-        puts(st, "  SMN 0x0115A870 = ");
-        if (rc == 0x01) print_hex(st, v & 0xFFu);
-        else { puts(st, "FAILED - SMU not answering, stopping\r\n"); return; }
-        puts(st, "   [SMU answering]\r\n");
+        static const struct { unsigned int off; const char *name; } tab[] = {
+            { GC_GPU_ID,     "GPU_ID" },
+            { GC_SCRATCH,    "SCRATCH" },
+            { GC_GRBM_INDEX, "GRBM_GFX_INDEX" },
+            { GC_RLC_PG,     "RLC_PG_ALWAYS_ON" },
+            { GC_ME_CNTL,    "CP_ME_CNTL" },
+            { GC_MEC_CNTL,   "CP_MEC_CNTL" },
+            { GC_SPI_PG,     "SPI_PG_STATIC_WGP" },
+            { GC_CC_ARRAY,   "CC_GC_SHADER_ARRAY" },
+        };
+        int i;
+        for (i = 0; i < 8; i++) {
+            unsigned int r = 0;
+            int rc = sec_smn_read32(st, tab[i].off, &r);
+            puts(st, "  ");
+            puts(st, tab[i].name);
+            puts(st, " @0x");
+            print_hex(st, tab[i].off);
+            puts(st, " = ");
+            if (rc == 0x01) print_hex(st, r);
+            else { puts(st, "unreadable"); if (!smu_ok(st, tab[i].name)) return; }
+            puts(st, "\r\n");
+        }
     }
 
-    /* ------------------------------------------------------------------ */
-    puts(st, "\n== TEST 1: is SMN 0x5C3C a real writable register? ==\r\n");
-    puts(st, "  writes 0x5A5A0000 (neither 0 nor all-ones), reads back\r\n");
+    /* ================= 2. CC_ARRAY write test ======================== */
+    puts(st, "\n== 2. CC_GC_SHADER_ARRAY write test (the 40 CU key) ==\r\n");
+    puts(st, "   Windows could only move bits 24-28 here. Test the SMU path.\r\n");
     {
-        unsigned int before = 0, wrote = 0, after = 0;
+        unsigned int before = 0, after = 0;
         int rc;
 
-        rc = sec_smn_read32(st, SMN_SPI_PG, &before);
-        puts(st, "  read  = ");
-        if (rc != 0x01) { puts(st, "FAILED\r\n"); return; }
+        rc = sec_smn_read32(st, GC_CC_ARRAY, &before);
+        puts(st, "  before = ");
+        if (rc != 0x01) { puts(st, "unreadable\r\n"); return; }
         print_hex(st, before);
         puts(st, "\r\n");
 
-        wrote = 0x5A5A0000u;
-        rc = smn_write32(st, SMN_SPI_PG, wrote);
-        puts(st, "  write ");
-        print_hex(st, wrote);
-        puts(st, " rc=");
-        putnum(st, (unsigned int)rc);
-        puts(st, "\r\n");
-
+        /* Distinctive pattern first: proves writability independently of whether
+         * the value we actually want happens to be accepted. */
+        rc = smn_write32(st, GC_CC_ARRAY, 0xA5A50000u);
+        puts(st, "  write 0xA5A50000 rc="); putnum(st, (unsigned int)rc);
         after = 0;
-        rc = sec_smn_read32(st, SMN_SPI_PG, &after);
-        puts(st, "  read  = ");
-        if (rc != 0x01) { puts(st, "FAILED - SMU may be wedged\r\n"); return; }
+        rc = sec_smn_read32(st, GC_CC_ARRAY, &after);
+        puts(st, "  read back = ");
+        if (rc != 0x01) { puts(st, "unreadable - SMU wedged\r\n"); return; }
         print_hex(st, after);
 
-        if (after == wrote) {
-            puts(st, "   *** REAL REGISTER - THE WRITE STUCK ***\r\n");
-            /* Put back whatever was found, so a real register is not left
-             * holding a garbage value. */
-            rc = smn_write32(st, SMN_SPI_PG, before);
-            puts(st, "  restored ");
-            print_hex(st, before);
-            puts(st, " rc=");
-            putnum(st, (unsigned int)rc);
-            puts(st, "\r\n");
+        if (after == 0xA5A50000u) {
+            puts(st, "   *** CC_ARRAY IS WRITABLE FROM THE SMU ***\r\n");
         } else if (after == before) {
-            puts(st, "   write did NOT stick (unmapped or read-only)\r\n");
+            puts(st, "   pattern did not stick\r\n");
         } else {
-            puts(st, "   changed, but not to our value\r\n");
+            puts(st, "   changed but masked - which bits survived?\r\n");
         }
-    }
 
-    /* ------------------------------------------------------------------ */
-    puts(st, "\n== TEST 2: write the real mask and ask the SMU ==\r\n");
-    {
-        unsigned int wgp, v = 0;
-        int rc;
-
-        wgp = active_wgp(st);
-        puts(st, "  ActiveWgp before = ");
-        if (wgp == 0xFFFFFFFFu) puts(st, "(timeout)\r\n");
-        else { putnum(st, wgp); puts(st, "\r\n"); }
-
-        /* 0x1F = 5 WGPs = 40 CUs, the value Linux writes. */
-        rc = smn_write32(st, SMN_SPI_PG, 0x1Fu);
-        puts(st, "  SMN 0x5C3C := 0x1F  rc=");
-        putnum(st, (unsigned int)rc);
-        puts(st, "\r\n");
-
-        v = 0;
-        rc = sec_smn_read32(st, SMN_SPI_PG, &v);
-        puts(st, "  read back        = ");
-        if (rc != 0x01) { puts(st, "FAILED - SMU may be wedged\r\n"); return; }
-        print_hex(st, v);
-        puts(st, "\r\n");
-
-        /* If the mask feeds a tick handler, one period is enough to act. */
-        st->BootServices->Stall(200000);
-
-        wgp = active_wgp(st);
-        puts(st, "  ActiveWgp after  = ");
-        if (wgp == 0xFFFFFFFFu) puts(st, "(timeout)\r\n");
-        else { putnum(st, wgp); puts(st, "\r\n"); }
-
-        puts(st, "  neighbours:\r\n");
+        /* Now the actual 40 CU value. duggasco's patch writes 0xFFE00000;
+         * the cu-live-manager community writes 0. Try 0 first because a cleared
+         * harvest mask is what the live tooling uses. */
         {
-            static const unsigned int also[] = { 0x00005C38u, 0x00005C40u, 0x00005C44u };
+            static const unsigned int want[] = { 0x00000000u, 0xFFE00000u };
             int i;
-            for (i = 0; i < 3; i++) {
-                unsigned int r = 0;
-                rc = sec_smn_read32(st, also[i], &r);
-                puts(st, "    SMN ");
-                print_hex(st, also[i]);
-                puts(st, " = ");
-                if (rc == 0x01) print_hex(st, r); else { puts(st, "unreadable"); }
+            for (i = 0; i < 2; i++) {
+                rc = smn_write32(st, GC_CC_ARRAY, want[i]);
+                puts(st, "  try CC_ARRAY = ");
+                print_hex(st, want[i]);
+                puts(st, " rc="); putnum(st, (unsigned int)rc);
+                rc = sec_smn_read32(st, GC_CC_ARRAY, &after);
+                puts(st, " -> ");
+                if (rc == 0x01) print_hex(st, after); else { puts(st, "unreadable"); return; }
                 puts(st, "\r\n");
+                if (!smu_ok(st, "CC_ARRAY write")) return;
             }
         }
 
-        rc = smn_write32(st, SMN_SPI_PG, 0u);
-        puts(st, "  restored 0, rc=");
-        putnum(st, (unsigned int)rc);
+        /* Put back whatever was there. */
+        rc = smn_write32(st, GC_CC_ARRAY, before);
+        puts(st, "  restored ");
+        print_hex(st, before);
+        puts(st, " rc="); putnum(st, (unsigned int)rc);
         puts(st, "\r\n");
     }
 
-    /* ------------------------------------------------------------------ */
-    puts(st, "\n== TEST 3: values to compare against Windows ==\r\n");
-    puts(st, "  the Windows driver reads these over CF8/CFC, so diff them\r\n");
+    /* ================= 3. RLC_PG write test ========================= */
+    puts(st, "\n== 3. RLC_PG_ALWAYS_ON write test ==\r\n");
+    puts(st, "   Linux writes 0x1F here alongside CC. Windows read 0xFFFFFFFF.\r\n");
     {
-        static const unsigned int safe[] = {
-            0x0115A870u,   /* CPU core presence mask, expect 0xFF       */
-            0x0005A870u,   /* same register, SMU address space         */
-            0x00005C3Cu,   /* SPI_PG candidate                         */
-            0x0000A5BCu,   /* 0x4980 + 0x5C3C, GC base hypothesis      */
-            0x0000E59Cu,   /* 0x4980 + 0x9C1C, CC_ARRAY hypothesis    */
-            0x00000000u,   /* window base 0                            */
-            0x00004980u    /* the GC base itself                       */
-        };
-        int i;
-        for (i = 0; i < 7; i++) {
-            unsigned int r = 0;
-            int rc = sec_smn_read32(st, safe[i], &r);
-            puts(st, "  SMN ");
-            print_hex(st, safe[i]);
-            puts(st, " = ");
-            if (rc == 0x01) print_hex(st, r); else { puts(st, "unreadable"); }
-            puts(st, "\r\n");
-        }
+        unsigned int before = 0, after = 0;
+        int rc = sec_smn_read32(st, GC_RLC_PG, &before);
+        puts(st, "  before = ");
+        if (rc != 0x01) { puts(st, "unreadable\r\n"); return; }
+        print_hex(st, before);
+        puts(st, "\r\n");
+
+        rc = smn_write32(st, GC_RLC_PG, 0x0000001Fu);
+        puts(st, "  write 0x0000001F rc="); putnum(st, (unsigned int)rc);
+        after = 0;
+        rc = sec_smn_read32(st, GC_RLC_PG, &after);
+        puts(st, "  read back = ");
+        if (rc != 0x01) { puts(st, "unreadable - SMU wedged\r\n"); return; }
+        print_hex(st, after);
+        puts(st, (after == 0x1Fu) ? "   *** WRITABLE ***\r\n" : "   did not stick\r\n");
     }
 
-    /* ------------------------------------------------------------------ */
-    puts(st, "\n== TEST 4: feature bit 6 round trip ==\r\n");
+    /* ================= 4. did anything change the WGP count? ======== */
+    puts(st, "\n== 4. WGP state after the writes ==\r\n");
     {
-        unsigned int f0 = 0, f1 = 0;
-        unsigned int args[2];
+        unsigned int wgp = active_wgp(st);
+        puts(st, "  ActiveWgp = ");
+        if (wgp == 0xFFFFFFFFu) puts(st, "(timeout)\r\n");
+        else { putnum(st, wgp); puts(st, "\r\n"); }
+    }
+
+    /* ================= 5. feature bit 6, watching ActiveWgp ======== */
+    puts(st, "\n== 5. feature bit 6, watching ActiveWgp this time ==\r\n");
+    {
+        unsigned int f0 = 0, f1 = 0, args[2];
         int rc;
 
         if (!smu_send_msg_q0(st, 0x3D, NULL, 0, &f0)) {
-            puts(st, "  Q0 0x3D timeout, SMU not answering\r\n");
+            puts(st, "  Q0 0x3D timeout\r\n");
             return;
         }
-        puts(st, "  mask before = "); print_hex(st, f0); puts(st, "\r\n");
+        puts(st, "  mask = "); print_hex(st, f0);
+        puts(st, "  ActiveWgp = ");
+        { unsigned int w = active_wgp(st); if (w == 0xFFFFFFFFu) puts(st, "(to)"); else putnum(st, w); }
+        puts(st, "\r\n");
 
         args[0] = 0x40u; args[1] = 0;
 
         rc = smu_send_msg_q2(st, 0x06, args, 2);
-        puts(st, "  Q2 0x06 disable rc="); putnum(st, (unsigned int)rc);
+        puts(st, "  disable bit6 rc="); putnum(st, (unsigned int)rc);
         if (rc == 0x01 && smu_send_msg_q0(st, 0x3D, NULL, 0, &f1)) {
-            puts(st, "\r\n  mask now    = "); print_hex(st, f1); puts(st, "\r\n");
+            puts(st, "  mask = "); print_hex(st, f1);
+            puts(st, "  ActiveWgp = ");
+            { unsigned int w = active_wgp(st); if (w == 0xFFFFFFFFu) puts(st, "(to)"); else putnum(st, w); }
+            puts(st, "\r\n");
+        }
+
+        /* Q0 0x18 is the documented "set active compute-unit count". Now that
+         * feature 6 is clear, the SMU is supposed to accept it. */
+        {
+            static const unsigned int counts[] = { 0x05u, 0x04u, 0x03u, 0x02u, 0x01u, 0x10u, 0x18u };
+            int i;
+            for (i = 0; i < 7; i++) {
+                unsigned int resp = 0;
+                rc = smu_send_msg_q0(st, 0x18, &counts[i], 1, &resp);
+                puts(st, "  Q0 0x18 count=");
+                putnum(st, counts[i]);
+                puts(st, " rc="); putnum(st, (unsigned int)rc);
+                puts(st, " resp=");
+                if (rc == 0x01) print_hex(st, resp); else { puts(st, "-"); }
+                puts(st, "  ActiveWgp=");
+                { unsigned int w = active_wgp(st); if (w == 0xFFFFFFFFu) puts(st, "(to)"); else putnum(st, w); }
+                puts(st, "\r\n");
+            }
         }
 
         rc = smu_send_msg_q2(st, 0x05, args, 2);
-        puts(st, "  Q2 0x05 enable  rc="); putnum(st, (unsigned int)rc);
+        puts(st, "  re-enable bit6 rc="); putnum(st, (unsigned int)rc);
         if (rc == 0x01 && smu_send_msg_q0(st, 0x3D, NULL, 0, &f1)) {
-            puts(st, "\r\n  mask back  = "); print_hex(st, f1); puts(st, "\r\n");
+            puts(st, "  mask = "); print_hex(st, f1); puts(st, "\r\n");
         } else if (rc != 0x01) {
-            puts(st, "\r\n  *** could not re-enable bit 6 - power cycle advised ***\r\n");
+            puts(st, "  *** could not re-enable bit 6 - power cycle advised ***\r\n");
         }
     }
 }

@@ -10,9 +10,28 @@ rem   bc250-wgp-full.efi   TEST_MODE=0  everything + final state, WGP.LOG
 rem
 rem Build one only:  build-msvc.bat chain|probe|full
 setlocal
-call "F:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat" >nul 2>&1
+rem This build needs only MSVC - no WDK, since the EFI sources include nothing
+rem from the Windows Kits. So any VS with the C++ workload will do, and the
+rem script searches the same drives build.bat does because F: comes and goes.
+set "VCVARS="
+for %%D in (F: D: C:) do (
+  for %%E in (Community Professional BuildTools) do (
+    if not defined VCVARS if exist "%%D\Program Files\Microsoft Visual Studio\2022\%%E\VC\Auxiliary\Build\vcvars64.bat" (
+      set "VCVARS=%%D\Program Files\Microsoft Visual Studio\2022\%%E\VC\Auxiliary\Build\vcvars64.bat"
+    )
+    if not defined VCVARS if exist "%%D\Program Files (x86)\Microsoft Visual Studio\2022\%%E\VC\Auxiliary\Build\vcvars64.bat" (
+      set "VCVARS=%%D\Program Files (x86)\Microsoft Visual Studio\2022\%%E\VC\Auxiliary\Build\vcvars64.bat"
+    )
+  )
+)
+if not defined VCVARS (
+  echo ERROR: no Visual Studio 2022 vcvars64.bat found on C:, D: or F:
+  exit /b 1
+)
+echo using: %VCVARS%
+call "%VCVARS%" >nul 2>&1
 if errorlevel 1 (
-  echo ERROR: vcvars64 failed - is the F: drive mounted?
+  echo ERROR: vcvars64 failed
   exit /b 1
 )
 cd /d "%~dp0"
