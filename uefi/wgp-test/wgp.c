@@ -30,13 +30,39 @@
 #include <efi.h>
 #include "smu.h"
 #include "msvc_compat.h"
-#include "elog.h"
 #include "wgp.h"
 
-/* Console + file output all goes through elog. */
-#define puts(st, s)       elog_str((st), (s))
-#define putnum(st, v)     elog_u32((st), (v))
-#define puthex32(st, v)   elog_hex32((st), (v))
+/* --------------------------------------------------------------------- */
+/* Console helpers - local to this file so the probe needs no logging     */
+/* library and no file-system protocol.                                     */
+/* --------------------------------------------------------------------- */
+
+static void puts(EFI_SYSTEM_TABLE *st, const char *s)
+{
+    UINT16 buf[160];
+    int i = 0;
+    for (; *s && i < 159; s++) buf[i++] = (UINT16)(unsigned char)*s;
+    buf[i] = 0;
+    print(st, buf);
+}
+
+static void putnum(EFI_SYSTEM_TABLE *st, unsigned int v)
+{
+    UINT16 b[16];
+    char t[12];
+    int n = 0, i;
+    if (!v) { b[0] = '0'; b[1] = 0; print(st, b); return; }
+    while (v && n < 10) { t[n++] = (char)('0' + (v % 10)); v /= 10; }
+    for (i = 0; i < n; i++) b[i] = (UINT16)t[n - 1 - i];
+    b[n] = 0;
+    print(st, b);
+}
+
+static void puthex32(EFI_SYSTEM_TABLE *st, unsigned int v)
+{
+    puts(st, "0x");
+    print_hex(st, v);
+}
 
 /* --------------------------------------------------------------------- */
 
