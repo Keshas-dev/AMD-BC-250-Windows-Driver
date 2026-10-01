@@ -802,23 +802,6 @@ DreamV3HwInitGfxRing(
     DevExt->GfxRing.WritePointer = 0;
     DevExt->GfxRing.Initialized = FALSE;
 
-    /* Allocate ring buffer */
-    RingVirt = DreamV3AllocateContiguousMemory(RingSize, &RingPhys);
-    if (RingVirt == NULL) {
-        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_ERROR_LEVEL,
-                   "AMDBC250-DREAM-V4.3: Failed to allocate GFX ring\n"));
-        return STATUS_NO_MEMORY;
-    }
-
-    RtlZeroMemory(RingVirt, RingSize);
-
-    DevExt->GfxRing.PhysicalAddress = RingPhys;
-    DevExt->GfxRing.VirtualAddress = RingVirt;
-    DevExt->GfxRing.SizeInBytes = RingSize;
-    DevExt->GfxRing.ReadPointer = 0;
-    DevExt->GfxRing.WritePointer = 0;
-    DevExt->GfxRing.Initialized = FALSE;
-
     /* The 64-bit fence page is allocated by DreamV3HwInitFence, which runs
      * BEFORE this function and independently of it: this function's ring-base
      * probe below routinely fails on BC-250, and when it did the fence used to

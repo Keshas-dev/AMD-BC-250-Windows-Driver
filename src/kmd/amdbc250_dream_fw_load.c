@@ -184,6 +184,14 @@ DreamV3LoadFirmwareFromFile(
     HANDLE handle = NULL;
     FILE_STANDARD_INFORMATION fileInfo;
 
+    /* The caller only inspects the return status, so an empty file would leave
+     * *OutData uninitialised and *OutSize undefined. That reaches
+     * Amdbc250PspAllocateFirmwareBuffer(0), which either reuses a stale buffer
+     * or calls MmAllocateContiguousMemorySpecifyCache(0, ...), and the blob
+     * then goes to the PSP with FwSize = 0. Fail explicitly instead. */
+    if (OutData) *OutData = NULL;
+    if (OutSize) *OutSize = 0;
+
     RtlInitUnicodeString(&uniName, FileName);
     InitializeObjectAttributes(&objAttr, &uniName, OBJ_CASE_INSENSITIVE | OBJ_KERNEL_HANDLE, NULL, NULL);
 
@@ -192,9 +200,13 @@ DreamV3LoadFirmwareFromFile(
     if (!NT_SUCCESS(status)) return status;
 
     status = ZwQueryInformationFile(handle, &ioStatus, &fileInfo, sizeof(fileInfo), FileStandardInformation);
-    if (!NT_SUCCESS(status) || fileInfo.EndOfFile.QuadPart == 0) {
+    if (!NT_SUCCESS(status)) {
         ZwClose(handle);
         return status;
+    }
+    if (fileInfo.EndOfFile.QuadPart == 0) {
+        ZwClose(handle);
+        return STATUS_OBJECT_NAME_NOT_FOUND;
     }
 
     ULONG fileSize = (ULONG)fileInfo.EndOfFile.QuadPart;
