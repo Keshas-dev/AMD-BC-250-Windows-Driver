@@ -24,7 +24,134 @@ seno `ps5-win-driver` projekto auditas.
 `gen_patches.py`, `Makefile`. Submoduliai: `rw-r-r-0644/bc250-smu-unlock`
 (`f5886d0`), `yoppeh/efi` (`761b114`).
 
-### 1.1 🔥 `unlock.c` — VISIŠKAI REALIZUOTA GRANDINĖ
+## 1A. ✅ UEFI BANDYMAI 2026-10-01 — KAD GRANDINĖ DARO
+
+### 1A.1 ⭐⭐⭐ **SMN adresas == BAR5 offset** (patvirtintas 3 kartus)
+
+`bc250-wgp-probe.efi` per SMU secure kelią (`Q3 0x2A`) perskaitė:
+
+| Registras | SMN adresas | Reikšmė | Sutapimas |
+|---|---|---|---|
+| `GPU_ID` | `0x00000000` | **`0x9FFF9700`** | ✅ `bar5-autodetect-test`: `0x9FFF9700` |
+| `SCRATCH` | `0x000032D4` | **`0x4D585042`** | ✅ mūsų beacon |
+| `GRBM_GFX_INDEX` | `0x000034D0` | **`0xBA062100`** | ✅ gyva reikšmė |
+
+**Tai nėra atsitiktinumas.** GC registrai yra **tiek pat SMN adresu, kiek BAR5
+offsetu** — be jokios bazės ir be aliaso:
+
+```
+SPI_PG_ENABLE_STATIC_WGP_MASK = SMN 0x00005C3C
+CC_GC_SHADER_ARRAY_CONFIG    = SMN 0x00009C1C
+RLC_PG_ALWAYS_ON_WGP_MASK    = SMN 0x00003D64
+```
+
+**Uždaro seną „ar yra GC SMN alias“ klausimą: TAIP, trivialiai.**
+
+### 1A.2 ⛔ **DF ACL blokuoja IR SMU** — SMN kelias į SPI_PG UŽDARYTAS
+
+```
+read  SMN 0x5C3C = 0x00000000
+write SMN 0x5C3C = 0x5A5A0000  rc=1     ← SMU handlerIS ĮVYKO, grąžino OK
+read  SMN 0x5C3C = 0x00000000           ← REIKŠMĖ NEPASIKEITĖ
+```
+
+**Galutinis atsakymas:** privileged SMN rašymas neapeina ACL, kuris blokuoja
+host rašymą. `rc=1` **ne** reiškia „registras pakeistas“ — reiškia tik „handleris
+grąžino OK“.
+
+> **Svarbus stebėjimas:** Windows (`CF8/CFC`) `0x5C3C` skaito **mirusiu**
+> (`0xFFFFFFFF`), o UEFI SMU skaito `0x00000000`. Du transportai, du skirtingi
+> atsakymai — tai buvo pagrindinis „privilege skirtumo“ įrodymas, ir jis patvirtino,
+> kad skirtumas realus, bet kad ACL stipresnis nei manyta.
+
+### 1A.3 ✅ **feature bit 6 valdomas, bet NIEKAS NEVALDO**
+
+```
+mask before = 0xDD602C7D
+Q2 0x06 disable rc=1  →  mask = 0xDD602C3D     ← bitas 6 (0x40) išjungtas ✅
+Q2 0x05 enable  rc=1  →  mask = 0xDD602C7D     ← atstatyta ✅
+ActiveWgp per visą ciklą = 0
+```
+
+**SMU feature sistema gyva ir valdoma.** Bet `ActiveWgp` **nė karto nepasikeitė**
+→ **bitas 6 = NE WGP galios vartas.** Senoji hipotezė patvirtinta klaida.
+
+Suderina su `SMU_FIRMWARE_OVERVIEW.md` §6: kiekvienas feature = periodinis tick
+handler (`smu_tick_handlers[0x28]`, 40 įrašų). Bitas rodo, kad handler
+*įregistruotas*, ne kad jis *vyksta*.
+
+### 1A.4 ⛔ SMN adresų „MIRTIMO ZONA“
+
+| Adresas | Rezultatas |
+|---|---|
+| `0x00000000` … `0x00005C3C` | ✅ gyva |
+| `0x0000A5BC`, `0x0000E59C`, `0x00004980` | ✅ gyva (0) |
+| **`0x00003D64` (RLC_PG)** | ⛔ **SMU mirė** |
+| `0x09010C3C` ir aukščiau | ⛔ **SMU mirė** |
+
+**Taisyklė: SMN adresas, kuris neegzistuoja arba yra RO, UŽKILDO SMU.** Ne
+„timeout“ — trumpas SMU. Po to **viskas**, įskaitant jau veikusius adresus,
+rodo neteisingai, todėl po mirties **bet koks** vėlesnis rezultatas
+nepatikimas.
+
+**Patvirtino tą patį mechanizmą kaip Windows pusėje** (`SMN 0x03B10A08` per
+`Q3 0x2A` → AC power cycle). **Tas pats abiejose fazėse.**
+
+**Žinomi saugūs GC registrai** (4): `GPU_ID 0x0000`, `SCRATCH 0x32D4`,
+`GRBM_GFX_INDEX 0x34D0`, `SPI_PG 0x5C3C`. `RLC_PG 0x3D64` **NE** saugus.
+
+### 1A.5 🐛 ATRADTA BUGA: `unlock_smu()` klaida maskuojama
+
+Kai `unlock_smu()` nepavyksta, jis grąžina `EFI_DEVICE_ERROR`, bet `main.c`
+tikrina `EFI_ERROR` ir **vis tiek spausdina `unlock_smu: OK`**:
+
+```
+Error: Failed to read SMU debug status!
+unlock_smu: OK                    ← NEPATIKIMAS
+sec_smn_read32(0x5A870) = FAILED
+```
+
+Reikia spausdinti `EFI_ERROR` statuso kodą, o ne tik `OK`/`FAILED`. Taip pat:
+kai grandinė jau atrakinta (`dbg_byte == 0`), ji turi grąžinti sėkmę.
+
+### 1A.6 📄 **EFI SHELL + `>` yra veikiantis logavimo kelias**
+
+Paleidus per `BOOTX64.EFI`, `elog` pranešė `log file = (none writable, console
+only)`. Paleidus per **UEFI Shell su redirect**:
+```
+fs0:\> bc250-wgp-probe.efi > probe2.txt
+```
+failas sukuriamas, visas rezultatas faile. **Tai vienintelis patikimas būdas.**
+
+**Papildomas privalumas:** paleidus **abu** `.efi` **tame pačiame boot'e**,
+`unlock_smu()` randa jau atrakintą SMU → **TEST 1 parašytos reikšmės LIEKA
+vietoje** → „bandyk ir tikrink“ ciklas be peršalto kompo (kol SMU nemiršta).
+
+### 1A.7 🔧 Buildas be Windows Kits
+
+`F:` diskas periodiškai atsijungia (2× per sesiją) ir su juo dingia
+**Windows Kits**. **UEFI build'ui WDK nereikia.** Bet `<intrin.h>` →
+`xmmintrin.h` → `malloc.h` → **UCRT (Kits)**.
+
+Sprendimas: `msvc_compat.h` **rankomis deklaruoja** `_outpd` / `_inpd` /
+`__halt`. Patikrinta: probe kompiliuojasi švariai ir linkina į 1536 B EFI
+aplikaciją **be Kits**. `build-msvc.bat` ieško `vcvars64.bat` `C:`/`D:`/`F:`.
+
+### 1A.8 ❌ KAS DAR NEBANDYTA (tvarka)
+
+| Testas | Būsena | Kodėl svarbu |
+|---|---|---|
+| **`CC_ARRAY 0x9C1C` rašymas** | ❌ **DAR NEATLIKTAS** | ⭐ **40 CU raktas** — Windows jis dalinai rašė (`0x1F000000` prilyko) |
+| `RLC_PG 0x3D64` rašymas | ❌ neatliktas | bet **adresas žudė SMU** → atsargiai |
+| `Q0 0x18` (active CU count) | ⚠️ partial | ankstesnis runas apmirė dar nebandydamas jo |
+| SMU SRAM patch'ai (60 vietų) | ❌ neatlikti | jie CPU, ne GPU; reikia WGP tick handler'io adreso |
+| BAR5 rašymas UEFI | ❯ nebandyta | PSP_BL rašo ACL **prieš** x86 → UEFI jau vėlu |
+
+---
+
+## 1B. `Hexxeh/bc250-efi-core-unlock` — SMU FIRMWARE PATCHING IŠ UEFI
+
+### 1B.1 🔥 `unlock.c` — VISIŠKAI REALIZUOTA GRANDINĖ
 
 Tai **ne pseudokodas** — tai veikianti, patikrinta produkcijo. Mūsų AGENTS.md
 sako, kad šią grandinę sąmoningai neįdiegėme Windows pusėje (dėl ringo

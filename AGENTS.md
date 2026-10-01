@@ -1,5 +1,56 @@
 # AMD BC-250 Windows Driver — Agent Notes
 
+## 🔥 2026-10-01 UEFI GRANDINĖ **DARO** — TAČIAK ŽINAU, KAD REIKIA DARBO
+
+**Išsami dokumentacija: `docs\UEFI-SMU-PATCHING-AND-TELEMETRY.md` §1A**
+**UEFI portas: `uefi\wgp-test\` (build: `uefi\wgp-test\build-msvc.bat`)**
+
+### ✅ PATVIRTINTA (`bc250-wgp-probe.efi`, 3 kartus sutapimu)
+
+| Faktas | Įrodymas |
+|---|---|
+| **`unlock_smu()` veikia UEFI** | `unlock_smu: OK` kiekviename run'e |
+| **Privilegijuotas SMN rašymas veikia** | `write 0x0115A870 rc=1`, re-read identiškas |
+| ⭐ **`SMN adresas == BAR5 offset`** | `GPU_ID @0x0000 = 0x9FFF9700`, `SCRATCH @0x32D4 = 0x4D585042`, `GRBM @0x34D0 = 0xBA062100` |
+| **Feature bit 6 valdomas** | `0xDD602C7D → 0xDD602C3D → 0xDD602C7D` (Q2 `0x06`/`0x05`) |
+
+### ⛔ PATVIRTINTA NEGATYVI (kelias uždarytas)
+
+| Faktas | Įrodymas |
+|---|---|
+| **SMN kelias į SPI_PG UŽDARYTAS** | `write SMN 0x5C3C = 0x5A5A0000 rc=1` → re-read `0x00000000`. **DF ACL blokuoja IR SMU** |
+| **feature bit 6 ≠ WGP galia** | `ActiveWgp = 0` per visą disable/enable ciklą |
+| **Nežinomas/RO SMN adresas UŽKILDO SMU** | `0x3D64` (RLC_PG) ir `0x09010C3C+` → trumpas SMU. Po to **viskas** rodo neteisingai |
+| **Feature bit 6 „valdomas bet neveikia“** | `SMU_FIRMWARE_OVERVIEW` §6: kiekvienas feature = periodinis tick handler (`smu_tick_handlers[0x28]`, 40 įrašų). Bitas = handler *įregistruotas*, ne *vykdomas* |
+
+### 📌 ŽINOMI SAUGŪS GC REGISTRAI (tik 4)
+```
+GPU_ID 0x0000 · SCRATCH 0x32D4 · GRBM_GFX_INDEX 0x34D0 · SPI_PG 0x5C3C
+```
+`RLC_PG 0x3D64` **NE** saugus — jį žudė SMU. `0x090xxxxx+` **NE** saugus.
+
+### ⭐ SEKANTIS DARBAS: **`CC_ARRAY 0x9C1C` rašymas**
+Windows jis **daliniai rašė** (`0xFFF80000 → 0x1F000000`, bits 24-28 prilyko).
+Dabar turime privilegijų kelią. **Tai 40 CU raktas.** Windows pusėje šito
+bandėme, bet `0x9C1C` per SMN dar **NEBANDYTA**.
+
+### 🐛 ŽINOMOS BUGOS
+- `main.c` spausdina `unlock_smu: OK` net kai `unlock_smu()` grąžino
+  `EFI_DEVICE_ERROR`. Reikia spausdinti statuso kodą.
+- `elog` failo rašymas per `BOOTX64.EFI` neveikia (`none writable`). **Veikiantis
+  kelias: UEFI Shell + `>`** (`fs0:\> bc250-wgp-probe.efi > probe2.txt`).
+  Paleidus **abu** `.efi` **tame pačiame boot'e**, `unlock_smu()` randa jau
+  atrakintą SMU → ankstesni rašymai lieka vietoje.
+
+### 🔧 Buildai
+`build-msvc.bat` → 3 `.efi` (`chain` 17.920 B, `probe` 26.112 B, `full` 26.112 B).
+**Nereikia Windows Kits** — `msvc_compat.h` rankomis deklaruoja `_outpd`/`_inpd`/
+`__halt`, nes `<intrin.h>` → `xmmintrin.h` → `malloc.h` → UCRT (Kits). `F:` diskas
+periodiškai atsijungia (2× per sesiją) ir su juo dingia **WDK** → **driverio
+build'ui jo vis dar reikia**.
+
+---
+
 ## 🔥 2026-10-01 NAUJAS KELIAS: UEFI SMU FIRMWARE PATCHING (SKAITYTI PIRMIAUSIA)
 
 **Išsami dokumentacija: `docs\UEFI-SMU-PATCHING-AND-TELEMETRY.md`**

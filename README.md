@@ -6,7 +6,69 @@ GPU driver for AMD BC-250 (Cyan Skillfish) on Windows 11 26100. WDM IOCTL driver
 
 **Goal:** fully working GPU driver for BC-250 on Windows.
 
-**Current build:** `4.3.0.17` (2026-09-30) — SMU Q2 mailbox + staged secure-access diagnostics + verified WGP negative result + governor ceilings aligned to the real silicon limits.
+**Current build:** `4.3.0.18` (2026-10-01) — SMU Q0 read-only telemetry whitelist (incl. SoC/DRAM clock), `bc250-vitals.exe` read-only telemetry tool, two LPE/race fixes found in review.
+
+---
+
+## 🔥 2026-10-01: UEFI SMU bandymai — pagrindinis atradimas
+
+The UEFI-phase SMU unlock chain **works**, and that closes the "is there even a
+privileged path" question. See `docs\UEFI-SMU-PATCHING-AND-TELEMETRY.md` §1A.
+
+| Fact | Evidence |
+|---|---|
+| `unlock_smu()` completes in UEFI | `unlock_smu: OK` every run |
+| **SMN address == BAR5 offset** | `GPU_ID @0x0000 = 0x9FFF9700`, `SCRATCH @0x32D4 = 0x4D585042`, `GRBM_GFX_INDEX @0x34D0 = 0xBA062100` |
+| Privileged SMN **write** works | `write 0x0115A870 rc=1`, re-read identical |
+| Feature bit 6 toggles | `0xDD602C7D → 0xDD602C3D → 0xDD602C7D` |
+
+### Closed by these runs
+
+- **The privileged SMN route to SPI_PG is dead.** `write SMN 0x5C3C = 0x5A5A0000`
+  returns `rc=1` and the value does not change. The Data Fabric ACL that blocks
+  host writes blocks SMU writes too. `rc=1` only means the handler returned OK.
+- **Feature bit 6 is not the WGP gate.** It toggles cleanly, but `ActiveWgp`
+  stays 0 across the whole cycle. `SMU_FIRMWARE_OVERVIEW` §6 explains why: every
+  feature installs a periodic tick handler in `smu_tick_handlers[0x28]`, so the
+  bit being set does not mean anything is evaluating it.
+- **An unknown or read-only SMN address wedges the SMU.** `0x3D64` (RLC_PG) and
+  anything at `0x09010C3C` or above kills it — same failure as
+  `SMN 0x03B10A08` in Windows. After that *every* answer is wrong, including
+  addresses that just worked.
+
+Only four GC registers are known safe: `GPU_ID 0x0000`, `SCRATCH 0x32D4`,
+`GRBM_GFX_INDEX 0x34D0`, `SPI_PG 0x5C3C`. `RLC_PG 0x3D64` is not safe.
+
+### Next
+
+**`CC_ARRAY 0x9C1C` write.** The Windows driver found it partially writable
+(`0xFFF80000` → `0x1F000000`, bits 24-28 persisting). There is now a privileged
+path to it and the test has not been run. This is the 40 CU key.
+
+### Running the probe
+
+`uefi\wgp-test\build-msvc.bat` emits three binaries, so a SMU wedge in one test
+cannot destroy another's results: `bc250-wgp-chain.efi` (chain only),
+`bc250-wgp-probe.efi` (chain + tests) and `bc250-wgp-full.efi` (everything).
+Each stalls 20 s and returns `EFI_SUCCESS` rather than halting.
+
+Logging to a file does not work when launched as `BOOTX64.EFI` — the firmware
+reports the boot volume as unwritable. Run it from the UEFI Shell with a
+redirect instead:
+
+```
+fs0:\> bc250-wgp-probe.efi > probe2.txt
+```
+
+That works, and it has a second advantage: running both binaries in the *same*
+boot means `unlock_smu()` finds the SMU already unlocked, so values written by
+the first run are still in place for the second. A cold boot is needed after the
+SMU has been wedged.
+
+The build needs no Windows Kits — `msvc_compat.h` declares `_outpd`, `_inpd` and
+`__halt` by hand because `<intrin.h>` pulls in the UCRT headers through
+`xmmintrin.h`. This matters because the `F:` drive, which carries the Kits, has
+disappeared twice during the session.
 
 ---
 
