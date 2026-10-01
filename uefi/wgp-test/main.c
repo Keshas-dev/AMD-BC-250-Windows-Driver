@@ -22,10 +22,21 @@
 #include "unlock.h"
 #include "msvc_compat.h"
 #include "elog.h"
+#include "early.h"
 #include "wgp.h"
 
-/* 0 = report and continue booting, 1 = report and halt (no reboot risk) */
+/*
+ * 0 = do nothing, chainload  (used to prove the loader runs the file at all)
+ * 1 = smoke test only        (log open/close, no SMU access whatsoever)
+ * 2 = full probe, then halt  (SMU unlock chain + WGP hypotheses)
+ *
+ * Default is 1 on purpose. The previous build produced no output of any kind,
+ * which cannot be told apart from "efi_main never ran", so the first run must
+ * not touch the SMU. Override at build time with -DTEST_MODE=N.
+ */
+#ifndef TEST_MODE
 #define TEST_MODE 1
+#endif
 
 /* Console + file output all goes through elog, so the log file gets an exact
  * copy of everything shown on screen. */
@@ -39,14 +50,46 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
 {
     unsigned int before, after, mask;
     EFI_STATUS status;
-    int st;
+    int stage = -1, marked;
 
-    (void)ImageHandle;
+    /* Very first statement: prove we are even executing, independently of the
+     * logging path below. */
+    marked = early_marker(SystemTable, ImageHandle, &stage);
 
     elog_init(SystemTable, ImageHandle);
     elog_banner(SystemTable);
 
-    /* --- Baseline ------------------------------------------------------ */
+    puts(SystemTable, "TEST_MODE=");
+    putnum(SystemTable, (unsigned int)TEST_MODE);
+    puts(SystemTable, "  early_marker=");
+    putnum(SystemTable, (unsigned int)marked);
+    puts(SystemTable, " stage=");
+    putnum(SystemTable, (unsigned int)stage);
+    puts(SystemTable, " ConOut=");
+    putnum(SystemTable, (unsigned int)(SystemTable->ConOut != 0));
+    puts(SystemTable, "\r\n");
+
+#if TEST_MODE == 0
+    puts(SystemTable, "stage 0: returning immediately\r\n");
+    elog_close(SystemTable);
+    return EFI_SUCCESS;
+#endif
+
+#if TEST_MODE == 1
+    /* Smoke test: exercise the console and the log, touch nothing else. */
+    puts(SystemTable, "stage 1: smoke test, no SMU access\r\n");
+    puts(SystemTable, "values: ");
+    putnum(SystemTable, 12345);
+    puts(SystemTable, " ");
+    puthex32(SystemTable, 0xDEADBEEFu);
+    puts(SystemTable, "\r\n");
+    puts(SystemTable, "stage 1: OK\r\n");
+    elog_close(SystemTable);
+    SystemTable->BootServices->Stall(3000000);
+    return EFI_SUCCESS;
+#endif
+
+    /* --- TEST_MODE 2: baseline ---------------------------------------- */
     before = smn_rd(MASK_REG);
     mask = before & 0xFFu;
     puts(SystemTable, "core mask SMN 0x0115A870 = ");
@@ -75,11 +118,13 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
     puts(SystemTable, "unlock_smu: OK\r\n");
 
     /* Prove the privileged SMN path is really live, not just unlocked. */
-    st = sec_smn_read32(SystemTable, 0x0005A870u, &after);
-    puts(SystemTable, "sec_smn_read32(0x5A870) = ");
-    if (st == 0x01) puthex32(SystemTable, after & 0xFFu);
-    else puts(SystemTable, "FAILED");
-    puts(SystemTable, "\r\n");
+    {
+        int st = sec_smn_read32(SystemTable, 0x0005A870u, &after);
+        puts(SystemTable, "sec_smn_read32(0x5A870) = ");
+        if (st == 0x01) puthex32(SystemTable, after & 0xFFu);
+        else puts(SystemTable, "FAILED");
+        puts(SystemTable, "\r\n");
+    }
 
     /* --- The actual WGP experiment ------------------------------------ */
     puts(SystemTable, "\r\n-- WGP experiment --\r\n");
@@ -91,21 +136,17 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
     else puts(SystemTable, "(timeout)");
     puts(SystemTable, "\r\n");
     puts(SystemTable, "SMN 0x0005C3C (SPI_PG?) = ");
-    st = sec_smn_read32(SystemTable, 0x0005C3Cu, &after);
-    if (st == 0x01) puthex32(SystemTable, after);
-    else puts(SystemTable, "(unreadable)");
+    {
+        int st = sec_smn_read32(SystemTable, 0x0005C3Cu, &after);
+        if (st == 0x01) puthex32(SystemTable, after);
+        else puts(SystemTable, "(unreadable)");
+    }
     puts(SystemTable, "\r\n");
 
     puts(SystemTable, "\r\n-- end of probe --\r\n");
-
-#if TEST_MODE
-    puts(SystemTable, "\r\nTEST_MODE: halting. Power off when done.\r\n");
-    /* Close before stalling so the log file is fully flushed - we never return. */
+    puts(SystemTable, "\r\nstage 2: halting. Power off when done.\r\n");
+    /* Close before stalling - this path never returns. */
     elog_close(SystemTable);
     SystemTable->BootServices->Stall(15000000);
     while (1) halt_cpu();
-#else
-    elog_close(SystemTable);
-    return EFI_SUCCESS;
-#endif
 }
