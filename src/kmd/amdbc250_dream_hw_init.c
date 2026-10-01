@@ -53,6 +53,38 @@ static NTSTATUS DreamV3WaitForRegister(
 /* DreamV3HwInitFence is declared in amdbc250_dream_kmd.h: the extended init
  * path (the default configuration) calls it from another translation unit. */
 
+/* Read a per-step kill-switch DWORD from the driver's service key.
+ * The switch is absent on a normal install, so the caller-supplied default
+ * decides behaviour. A REG_DWORD of the wrong width is ignored rather than
+ * misread, matching the per-step readers that already existed inline. */
+ULONG
+DreamV3ReadStepSwitch(_In_ PCWSTR Name, _In_ ULONG DefaultValue)
+{
+    UNICODE_STRING Path;
+    HANDLE hKey = NULL;
+    ULONG value = DefaultValue;
+
+    RtlInitUnicodeString(&Path, L"\\Registry\\Machine\\System\\CurrentControlSet\\Services\\atikmdag");
+    {
+        OBJECT_ATTRIBUTES Oa;
+        InitializeObjectAttributes(&Oa, &Path, OBJ_CASE_INSENSITIVE, NULL, NULL);
+        if (NT_SUCCESS(ZwOpenKey(&hKey, KEY_READ, &Oa))) {
+            UNICODE_STRING vn;
+            UCHAR buf[sizeof(KEY_VALUE_PARTIAL_INFORMATION) + sizeof(ULONG)] = {0};
+            ULONG ret = 0;
+            RtlInitUnicodeString(&vn, Name);
+            if (NT_SUCCESS(ZwQueryValueKey(hKey, &vn, KeyValuePartialInformation,
+                                           buf, sizeof(buf), &ret))) {
+                PKEY_VALUE_PARTIAL_INFORMATION pi = (PKEY_VALUE_PARTIAL_INFORMATION)buf;
+                if (pi->DataLength == sizeof(ULONG))
+                    value = *(PULONG)pi->Data;
+            }
+            ZwClose(hKey);
+        }
+    }
+    return value;
+}
+
 /* Persistent step marker so a TDR/reboot reveals the last-entered step.
  * Written to the driver's service key (same RegistryPath the driver uses
  * for DriverBuildId / Step_* markers); survives reboot. */
@@ -896,9 +928,28 @@ DreamV3HwInitGfxRing(
         return Status;
     }
 
-    /* Resume CP */
-    DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_ME_CNTL, 0);
-    KeStallExecutionProcessor(100);
+    /* Resume CP.
+     *
+     * Gated by HwUnhaltCp, which defaults to 0. The firmware loader's own
+     * comment records why: on BC-250 the host cannot un-halt the CP after
+     * loading microcode, because the GPU then runs the loaded firmware and
+     * performs a rogue host DMA write that corrupts system memory. That is
+     * the 0x1A MEMORY_MANAGEMENT bug the 2026-07-14 step bisection
+     * attributed to step 6. The gate was documented here but never read by
+     * any code, so the unhalt ran unconditionally whenever the ring base was
+     * writable.
+     *
+     * Leave the engines halted. Nothing on this board consumes the ring:
+     * CP_RB0_BASE_LO is host read-only below bit 8 and CP_RB0_BASE_HI does
+     * not write, so there is no ring for the resumed CP to consume anyway. */
+    if (DreamV3ReadStepSwitch(L"HwUnhaltCp", 0) != 0) {
+        DreamV3WriteRegister(DevExt, AMDBC250_REG_CP_ME_CNTL, 0);
+        KeStallExecutionProcessor(100);
+    } else {
+        KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL,
+                   "AMDBC250-DREAM-V4.3: CP left HALTED (HwUnhaltCp=0). Ring base is\n"
+                   "AMDBC250-DREAM-V4.3: host read-only on this board, so no consumer exists.\n"));
+    }
 
     DevExt->GfxRing.Initialized = TRUE;
 

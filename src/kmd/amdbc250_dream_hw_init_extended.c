@@ -95,11 +95,23 @@ NTSTATUS DreamV3HwInitializeExtended(_In_ PDREAM_V3_DEVICE_EXTENSION DevExt){
     KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL, "AMDBC250: [EXT 6/13] PSP FW + ring (MP0 0x58000, after GART/VM)\n"));
     Status = DreamV3LoadPspFirmware(DevExt);
     if(!NT_SUCCESS(Status)) KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL, "AMDBC250: [EXT 6] PSP FW failed 0x%08X (continue)\n", Status));
-    // Try ring create — if stub returns NOT_SUPPORTED, log and continue (TOS not ready on BC-250 is expected)
+
+    /* PSP hardware init: maps the PSP MMIO window, attempts the NBIO unlock and
+     * sets DevExt->PspAlive / PspInitialized / NbioUnlocked / KiqAvailable /
+     * GfxRingAvailable.
+     *
+     * The active path previously called Amdbc250PspRingCreate(NULL,0,0,0,0)
+     * here, which is a stub that ignores every argument and returns
+     * STATUS_NOT_SUPPORTED, so the step could only ever print a permanent
+     * warning. Because DreamV3PspHardwareInit was never reached from this
+     * file, g_PspContext.MmioBase stayed unmapped (every
+     * Amdbc250PspReadRegister then returned 0xFFFFFFFF), those five flags were
+     * never written, and DevExt->PspInitialized stayed FALSE - which in turn
+     * skipped Amdbc250PspProxyCleanup in teardown and leaked g_FwBuffer. */
     {
-        NTSTATUS rs = Amdbc250PspRingCreate(NULL, 0, 0, 0, 0);
-        if(NT_SUCCESS(rs)) KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL, "AMDBC250: [EXT 6] PSP ring CREATED\n"));
-        else KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL, "AMDBC250: [EXT 6] PSP ring not created 0x%08X (expected on BC-250 TOS=SOS)\n", rs));
+        NTSTATUS ps = DreamV3PspHardwareInit(DevExt);
+        if(!NT_SUCCESS(ps)) KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_WARNING_LEVEL, "AMDBC250: [EXT 6] PSP HW init failed 0x%08X (continue)\n", ps));
+        else KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL, "AMDBC250: [EXT 6] PSP HW init OK (Mmio mapped, flags set)\n"));
     }
 
     // Step 4: Golden 34 regs — expand from 1/34 (CC only) to full via DreamV3ProgramGolden (uses RLC safe if available)
@@ -120,11 +132,27 @@ NTSTATUS DreamV3HwInitializeExtended(_In_ PDREAM_V3_DEVICE_EXTENSION DevExt){
         if(bar5){
             static const ULONG bankSel[4]={0x00000000,0x00000100,0x00010000,0x00010100};
             ULONG spiBefore = READ_REGISTER_ULONG((PULONG)(bar5 + 0x5C3C));
+            ULONG ccAt9c1c = READ_REGISTER_ULONG((PULONG)(bar5 + 0x9C1C));
+            ULONG ccAt529c = READ_REGISTER_ULONG((PULONG)(bar5 + 0x529C));
+            /* Two addresses are in circulation for CC_GC_SHADER_ARRAY_CONFIG and
+             * the 40 CU role is claimed for both, so report them rather than
+             * picking one. gc_10_1_0_offset.h has mmCC_GC_SHADER_ARRAY_CONFIG at
+             * 0x100f, which is 0x529C after the GC base shift; the 0x9C1C used
+             * here comes from mm 0x226F, which is not in that header. Whichever
+             * is right, the register reads back the fuse shadow, so writing
+             * either changes enumeration and not the value. */
+            KdPrintEx((DPFLTR_IHVVIDEO_ID, DPFLTR_INFO_LEVEL, "AMDBC250: [EXT 12a] CC 0x9C1C=0x%08X  CC 0x529C=0x%08X (candidates)\n", ccAt9c1c, ccAt529c));
             for(ULONG b=0;b<4;b++){
                 WRITE_REGISTER_ULONG((PULONG)(bar5 + 0x34D0), bankSel[b]);
                 WRITE_REGISTER_ULONG((PULONG)(bar5 + 0x9C1C), 0x00000000); // CC=0 per duggasco
                 WRITE_REGISTER_ULONG((PULONG)(bar5 + 0x5C3C), 0x0000001F);
-                WRITE_REGISTER_ULONG((PULONG)(bar5 + 0x3D64), 0x0000001F);
+                /* RLC_PG_ALWAYS_ON_WGP_MASK is deliberately NOT written.
+                 * gc_10_1_0_offset.h places it at mm 0x4c53, which is 0x143AC
+                 * after the GC base shift, not the 0x3D64 that was here. 0x3D64
+                 * corresponds to mm 0xac1, which is not in that header, and
+                 * probing it through SMN from UEFI wedged the SMU. It is also a
+                 * no-op: the VBIOS already leaves it at 0x1f from POST, so the
+                 * write cannot change anything. */
             }
             WRITE_REGISTER_ULONG((PULONG)(bar5 + 0x34D0), AMDBC250_GRBM_GFX_INDEX_BROADCAST_VAL); /* 0x15000000 gfx10 broadcast (was 0xE0000000 soc15; see hw.h:445) */
             ULONG spiAfter = READ_REGISTER_ULONG((PULONG)(bar5 + 0x5C3C));
