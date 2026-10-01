@@ -19,7 +19,7 @@ if not exist output mkdir output
 
 rem /GS- and /GR- : no stack cookie or RTTI in a freestanding EFI image
 cl /nologo /c /O2 /GS- /GR- /Zl /W3 /I vendor /Fo:output\ ^
-   smu.c unlock.c patches.c wgp.c main.c
+   smu.c unlock.c patches.c wgp.c elog.c main.c
 if errorlevel 1 (
   echo BUILD FAILED - compile stage
   exit /b 1
@@ -31,7 +31,7 @@ rem firmware loader treat this as a bootable application.
 link /nologo /NODEFAULTLIB /ENTRY:efi_main /SUBSYSTEM:EFI_APPLICATION ^
      /MACHINE:X64 /OPT:REF /OPT:ICF /OUT:output\bc250-wgp-probe.efi ^
      output\smu.obj output\unlock.obj output\patches.obj ^
-     output\wgp.obj output\main.obj
+     output\wgp.obj output\elog.obj output\main.obj
 if errorlevel 1 (
   echo BUILD FAILED - link stage
   exit /b 1

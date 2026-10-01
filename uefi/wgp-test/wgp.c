@@ -30,38 +30,13 @@
 #include <efi.h>
 #include "smu.h"
 #include "msvc_compat.h"
+#include "elog.h"
 #include "wgp.h"
 
-/* --------------------------------------------------------------------- */
-/* Console helpers                                                        */
-/* --------------------------------------------------------------------- */
-
-static void puts(EFI_SYSTEM_TABLE *st, const char *s)
-{
-    UINT16 buf[160];
-    int i = 0;
-    for (; *s && i < 159; s++) buf[i++] = (UINT16)(unsigned char)*s;
-    buf[i] = 0;
-    print(st, buf);
-}
-
-static void putnum(EFI_SYSTEM_TABLE *st, unsigned int v)
-{
-    UINT16 b[16];
-    char t[12];
-    int n = 0, i;
-    if (!v) { b[0] = '0'; b[1] = 0; print(st, b); return; }
-    while (v && n < 10) { t[n++] = (char)('0' + (v % 10)); v /= 10; }
-    for (i = 0; i < n; i++) b[i] = (UINT16)t[n - 1 - i];
-    b[n] = 0;
-    print(st, b);
-}
-
-static void puthex32(EFI_SYSTEM_TABLE *st, unsigned int v)
-{
-    puts(st, "0x");
-    print_hex(st, v);
-}
+/* Console + file output all goes through elog. */
+#define puts(st, s)       elog_str((st), (s))
+#define putnum(st, v)     elog_u32((st), (v))
+#define puthex32(st, v)   elog_hex32((st), (v))
 
 /* --------------------------------------------------------------------- */
 
@@ -84,7 +59,7 @@ void wgp_probe(EFI_SYSTEM_TABLE *st)
 
         rc = sec_smn_read32(st, 0x0115A870u, &v);
         puts(st, "  read  SMN 0x0115A870 (core mask) = ");
-        if (rc == 0x01) print_hex(st, v & 0xFFu); else { puts(st, "FAILED rc="); putnum(st, (unsigned int)rc); }
+        if (rc == 0x01) puthex32(st, v & 0xFFu); else { puts(st, "FAILED rc="); putnum(st, (unsigned int)rc); }
         puts(st, "\r\n");
 
         /* Write back the value we just read. Harmless, and proves the write
@@ -98,7 +73,7 @@ void wgp_probe(EFI_SYSTEM_TABLE *st)
         v = 0;
         rc = sec_smn_read32(st, 0x0115A870u, &v);
         puts(st, "  re-read                      = ");
-        if (rc == 0x01) print_hex(st, v & 0xFFu); else { puts(st, "FAILED"); }
+        if (rc == 0x01) puthex32(st, v & 0xFFu); else { puts(st, "FAILED"); }
         puts(st, "\r\n");
         puts(st, "  (a mask that comes back identical means the write is real)\r\n");
     }

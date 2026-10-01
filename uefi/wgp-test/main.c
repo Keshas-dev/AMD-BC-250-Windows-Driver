@@ -21,42 +21,17 @@
 #include "smu.h"
 #include "unlock.h"
 #include "msvc_compat.h"
+#include "elog.h"
 #include "wgp.h"
 
 /* 0 = report and continue booting, 1 = report and halt (no reboot risk) */
 #define TEST_MODE 1
 
-/* ------------------------------------------------------------------------- */
-/* Console output helpers. The UEFI console takes UTF-16, so ASCII literals  */
-/* are widened here rather than scattered across the file.                     */
-/* ------------------------------------------------------------------------- */
-
-static void puts(EFI_SYSTEM_TABLE *st, const char *s)
-{
-    UINT16 buf[128];
-    int i = 0;
-    for (; *s && i < 127; s++) buf[i++] = (UINT16)(unsigned char)*s;
-    buf[i] = 0;
-    print(st, buf);
-}
-
-static void putnum(EFI_SYSTEM_TABLE *st, unsigned int v)
-{
-    UINT16 b[16];
-    char t[12];
-    int n = 0, i;
-    if (!v) { b[0] = '0'; b[1] = 0; print(st, b); return; }
-    while (v && n < 10) { t[n++] = (char)('0' + (v % 10)); v /= 10; }
-    for (i = 0; i < n; i++) b[i] = (UINT16)t[n - 1 - i];
-    b[n] = 0;
-    print(st, b);
-}
-
-static void puthex32(EFI_SYSTEM_TABLE *st, unsigned int v)
-{
-    puts(st, "0x");
-    print_hex(st, v);
-}
+/* Console + file output all goes through elog, so the log file gets an exact
+ * copy of everything shown on screen. */
+#define puts(st, s)       elog_str((st), (s))
+#define putnum(st, v)     elog_u32((st), (v))
+#define puthex32(st, v)   elog_hex32((st), (v))
 
 /* ------------------------------------------------------------------------- */
 
@@ -68,16 +43,14 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
 
     (void)ImageHandle;
 
-    puts(SystemTable, "\r\n");
-    puts(SystemTable, "==============================================\r\n");
-    puts(SystemTable, " BC-250 UEFI WGP UNLOCK PROBE\r\n");
-    puts(SystemTable, "==============================================\r\n");
+    elog_init(SystemTable, ImageHandle);
+    elog_banner(SystemTable);
 
     /* --- Baseline ------------------------------------------------------ */
     before = smn_rd(MASK_REG);
     mask = before & 0xFFu;
     puts(SystemTable, "core mask SMN 0x0115A870 = ");
-    print_hex(SystemTable, mask);
+    puthex32(SystemTable, mask);
     puts(SystemTable, "\r\n");
 
     puts(SystemTable, "feature mask  Q0 0x3D    = ");
@@ -96,6 +69,7 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
     if (EFI_ERROR(status)) {
         puts(SystemTable, "ERROR: unlock_smu failed\r\n");
         SystemTable->BootServices->Stall(8000000);
+        elog_close(SystemTable);
         return status;
     }
     puts(SystemTable, "unlock_smu: OK\r\n");
@@ -103,7 +77,7 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
     /* Prove the privileged SMN path is really live, not just unlocked. */
     st = sec_smn_read32(SystemTable, 0x0005A870u, &after);
     puts(SystemTable, "sec_smn_read32(0x5A870) = ");
-    if (st == 0x01) print_hex(SystemTable, after & 0xFFu);
+    if (st == 0x01) puthex32(SystemTable, after & 0xFFu);
     else puts(SystemTable, "FAILED");
     puts(SystemTable, "\r\n");
 
@@ -118,16 +92,20 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable)
     puts(SystemTable, "\r\n");
     puts(SystemTable, "SMN 0x0005C3C (SPI_PG?) = ");
     st = sec_smn_read32(SystemTable, 0x0005C3Cu, &after);
-    if (st == 0x01) print_hex(SystemTable, after);
+    if (st == 0x01) puthex32(SystemTable, after);
     else puts(SystemTable, "(unreadable)");
     puts(SystemTable, "\r\n");
 
+    puts(SystemTable, "\r\n-- end of probe --\r\n");
+
 #if TEST_MODE
-    puts(SystemTable, "\r\nTEST_MODE: halting so results can be read.\r\n");
-    puts(SystemTable, "Power off to continue.\r\n");
+    puts(SystemTable, "\r\nTEST_MODE: halting. Power off when done.\r\n");
+    /* Close before stalling so the log file is fully flushed - we never return. */
+    elog_close(SystemTable);
     SystemTable->BootServices->Stall(15000000);
     while (1) halt_cpu();
 #else
+    elog_close(SystemTable);
     return EFI_SUCCESS;
 #endif
 }

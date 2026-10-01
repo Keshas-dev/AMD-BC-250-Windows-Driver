@@ -46,8 +46,37 @@ subsystem `EFI Application`, entry `efi_main`. Builds with 0 warnings at `/W3`.
 1. Format a USB stick **FAT32**.
 2. Create `EFI\BOOT\` on it and copy the .efi there as **`BOOTX64.EFI`**.
 3. Set the BIOS boot order to prefer USB, or press F11 / F12 at boot.
-4. Read the console output. `TEST_MODE` is 1, so it **halts** after printing and
-   does not chainload — power off when done.
+4. **Read `WGPLOG.TXT` from the root of the USB stick** — that is the full
+   result set, an exact copy of the console output. The console version is only
+   a convenience for watching it live.
+5. `TEST_MODE` is 1, so it **halts** after printing and does not chainload —
+   power off when done.
+
+### The log file
+
+`elog.c` tees every line to the console **and** to a file on each writable EFI
+file system it can find: the boot volume first (the USB stick), then anything
+else such as the ESP. The name is `WGPLOG.TXT`, deliberately 8.3-safe so it
+works on FAT32 without long-name support. An existing file is truncated at
+start, so a rerun never appends to a stale log.
+
+`yoppeh/efi` carries no file-system protocol, so `EFI_SIMPLE_FILE_SYSTEM_PROTOCOL`
+and the first eleven `EFI_FILE_PROTOCOL` members are declared in `elog.c`
+directly. Only that prefix is laid out, which is all that is needed — `Open`,
+`Write`, `SetPosition`, `Flush` and `Close` are all inside it and nothing past
+`Flush` is ever dereferenced.
+
+Two things that differ from the obvious spelling:
+
+- The handle search uses **`AllHandles`**, not `ByProtocol`. yoppeh/efi declares
+  only `AllHandles`, `ByRegisterNotify` and `ByProtocol`; `ByProtocol` needs a
+  `SearchKey` this call has no use for, and `EFI_GLOBAL` /
+  `ALLOCATE_ANY_PAGES` do not exist in that header set at all.
+- `strlen` is provided locally. No CRT is linked, so the upstream `memcpy` /
+  `memset` in `smu.c` are not the only libc functions that go missing.
+
+If no file system is writable the probe still prints to the console, and the
+first line of output says how many log files were opened.
 
 ## What it does, in order
 
