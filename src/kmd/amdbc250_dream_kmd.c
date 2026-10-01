@@ -8238,6 +8238,81 @@ DreamV3DeviceControl(
         break;
     }
 
+    case 0x80000B50: { /* IOCTL_AMDBC250_WGP_BANK_PROBE */
+        /*
+         * Per-bank readback of the two WGP registers. Writes only
+         * GRBM_GFX_INDEX, and restores it before returning.
+         *
+         * This is the one place a bank can be selected without user mode
+         * doing the write itself. The driver elsewhere documents writing
+         * GRBM_GFX_INDEX while the display is live as the white-screen cause,
+         * so the original value is saved and verified on the way out, and the
+         * whole walk is serialised against other MMIO through DeviceMutex.
+         */
+        static const ULONG bankSel[4] = { 0x00000000, 0x00000100, 0x00010000, 0x00010100 };
+        PAMDBC250_IOCTL_WGP_BANK_PROBE R = (PAMDBC250_IOCTL_WGP_BANK_PROBE)outputBuffer;
+        ULONG saved = 0;
+
+        if (outputLen < sizeof(*R)) {
+            status = STATUS_BUFFER_TOO_SMALL;
+            break;
+        }
+        RtlZeroMemory(R, sizeof(*R));
+
+        /* METHOD_BUFFERED: the I/O manager copies back exactly
+         * Irp->IoStatus.Information bytes. Without this the handler runs,
+         * fills SystemBuffer, and the user buffer is left untouched - which
+         * looks identical to "the case was never reached". */
+        bytesReturned = sizeof(*R);
+
+        R->MmioVirtualBase = (ULONG)(ULONG_PTR)DevExt->MmioVirtualBase;
+        R->MmioSize = (ULONG)DevExt->MmioSize;
+        R->HardwareInitialized = DevExt->HardwareInitialized;
+
+        if (!DevExt->MmioVirtualBase) {
+            status = STATUS_DEVICE_NOT_READY;
+            break;
+        }
+
+        __try {
+            R->GpuId = DreamV3ReadRegister(DevExt, 0x0000);
+            R->DeviceReadOk = (R->GpuId != 0 && R->GpuId != 0xFFFFFFFFu) ? 1 : 0;
+            saved = DreamV3ReadRegister(DevExt, AMDBC250_REG_GRBM_GFX_INDEX);
+            R->GrbmIndexSaved = saved;
+
+            ExAcquireFastMutex(&DevExt->DeviceMutex);
+            __try {
+                for (ULONG b = 0; b < 4; b++) {
+                    R->BankSel[b] = bankSel[b];
+                    DreamV3WriteRegister(DevExt, AMDBC250_REG_GRBM_GFX_INDEX, bankSel[b]);
+                    DreamV3HdpFlush(DevExt);
+                    R->GrbmEcho[b]  = DreamV3ReadRegister(DevExt, AMDBC250_REG_GRBM_GFX_INDEX);
+                    R->SpiPg[b]     = DreamV3ReadRegister(DevExt, 0x5C3C);
+                    R->Cc9c1c[b]    = DreamV3ReadRegister(DevExt, 0x9C1C);
+                    R->Cc529c[b]    = DreamV3ReadRegister(DevExt, 0x529C);
+                }
+            } __finally {
+                ExReleaseFastMutex(&DevExt->DeviceMutex);
+            }
+
+            DreamV3WriteRegister(DevExt, AMDBC250_REG_GRBM_GFX_INDEX, saved);
+            DreamV3HdpFlush(DevExt);
+            R->GrbmIndexRestored = (DreamV3ReadRegister(DevExt, AMDBC250_REG_GRBM_GFX_INDEX) == saved) ? 1 : 0;
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            if (saved) {
+                /* Best effort: the display depends on this register. */
+                __try {
+                    DreamV3WriteRegister(DevExt, AMDBC250_REG_GRBM_GFX_INDEX, saved);
+                    DreamV3HdpFlush(DevExt);
+                } __except (EXCEPTION_EXECUTE_HANDLER) {
+                    /* nothing further is safe here */
+                }
+            }
+            status = STATUS_UNHANDLED_EXCEPTION;
+        }
+        break;
+    }
+
     case 0x80000988: { /* IOCTL_AMDBC250_SDMA_SELFTEST */
         {
             PULONG Resp = (PULONG)outputBuffer;

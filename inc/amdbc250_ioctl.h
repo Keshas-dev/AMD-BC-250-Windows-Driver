@@ -1129,6 +1129,42 @@ typedef struct _AMDBC250_IOCTL_GCVM_PT_SETUP {
 /* --- SDMA Self Test --- */
 #define IOCTL_AMDBC250_SDMA_SELFTEST        CTL_CODE_AMDBC250(0x63, METHOD_BUFFERED, FILE_ANY_ACCESS)
 
+/*
+ * Per-bank WGP register readback.
+ *
+ * SPI_PG_ENABLE_STATIC_WGP_MASK and CC_GC_SHADER_ARRAY_CONFIG are indexed by
+ * GRBM_GFX_INDEX, so a read without selecting a bank does not tell you
+ * anything about them - an unselected bank reads as zero, which is
+ * indistinguishable from "gated". A user-mode tool cannot select a bank
+ * without writing GRBM_GFX_INDEX itself, and this driver documents that
+ * write as display-fatal, so the selection has to happen here instead.
+ *
+ * The handler saves GRBM_GFX_INDEX, walks the four gfx10 shader-array banks,
+ * and restores the original value. It writes nothing else.
+ *
+ * Two CC addresses are reported because the board has two in circulation and
+ * nothing recorded so far decides between them:
+ *   0x9C1C  from mm 0x226F - what the driver writes today; mm 0x226F is not
+ *                           in gc_10_1_0_offset.h
+ *   0x529C  from mm 0x100F - the only CC in gc_10_1_0_offset.h
+ */
+#define IOCTL_AMDBC250_WGP_BANK_PROBE       CTL_CODE_AMDBC250(0x64, METHOD_BUFFERED, FILE_ANY_ACCESS)
+
+typedef struct _AMDBC250_IOCTL_WGP_BANK_PROBE {
+    UINT32 GpuId;                    /* OUT: 0x0000, must not be all-ones  */
+    UINT32 GrbmIndexSaved;           /* OUT: value restored on exit       */
+    UINT32 GrbmIndexRestored;        /* OUT: 1 if the restore verified     */
+    UINT32 BankSel[4];               /* OUT: gfx10 SA=bit8 SE=bit16       */
+    UINT32 SpiPg[4];                 /* OUT: 0x5C3C per bank              */
+    UINT32 Cc9c1c[4];                /* OUT: 0x9C1C per bank              */
+    UINT32 Cc529c[4];                /* OUT: 0x529C per bank              */
+    UINT32 GrbmEcho[4];              /* OUT: 0x34D0 readback per bank     */
+    UINT32 MmioVirtualBase;          /* OUT: diagnostic, the mapping used */
+    UINT32 MmioSize;                 /* OUT: diagnostic                  */
+    UINT32 HardwareInitialized;      /* OUT: diagnostic                  */
+    UINT32 DeviceReadOk;             /* OUT: 1 if GpuId looks mapped     */
+} AMDBC250_IOCTL_WGP_BANK_PROBE, *PAMDBC250_IOCTL_WGP_BANK_PROBE;
+
 typedef struct _AMDBC250_IOCTL_SDMA_SELFTEST {
     UINT32 Result;                 /* OUT: 0=fail, 0x600DCAFE=pass */
     UINT32 Pattern;                /* IN: fill pattern (default 0x600DC0DE) */

@@ -305,7 +305,76 @@ smaller version of the same one.
 
 ---
 
-## 7. SDMA firmware: the shipped blob does not drive user queues
+## 6.5 The gate is closed at POST, measured with a bank selected (2026-10-01)
+
+This supersedes the "unconfirmed" status in §5. It is now a **measurement**, not
+an inference.
+
+`output\wgp-bank-probe.exe` drives a new driver IOCTL
+(`IOCTL_AMDBC250_WGP_BANK_PROBE`, packed `0x80000B50`) that saves
+`GRBM_GFX_INDEX`, walks the four gfx10 shader-array banks, and restores it.
+Doing the selection in the driver is required because these registers are
+per-bank, and a user-mode tool cannot select a bank without performing the
+`GRBM_GFX_INDEX` write that this driver documents as display-fatal.
+
+Result, all four banks:
+
+| Register | 0x9C1C-era value | Ours | `docs/16` (BIOS P5.00) |
+|---|---|---|---|
+| `SPI_PG_ENABLE_STATIC_WGP_MASK` `0x5C3C` | `0x1f` | **`0x00000000`** | `0x1f` from POST |
+| `CC_GC_SHADER_ARRAY_CONFIG` `0x9C1C` | `0xffe00000` | `0x00000000` | `0xffe00000` |
+| `CC_GC_SHADER_ARRAY_CONFIG` `0x529C` | n/a | `0x00000000` | n/a |
+
+Control values were all correct, which is what makes this trustworthy:
+
+```
+GPU_ID            = 0x9FFF9700        ok
+MmioVirtualBase   = 0x012A6000  MmioSize = 0x80000
+HardwareInitialized = 1   ReadOk = 1
+GRBM_GFX_INDEX    = 0xBA062100  saved and restored (restored = 1)
+GrbmEcho          == BankSel for all four banks
+```
+
+**Conclusion.** The 40 CU gate is not an ACL, not SOS, and not reachable from
+UEFI, SMU or PSP. Our board does not come out of POST with the shader array
+enabled. Every WGP route tried over six months was aimed at the wrong layer.
+
+`CC` is zero at `0x9C1C` as well, so the earlier observation that `0x9C1C` is
+partially writable only described a leftover from our own write. At boot it
+reads zero. `mm 0x226F` behind `0x9C1C` is not in `gc_10_1_0_offset.h` either,
+so that address remains unexplained.
+
+## 6.6 Two driver bugs found by making a probe return data
+
+**`bytesReturned` was never set, so no output came back.** With `METHOD_BUFFERED`
+the I/O manager copies exactly `Irp->IoStatus.Information` bytes. A handler that
+fills `SystemBuffer` but leaves `bytesReturned = 0` returns success and the user
+buffer is never updated. This is indistinguishable from "the case was never
+reached", which is how it presented: every field read as zero, including
+`GPU_ID`.
+
+The discriminator is a **sentinel**, not a zero fill. Filling the user buffer
+with `0xDEADBEEF` before the call distinguishes the two cases in a single run.
+Pre-filling with zeros cannot, which is why the first run looked like a clean
+measurement of a gated register rather than an empty buffer.
+
+Every "the register reads 0" claim made before this was fixed is void, including
+the `SPI_PG = 0` reading that §6.5 now re-measured properly.
+
+**Header and driver disagree on IOCTL numbering.** The header builds codes with
+`IOCTL_INDEX 0x270` (for example `IOCTL_AMDBC250_READ_REG` = `0x80000B88`),
+but 56 `case` labels in the driver are hand-written literals on the older
+`0x200`-based scheme (`0x80000988` and so on). Tools happen to work because
+each tool targets whatever its own build resolves and the driver happens to
+handle both, but the two are not consistently paired: some cases carry the
+legacy literal only, some the header value only, and at least one
+(`GCVM_PT_SETUP`, `0x8000098C`) matches no code this `IOCTL_INDEX` can produce,
+making it dead.
+
+This is a bug factory. Any new tool written against the header silently fails
+with `ERROR_INVALID_FUNCTION`. Either convert every case to the macro, or set
+`IOCTL_INDEX` back to `0x200` and fix the tools - but not leave it half-mixed.
+
 
 `docs/29`, measured with `n=3`, deterministic:
 
