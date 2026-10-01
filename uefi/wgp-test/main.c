@@ -58,7 +58,8 @@ static void putnum(EFI_SYSTEM_TABLE *st, unsigned int v)
 
 static void puthex32(EFI_SYSTEM_TABLE *st, unsigned int v)
 {
-    puts(st, "0x");
+    /* print_hex already emits the 0x prefix - do not add another. An earlier
+     * build printed "0x0x000000FF" for every value because of it. */
     print_hex(st, v);
 }
 
