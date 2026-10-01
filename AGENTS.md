@@ -1,5 +1,191 @@
 # AMD BC-250 Windows Driver — Agent Notes
 
+## 📌 VM IDĖJA: `ENABLE_CONTEXT` — vienas neatidarytas bitas (2026-10-01)
+
+### Ką nurodė Linux šaltinis (`gfxhub_v1_0.c`, atsiųstas į `amd_smu_reverse_engineering\upstream\`)
+`gmc_v10_0_hw_init()` tvarka (**eilė svarbi**):
+```c
+gmc_v10_0_init_golden_registers(adev);
+adev->gfxhub.funcs->utcl2_harvest(adev);   // GC_UTCL2 — PRIEŠ bet ką GMC
+adev->gfxhub.funcs->gart_enable(adev);     // GFXHUB (ne GMC!)
+adev->mmhub.funcs->gart_enable(adev);
+```
+`gfxhub_v1_0_gart_enable()`:
+```c
+init_gart_aperture_regs()   → VM_CONTEXT0_PAGE_TABLE_BASE   ✅ tai yra 0x0B408/0x0B40C
+init_system_aperture_regs()
+init_tlb_regs()             → MC_VM_MX_L1_TLB_CNTL  (ENABLE_L1_TLB=1, SYSTEM_ACCESS_MODE=3,
+                                                        ENABLE_ADVANCED_DRIVER_MODEL=1, ATC_EN=1)
+init_cache_regs()           → VM_L2_CNTL  (ENABLE_L2_CACHE=1, ENABLE_L2_FRAGMENT_PROCESSING=1)
+enable_system_domain()      → VM_CONTEXT0_CNTL.ENABLE_CONTEXT = 1     ⭐
+disable_identity_aperture() → VM_L2_CONTEXT1_IDENTITY_APERTURE_* = 0xFFFFFFFF
+setup_vmid_config()         → VM_CONTEXT1_CNTL[0..14].ENABLE_CONTEXT=1, PAGE_TABLE_DEPTH, BLOCK_SIZE
+program_invalidation()
+```
+
+### ⭐ HIPOTEZĖ B (vartotojo pasirinkta)
+`GCVM_PT_BASE0` **jau programuotas** = `0x7D9AB14E_007ECCC4` (RAM, <4 GB) — t.y. pusė VM
+darbo padaryta firmware. Bet `GCVM_STATUS = 0`. **Jei `VM_CONTEXT0_CNTL.ENABLE_CONTEXT = 0`,
+tai VIENINTELIS paaiškinimas, kodėl visas GFX/ring blokas atrodo užrakintas** — Linux eina
+`GART/VM → PSP ring/TMR → golden → get_cu_info → ring`, o mes niekada neįjungėme VM.
+
+**Patikra:** reikia **tikslio `VM_CONTEXT0_CNTL` adreso** iš veikiančio CachyOS
+(`/sys/kernel/debug/dri/0/amdgpu_regs`) — ne galvoti. Adresai tūkstančio eilutės
+žemėlapyje neturi prasmės spėlioti.
+
+### ❌ Atmesta: `gmc_v10_0.c` GART skiltis NĖRA legacy AGP
+`gmc_v10_0_gart_init()` → `amdgpu_gart_init` + **`amdgpu_gart_table_vram_alloc`** (GART
+table **VRAM'e**, ne RAM!) + `MMHUB`/`GFXHUB` per discovery. `SZ_512M` (mūsų chipas —
+`default:` skyrius, ne 10.3.x). **Mūsų `DreamV3GartInitialize` (RAM lentelė + 0x9528 blokas)
+nėra tas pats dalykas** — jis struktūriškai klaidas.
+
+### ❌ Atmesta: PS5 loaderio kelias
+`ps5-linux-loader-main` rašo per `ECAM_B0D18F2` (0x18 = **hex** = 24 dekim) → `B0:D24:F2`
+= **`1022:13F2`**, kuri **egzistuoja** mūsų plokštėje (`cmd=0x0000`, BARų nėra, class 0x060000).
+Išmatuota: **`00:18.2` nėra SMN requesteris** (visi 3 testai → `0`), `00:18.0` → konstanta
+`0x280`. Tikras requesteris = `00:00.0` (idle data port = `0x9FFF9700` = GPU_ID ✅).
+PS5 turi šią funkciją įjungtą per HV-defeat; **mums ji neįjungta**. Be to PS5 naudoja
+`/dev/gc` **kernel driverio** ioctl `0xC0108102` — userland registrų neliečia.
+**AGENTS teisingai atmetė šį kelią.**
+
+### ❌ Atmesta: BAR0/BAR2 kaip GC apertūra
+| BAR | PA | `GPU_ID` | Verdiktas |
+|---|---|---|---|
+| BAR5 | `0xFE800000` | `0x9FFF9700` | ✅ GC blokas (ring RO) |
+| BAR0 | `0xC0000000` | `0xFF070412` | ❌ **DCN/display**, ne GC |
+| BAR2 | `0xD0000000` | `0xFFFFFFFF` | ❌ nematomas |
+BAR0 = `0xC0000000` yra `aper_base` → tai **framebuffer/display apertūra**, ne registrai.
+`bc250-bars.exe`: BAR0/BAR2 = **64-bit prefetchable**, BAR4 = IO `0xEF00`, BAR5 = 512K MEM.
+
+---
+
+## ⛔ GFX RING BLOKAS IŠMATUOTAS UŽRAKINTAS — su kalibravimu (2026-10-01)
+
+Įrankiai: `output\g3d-state-ro.exe` (read-only), `g3d-ring-canary.exe`,
+`g3d-ring-realbase.exe`, `g3d-wr-control.exe` (kalibravimo).
+
+### ✅ KALIBRACIJA — rašymo kelias sveikas
+| Registras | Rezultatas |
+|---|---|
+| `GRBM_GFX_INDEX` 0x34D0 | **FULL 32-bit WRITE OK** (`0xA5C35E7D` → identiškas) |
+| `SCRATCH_REG0` 0x32D4 | **FULL 32-bit WRITE OK** |
+
+Trukčiu manyta, kad varikliukas sugedęs — **sveikas**. Visi „nepavyko“ rezultatai tikri.
+
+### ⛔ IŠMATUOTA — GFX ring blokas RO
+| Registras | 0x89E0 bloke | Rezultatas |
+|---|---|---|
+| `CP_RB0_BASE_LO` 0x89E0 | ✅ | **tik bitai [7:0]** |
+| `CP_RB0_CNTL` 0x89E4 | ✅ | RO |
+| `CP_RB0_WPTR` 0x8A30 | ✅ | RO |
+| `CP_RB0_BASE_HI` 0x8BA4 | ✅ | RO |
+
+Bitų žemėlapis 0x89E0: `[0:7]→0xFF` ✅ · `[8:15]`→0 · `[16:23]`→0 · `[24:31]`→0.
+
+### ⛔ PATIKRINTA IR NUMUŠTA — GFXOFF hipotezė
+`smu-feature-toggle.exe off` → `Features 0xDD602C61` (GFXOFF=OFF, CG=OFF, PG=OFF),
+`GfxFreq 1500MHz`. Rezultatai **bit identiški**. Grąžinta `on` → `0xDD602C7D`.
+**„Registrai RO nes GFX miega“ — FALSE.**
+
+### 🛑 ATRADTA KLAIDA: `>>8` ENCODING
+`gfx_v10_0.c:6557`:
+```c
+rb_addr = ring->gpu_addr >> 8;
+WREG32_SOC15(GC, 0, mmCP_RB0_BASE, rb_addr);
+```
+Ankstesni bandymai rašė raw / `>>2` / `>>4` — **`>>8` nebandytas**. Vis tiek RO.
+Tai **dar viena priežastis, kodėl ankstesni „RO“ verdiktai galėjo būti klaidingi**: encoding'o
+klaida maskuoja硬件 ribojimą. Bet ir su teisingu encoding'u — RO.
+
+### ⚠️ `0x89E0` = tikras adresas, bet `0x4FB8` (CP_ME_CNTL) = NE
+`test-tools\bar5-gfx-ring-real-test.c` **save** save skelbia `0x4FB8` = mmCP_ME_CNTL ir
+`0x4A74` = „old wrong alias“. **Matavimas atmeta šią etiketę**: `0x4A74` → `0xFFFBD9FB`
+(kanoninis „ME halted“), `0x4FB8` → `0x00000000` ir RO.
+**Tikrasis CP_ME_CNTL = `0x4A74`.** Komentarai test-failuose **netikri**.
+`CP_RB0_BASE` adresas (`0x1260 + 0x1DE0*4 = 0x89E0`) korektus (bazė 0x1260 patvirtinta
+tuo, kad 0x1260+offset'as duoda gyvas reikšmes; `0x11780` = `0x45454545` = **nuodingas
+pattern = unmapped**, todėl CP nėra SEG1).
+
+### ❌ `0xDA6x` — NE RINGAS (patvirtinta)
+`0xDA6C=0x01200000`, `0xDA78=0x00100010` — šlamas. Tikrasis blokas `0x89E0/0x8A30`.
+Ankstesni bandymai per `0xDA6x` matė **garbage, ne užrakintus duomenis**.
+
+### ❌ VMID/GART NEBUS BLOKERIS ŠIO ETAPO
+Nei vieno ringo nėra → **nėra ką „remapinti“**. VMID/GART reikšmingas tik PO ringo
+sukūrimo. AGENTS „ring BASE užrakintas BIOS adresu, todėl reikia VMID“ — **neveikia**:
+reikšmė yra `0`, ne BIOS adresas.
+
+**Kad ringas bus galimas sukurti, būtina ACL atrakinti. Post-x86 visi keliai (BAR5, SMU
+0x98, PSP proxy) uždaryti; UEFI testavo SPI_PG (uždarytas).** Vienintelis neišbandytas
+pre-x86 kelias = **UEFI rašymas į `CP_RB0_BASE`** (0x89E0). ACL programuojamas
+`PSP_BL` prieš x86, todėl ir UEFI tikėtina uždarytas — bet tai **vienintelis neišbandytas
+registras** su „svarbiausias“ reikšmingumas.
+
+---
+
+## ✅✅✅ 2026-10-01 **PSP TMR ĮRĄSTAS** — PIRMAS „SUCCESS“ (commit `d9f8326`, 4.3.0.19)
+
+```
+output\psp-ring-setup-tmr-test.exe
+  Result=0x00000001 FenceStatus=1 RespStatus=0x00000000
+  system_phy_addr=0xDF800000  buf_phy_addr(MC)=0xF41F800000
+  -> SUCCESS
+```
+**Anksčiau visada `0xFFFF0006` = TEE_ERROR_BAD_PARAMETERS.**
+
+### BUGAS, KURĮ TAIŠIAU (buvo mano kodo, ne hardware)
+`IOCTL_AMDBC250_PSP_RING_SETUP_TMR` naudojo **hardcodintą** offset'ą:
+```c
+UINT64 offset = 0x0F800000ULL;   // 0xF400000000 + 0x0F800000 = 0xF40F800000  ❌
+```
+Linux capture (`third-party\linuxinfo\naujas\amdgpu_boot.log`, VRAM `0xF400000000-0xF41FFFFFFF` = 512 MB):
+```
+[    5.587454] reserve 0x400000 from 0xf41f800000 for PSP TMR
+[    5.565196] [drm] PCIE GART of 512M enabled (table at 0x000000F41FE00000).
+```
+**Linux TMR yra NEMINUS vramTop, o VIS žemiau jo esantis „laisvas“:**
+
+| Žemiau nuo VRAM viršaus | Kiek | Kas |
+|---|---|---|
+| `vramTop-0x000000` … `-0x200000` | 2 MB | **GART table** `0xF41FE00000` |
+| `vramTop-0x200000` … `-0x400000` | 2 MB | tarpas |
+| `vramTop-0x400000` … `-0x800000` | 4 MB | **TMR** `0xF41F800000` |
+| `vramTop-0x800000` … žemyn | ~504 MB | laisvas VRAM |
+
+### ✅ TAISYTA (offset = `vramSize - 0x400000 - tmrSize`)
+```c
+UINT64 vramSize = (UINT64)DevExt->TotalVramBytes;
+UINT64 reserve = 0x400000ULL;              /* GART table + tarpas virš TMR */
+if (vramSize < 0x10000000ULL || vramSize > 0x200000000ULL) vramSize = 0x20000000ULL;
+if (tmrSize >= vramSize || reserve + tmrSize > vramSize) { /* reject */ }
+offset = vramSize - reserve - (UINT64)tmrSize;      /* 0x20000000-0x400000-0x400000 = 0x1F800000 ✅ */
+```
+🛑 **NEKOLAPSIŠT Į VIENĮ KONSTANTĄ** — `0x400000` reservacija yra tai, kas laiko TMR **aiškiai nuo GART table**; viena konstanta tyliai sugriautų tai bet kuriam `tmrSize` ≠ 4 MB.
+
+⚠️ **`TotalVramBytes` ČIA NIEKADA NEBUNA TIKRAS** — `0` (AddDevice) arba `16 GB` fallback, nes `DreamV3DetectVram` veikia tik full-init kelyje, o ir ten CMOS `UMA_SIZE` rašo į `VisibleVramBytes`, **ne** `TotalVramBytes`. Todėl filtras **visada** pakeičia į 512 MB. Tai sąmoninga (512 MB patvirtina CMOS + Linux), bet reiškia: **nesekiojus pakeistai VRAM konfigūracijai.**
+
+### KĄ ŠIS ĮRODYMAS REIŠKIA (ir ko Nereiškia)
+✅ **RODO:**
+- mūsų PSP ring'ų pateikimas **realiai veikia su VRAM adresais**;
+- `0xF41F800000` **PATIKRINAMAS ir priimamas** PSP (anksčiau ne);
+- tai **būtina sąlyga** GART table / GPU timer, nes abiems reikia „PSP rašo į mūsų VRAM“;
+- `0xFFFF0006` buvo **mūsų** bugas, ne hardware ribojimas.
+
+❌ **DAR NE REIŠKIA:** kad GPU pradėjo vykdyti ring'ą (RPTR judėjimas), kad WGP įjungtas, ar kad 3D veikia.
+**TMR ≠ GPU timer.** `RPTR` judėjimą varo **GPU timer** (VRAM 0x10000 bufferį periodiškai atnaujina PSP per MP0_MP1 duris) — **tai KITA, dar neatlikta eilutė**. Tai kitas įrankis (`GFX_CMD_ID_SETUP_TMR` ≠ timer init).
+
+### RUNBOOK (patikrinta 2026-10-01, 3 kartus)
+```
+output\gpu-init-explicit.exe            INIT OK  GPU_ID=0x9FFF9700
+output\psp-ring-submit-test.exe ringinit  Result=1 RingPa=0x7E515000 C2pmsg64=0x80020000
+output\psp-ring-setup-tmr-test.exe         RespStatus=0x00000000  MC=0xF41F800000  ✅
+```
+Saugi: nereikia `HwInitGart/Vm`, nerašo į GC/UMC, neužkina SMU. `HwInitMaxStep=12` liko nepakeistas, nes šio kelio nenaudoja.
+
+**Kitas prioritetas: GPU timer (MP0_MP1 duris) → tada VMID/PCIE GART. NE flash, NE SPI_PG bandymai.**
+
+---
+
 ## 🔥 2026-10-01 UEFI GRANDINĖ **DARO** — TAČIAK ŽINAU, KAD REIKIA DARBO
 
 **Išsami dokumentacija: `docs\UEFI-SMU-PATCHING-AND-TELEMETRY.md` §1A**
