@@ -114,3 +114,6 @@ wddm-ps5/truncate.ps1
 wddm-ps5/update-driver.bat
 
 
+
+# UEFI WGP probe build products (source and the generated patches.data.h are tracked)
+uefi/wgp-test/output/
