@@ -1,0 +1,190 @@
+Puiku. Paleisk CachyOS terminale:
+
+sudo cat /sys/kernel/debug/dri/0/amdgpu_regs | grep -iE "vm_context0_cntl|vm_context0_page_table_base|vm_l2_cntl|mc_vm_mx_l1_tlb_cntl|cp_rb0_base|cp_rb0_cntl|spi_pg_enable_static_wgp|cc_gc_shader_array"
+Jei neranda drosią — platesnė:
+
+sudo cat /sys/kernel/debug/dri/0/amdgpu_regs | grep -iE "vm_context|vm_l2|l1_tlb"
+Ir jei galima, ši — parodo ar VM apskritai įjungta (tiksliai tai, ko ieškome):
+
+sudo cat /sys/kernel/debug/dri/0/amdgpu_regs | grep -A2 -i "vm_context0_cntl"
+
+
+
+
+
+           .-------------------------:                    keshas@cachyos
+          .+=========================.                    --------------
+         :++===++==================-       :++-           OS: CachyOS x86_64
+        :*++====+++++=============-        .==:           Host: AMD BC-250
+       -*+++=====+***++==========:                        Kernel: Linux 7.3.0-rc3-1-cachyos-rc
+      =*++++========------------:                         Uptime: 33 seconds
+     =*+++++=====-                     ...                Packages: 10 (flatpak), 1748 (pacman)
+   .+*+++++=-===:                    .=+++=:              Shell: fish 4.9.3
+  :++++=====-==:                     -*****+              Display (LEN T27h-20): 2560x1440 in 27", 60 Hz [External]
+ :++========-=.                      .=+**+.              Desktop Environment: KDE Plasma 6.7.5
+.+==========-.                          .                 Window Manager: KWin (Wayland)
+ :+++++++====-                                .--==-.     WM Theme: Breeze
+  :++==========.                             :+++++++:    Theme: Breeze (Dark) [Qt], Breeze-Dark [GTK2], Breeze [GTK3]
+   .-===========.                            =*****+*+    Icons: breeze-dark [Qt], breeze-dark [GTK2/3/4]
+    .-===========:                           .+*****+:    Font: Noto Sans (10pt) [Qt], Noto Sans (10pt) [GTK2/3/4]
+      -=======++++:::::::::::::::::::::::::-:  .---:      Cursor: breeze (24px)
+       :======++++====+++******************=.             Terminal: konsole 26.8.1
+        :=====+++==========++++++++++++++*-               CPU: AMD BC-250 (16) @ 3.20 GHz
+         .====++==============++++++++++*-                GPU: AMD BC-250 [Integrated]
+          .===+==================+++++++:                 Memory: 6.22 GiB / 14.84 GiB (42%)
+           .-=======================+++:                  Swap: 0 B / 16.00 GiB (0%)
+             ..........................                   Disk (/): 403.53 GiB / 425.54 GiB (95%) - btrfs
+                                                          Disk (/run/media/keshas/MISO_EFI): 162.00 KiB / 3.98 MiB (4%) - vfat [External]
+                                                          Disk (/run/media/keshas/USB): 275.11 MiB / 960.00 MiB (29%) - vfat [External]
+                                                          Local IP (wlan0): 192.168.2.126/24
+                                                          Locale: en_US.UTF-8
+
+
+
+~
+❯ sudo cat /sys/kernel/debug/dri/0/amdgpu_regs | grep -iE "vm_context0_cntl|vm_context0_page_table_base|vm_l2_cntl|mc_vm_mx_l1_tlb_cntl|cp_rb0_base|cp_rb0_cntl|spi_pg_enable_static_wgp|cc_gc_shader_array"
+
+[sudo] password for keshas:
+cat: /sys/kernel/debug/dri/0/amdgpu_regs: No such file or directory
+
+su sudo cat /sys/kernel/debug/dri/1/amdgpu_regs * linux irgi uzlusta !!!! butent skaitant sita faila amdgpu_regs
+
+❯ sudo ls -l /sys/kernel/debug/dri/
+total 0
+drwxr-xr-x 11 root root 0 Oct  1 18:43 0000:01:00.0
+lrwxrwxrwx  1 root root 0 Oct  1 18:43 1 -> 0000:01:00.0
+lrwxrwxrwx  1 root root 0 Oct  1 18:43 128 -> 0000:01:00.0
+-r--r--r--  1 root root 0 Oct  1 18:43 bridges
+drwxr-xr-x  2 root root 0 Oct  1 18:44 client-11
+drwxr-xr-x  2 root root 0 Oct  1 18:44 client-15
+drwxr-xr-x  2 root root 0 Oct  1 18:44 client-16
+drwxr-xr-x  2 root root 0 Oct  1 18:44 client-18
+drwxr-xr-x  2 root root 0 Oct  1 18:44 client-19
+drwxr-xr-x  2 root root 0 Oct  1 18:43 client-2
+drwxr-xr-x  2 root root 0 Oct  1 18:44 client-20
+drwxr-xr-x  2 root root 0 Oct  1 18:44 client-26
+drwxr-xr-x  2 root root 0 Oct  1 18:44 client-28
+drwxr-xr-x  2 root root 0 Oct  1 18:44 client-29
+drwxr-xr-x  2 root root 0 Oct  1 18:43 client-3
+drwxr-xr-x  2 root root 0 Oct  1 18:44 client-30
+drwxr-xr-x  2 root root 0 Oct  1 18:44 client-31
+drwxr-xr-x  2 root root 0 Oct  1 18:44 client-39
+drwxr-xr-x  2 root root 0 Oct  1 18:44 client-41
+drwxr-xr-x  2 root root 0 Oct  1 18:43 client-5
+
+
+root@cachyos 0000:01:00.0]# sudo ls -l /sys/kernel/debug/dri/1/
+total 0
+--w------- 1 root root         0 Oct  1 18:43 amdgpu_benchmark
+-rw------- 1 root root         0 Oct  1 18:43 amdgpu_compute_sched_mask
+-r--r--r-- 1 root root         0 Oct  1 18:43 amdgpu_discovery
+-r--r--r-- 1 root root         0 Oct  1 18:43 amdgpu_dm_capabilities
+-rw-r--r-- 1 root root         0 Oct  1 18:43 amdgpu_dm_dcc_en
+-rw-r--r-- 1 root root         0 Oct  1 18:43 amdgpu_dm_disable_hpd
+-rw-r--r-- 1 root root         0 Oct  1 18:43 amdgpu_dm_dmcub_trace_event_en
+-rw-r--r-- 1 root root         0 Oct  1 18:43 amdgpu_dm_dmub_fw_state
+-rw-r--r-- 1 root root         0 Oct  1 18:43 amdgpu_dm_dmub_tracebuffer
+-rw-r--r-- 1 root root         0 Oct  1 18:43 amdgpu_dm_dmub_trace_mask
+-rw-r--r-- 1 root root         0 Oct  1 18:43 amdgpu_dm_dp_ignore_cable_id
+-rw-r--r-- 1 root root         0 Oct  1 18:43 amdgpu_dm_dp_set_mst_en_for_sst
+-rw-r--r-- 1 root root         0 Oct  1 18:43 amdgpu_dm_dtn_log
+-rw-r--r-- 1 root root         0 Oct  1 18:43 amdgpu_dm_force_timing_sync
+-rw-r--r-- 1 root root         0 Oct  1 18:43 amdgpu_dm_skip_detection_link_training
+-rw-r--r-- 1 root root         0 Oct  1 18:43 amdgpu_dm_trigger_hpd_mst
+-rw-r--r-- 1 root root         0 Oct  1 18:43 amdgpu_dm_visual_confirm
+--w------- 1 root root         0 Oct  1 18:43 amdgpu_error_comp_1.0.0
+--w------- 1 root root         0 Oct  1 18:43 amdgpu_error_comp_1.0.1
+--w------- 1 root root         0 Oct  1 18:43 amdgpu_error_comp_1.1.0
+--w------- 1 root root         0 Oct  1 18:43 amdgpu_error_comp_1.1.1
+--w------- 1 root root         0 Oct  1 18:43 amdgpu_error_comp_1.2.0
+--w------- 1 root root         0 Oct  1 18:43 amdgpu_error_comp_1.2.1
+--w------- 1 root root         0 Oct  1 18:43 amdgpu_error_comp_1.3.0
+--w------- 1 root root         0 Oct  1 18:43 amdgpu_error_comp_1.3.1
+--w------- 1 root root         0 Oct  1 18:43 amdgpu_error_gfx_0.0.0
+--w------- 1 root root         0 Oct  1 18:43 amdgpu_error_kiq_0.2.1.0
+--w------- 1 root root         0 Oct  1 18:43 amdgpu_error_sdma0
+--w------- 1 root root         0 Oct  1 18:43 amdgpu_error_sdma1
+-r-------- 1 root root         0 Oct  1 18:43 amdgpu_evict_gtt
+-r-------- 1 root root         0 Oct  1 18:43 amdgpu_evict_vram
+-r--r--r-- 1 root root         0 Oct  1 18:43 amdgpu_fence_info
+-r--r--r-- 1 root root         0 Oct  1 18:43 amdgpu_firmware_info
+--w------- 1 root root         0 Oct  1 18:43 amdgpu_force_sclk
+-r-------- 1 root root         0 Oct  1 18:43 amdgpu_gca_config
+-r--r--r-- 1 root root         0 Oct  1 18:43 amdgpu_gds_mm
+-r--r--r-- 1 root root         0 Oct  1 18:43 amdgpu_gem_info
+-r-------- 1 root root         0 Oct  1 18:43 amdgpu_gfxoff
+-r-------- 1 root root         0 Oct  1 18:43 amdgpu_gfxoff_count
+-r-------- 1 root root         0 Oct  1 18:43 amdgpu_gfxoff_residency
+-r-------- 1 root root         0 Oct  1 18:43 amdgpu_gfxoff_status
+-r-------- 1 root root         0 Oct  1 18:43 amdgpu_gpr
+-r-------- 1 root root         0 Oct  1 18:43 amdgpu_gprwave
+-r--r--r-- 1 root root         0 Oct  1 18:43 amdgpu_gpu_recover
+-r--r--r-- 1 root root         0 Oct  1 18:43 amdgpu_gtt_mm
+-r--r--r-- 1 root root         0 Oct  1 18:43 amdgpu_gws_mm
+-r--r--r-- 1 root root         0 Oct  1 18:43 amdgpu_iomem
+-r--r--r-- 1 root root      2048 Oct  1 18:43 amdgpu_mqd_comp_1.0.0
+-r--r--r-- 1 root root      2048 Oct  1 18:43 amdgpu_mqd_comp_1.0.1
+-r--r--r-- 1 root root      2048 Oct  1 18:43 amdgpu_mqd_comp_1.1.0
+-r--r--r-- 1 root root      2048 Oct  1 18:43 amdgpu_mqd_comp_1.1.1
+-r--r--r-- 1 root root      2048 Oct  1 18:43 amdgpu_mqd_comp_1.2.0
+-r--r--r-- 1 root root      2048 Oct  1 18:43 amdgpu_mqd_comp_1.2.1
+-r--r--r-- 1 root root      2048 Oct  1 18:43 amdgpu_mqd_comp_1.3.0
+-r--r--r-- 1 root root      2048 Oct  1 18:43 amdgpu_mqd_comp_1.3.1
+-r--r--r-- 1 root root      2048 Oct  1 18:43 amdgpu_mqd_gfx_0.0.0
+-r--r--r-- 1 root root         0 Oct  1 18:43 amdgpu_mqd_kiq_0.2.1.0
+-r--r--r-- 1 root root         0 Oct  1 18:43 amdgpu_mst_topology
+-r--r--r-- 1 root root         0 Oct  1 18:43 amdgpu_oa_mm
+-r--r--r-- 1 root root         0 Oct  1 18:43 amdgpu_pm_info
+-rw------- 1 root root         0 Oct  1 18:43 amdgpu_preempt_ib
+-r-------- 1 root root    524288 Oct  1 18:43 amdgpu_regs
+-r-------- 1 root root         0 Oct  1 18:43 amdgpu_regs2
+-r-------- 1 root root         0 Oct  1 18:43 amdgpu_regs_didt
+-r-------- 1 root root         0 Oct  1 18:43 amdgpu_regs_pcie
+-r-------- 1 root root         0 Oct  1 18:43 amdgpu_regs_pcie64
+-r-------- 1 root root         0 Oct  1 18:43 amdgpu_regs_smc
+-r--r--r-- 1 root root      8204 Oct  1 18:43 amdgpu_ring_comp_1.0.0
+-r--r--r-- 1 root root      8204 Oct  1 18:43 amdgpu_ring_comp_1.0.1
+-r--r--r-- 1 root root      8204 Oct  1 18:43 amdgpu_ring_comp_1.1.0
+-r--r--r-- 1 root root      8204 Oct  1 18:43 amdgpu_ring_comp_1.1.1
+-r--r--r-- 1 root root      8204 Oct  1 18:43 amdgpu_ring_comp_1.2.0
+-r--r--r-- 1 root root      8204 Oct  1 18:43 amdgpu_ring_comp_1.2.1
+-r--r--r-- 1 root root      8204 Oct  1 18:43 amdgpu_ring_comp_1.3.0
+-r--r--r-- 1 root root      8204 Oct  1 18:43 amdgpu_ring_comp_1.3.1
+-r--r--r-- 1 root root      8204 Oct  1 18:43 amdgpu_ring_gfx_0.0.0
+-r--r--r-- 1 root root   1048588 Oct  1 18:43 amdgpu_ring_kiq_0.2.1.0
+-r--r--r-- 1 root root      8204 Oct  1 18:43 amdgpu_ring_sdma0
+-r--r--r-- 1 root root      8204 Oct  1 18:43 amdgpu_ring_sdma1
+-r--r--r-- 1 root root         0 Oct  1 18:43 amdgpu_sa_info
+-rw------- 1 root root         0 Oct  1 18:43 amdgpu_sdma_sched_mask
+-r-------- 1 root root         0 Oct  1 18:43 amdgpu_sensors
+-rw------- 1 root root         0 Oct  1 18:43 amdgpu_smu_debug
+-r-------- 1 root root         0 Oct  1 18:43 amdgpu_test_ib
+-r--r--r-- 1 root root         0 Oct  1 18:43 amdgpu_vbios
+-r--r--r-- 1 root root         0 Oct  1 18:43 amdgpu_vm_info
+-r--r--r-- 1 root root 536870912 Oct  1 18:43 amdgpu_vram
+-r--r--r-- 1 root root         0 Oct  1 18:43 amdgpu_vram_mm
+-r-------- 1 root root         0 Oct  1 18:43 amdgpu_wave
+-r--r--r-- 1 root root         0 Oct  1 18:43 clients
+drwxr-xr-x 3 root root         0 Oct  1 18:43 crtc-0
+drwxr-xr-x 3 root root         0 Oct  1 18:43 crtc-1
+drwxr-xr-x 2 root root         0 Oct  1 18:43 DP-1
+drwxr-xr-x 2 root root         0 Oct  1 18:43 DP-2
+drwxr-xr-x 2 root root         0 Oct  1 18:43 encoder-0
+drwxr-xr-x 2 root root         0 Oct  1 18:43 encoder-1
+drwxr-xr-x 2 root root         0 Oct  1 18:43 encoder-2
+drwxr-xr-x 2 root root         0 Oct  1 18:43 encoder-3
+-r--r--r-- 1 root root         0 Oct  1 18:43 framebuffer
+-r--r--r-- 1 root root         0 Oct  1 18:43 gem_names
+-r--r--r-- 1 root root         0 Oct  1 18:43 internal_clients
+-r--r--r-- 1 root root         0 Oct  1 18:43 name
+-r--r--r-- 1 root root  33554432 Oct  1 18:43 psp_spirom_dump
+-r--r--r-- 1 root root         0 Oct  1 18:43 state
+drwxr-xr-x 2 root root         0 Oct  1 18:43 ta_if
+-r--r--r-- 1 root root         0 Oct  1 18:43 ttm_page_pool
+-r--r--r-- 1 root root         0 Oct  1 18:43 unique_id
+-r--r--r-- 1 root root         0 Oct  1 18:43 unitid
+
+
+
+
+

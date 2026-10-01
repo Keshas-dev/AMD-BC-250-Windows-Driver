@@ -1,5 +1,36 @@
 # AMD BC-250 Windows Driver — Agent Notes
 
+## ⛔⛔ SKAITYTI PIRMA: `docs/BC250-LINUX-RESEARCH-FINDINGS.md` (2026-10-01)
+
+**Šis skyrius apveria kelias ankstesnes išvadas. Kol neperskaitysi — neplanuok.**
+
+| 🛑 KLAIDA | ✅ TIKRA |
+|---|---|
+| „SPI_PG SOS-locked“ | `0x1f` **nuo VBIOS/POST** (P5.00). Tikras skirtumas — BIOS versija, ne OS |
+| „Rašyti `RLC_PG` kad WGP liktų įjungti“ | **no-op** — jau `0x1f` |
+| „TMR — kitas prioritetas“ | TMR = **4 MB `0xFF`** net veikiantī Linux. PSP į jį nerašo |
+| `MC_VM_AGP_*` = `0x9528..` | **Kitame bloke.** Tikri MMHUB: `0x6A0B8/BC/C0` |
+| `aper_base` = BAR0 | APU → `gfxhub->get_mc_fb_offset()` |
+| „WGP atrakinti“ kaip tikslas | Vartai **jau atidari**. Tikras kaltininkas — **TLB niekada neinvaliduojamas** |
+
+**Tikras priežastis (išmatuota 14 bootų):** PTE **teisinga**, bet ATC (adreso kešas)
+**nėra niekada užtaguojama** → GPU transliuoja per **ankstesnės kartos** mapinimą.
+80 VMID eilučių / 5 dumpai — **visos `ATC=INVAL`, nė vienos galiojančios**.
+
+**Patikrintas sprendimas (Linux):** ne invaliduoti TLB, o **perstatyti runlist** —
+`13/18 dirty (72%) → 0/18 (0%)`, p=3.7e-06. Reikia KFD `dqm_lock` — **mums to nėra**.
+
+**Radau 2 REALIUS BUG'US mūsų kode** (nebandoma, o patikrinta kodo):
+1. Aktyvus kelias (`hw_init_extended.c`) **visai neįrodo** `DreamV3LoadAllFirmware()`
+2. `fw_load.c:147` sako „IC_BASE DMA", `:231` sako „NE naudojame IC_BASE";
+   `DreamV3LoadSingleFirmware()` **neegzistuoja**
+
+**⛔ SAUGUMO:** `/sys/kernel/debug/dri/*/amdgpu_regs` **dragina mašiną**
+(nebent/nebandyti). Mūsų pat **read-only** `mmhub-vm-probe` ją **uždrogo** —
+nepatvirtinto MMIO adreso skaitymas čia nėra saugus net skaitymui.
+
+---
+
 ## 📌 VM IDĖJA: `ENABLE_CONTEXT` — vienas neatidarytas bitas (2026-10-01)
 
 ### Ką nurodė Linux šaltinis (`gfxhub_v1_0.c`, atsiųstas į `amd_smu_reverse_engineering\upstream\`)

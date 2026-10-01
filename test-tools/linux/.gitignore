@@ -1,0 +1,8 @@
+# Linux amdgpu debugfs dumps. Useful as evidence, far too large for git.
+# The 512 MB amdgpu_vram dump in particular is regenerated on demand:
+#   sudo dd if=/sys/kernel/debug/dri/1/amdgpu_vram of=amdgpu_vram bs=1M count=512
+# Targeted reads (GART table, TMR) are ~1-4 MB and are committed instead.
+test-tools/linux/New/linux/amdgpu_vram
+test-tools/linux/**/*.bin
+
+amdgpu_vram
